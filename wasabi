@@ -1,0 +1,528 @@
+#!/usr/bin/env python3
+"""wasabi - drive a real Amiga over the network.
+
+Talks to wasabid on the Amiga side. See PROTOCOL.md for the wire format.
+
+    wasabi run "Version FULL"
+    wasabi put ccon-handler L:ccon-handler
+    wasabi deploy ccon-handler L:ccon-handler --reboot
+    wasabi debug
+    wasabi snoop --task cfile
+"""
+
+import argparse
+import os
+import socket
+import struct
+import sys
+import time
+
+VERSION = 1
+MAX_PAYLOAD = 65536
+
+# --- tags -------------------------------------------------------------
+
+HELLO, WELCOME, ERR, OK, PING, PONG = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
+PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
+RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
+DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
+REBOOT, INFO = 0x40, 0x41
+
+TAGNAMES = {v: k for k, v in list(globals().items()) if isinstance(v, int)}
+
+# Amiga DateStamp epoch.
+AMIGA_EPOCH = 252460800  # 1978-01-01 00:00:00 UTC as a Unix timestamp
+
+# Protection bits: the low nibble is ACTIVE LOW (set == denied).
+PROT_DEFAULT = 0xFFFFFFFF
+
+
+class WasabiError(Exception):
+    pass
+
+
+# --- wire -------------------------------------------------------------
+
+
+def pack_str(s):
+    b = s.encode("latin-1", "replace") if isinstance(s, str) else s
+    return struct.pack(">H", len(b)) + b
+
+
+def unpack_str(buf, off=0):
+    (n,) = struct.unpack_from(">H", buf, off)
+    off += 2
+    return buf[off:off + n].decode("latin-1"), off + n
+
+
+class Conn:
+    def __init__(self, host, port, key, timeout=15.0):
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.buf = b""
+        self.send(HELLO, struct.pack(">H", VERSION) + pack_str(key))
+        tag, payload = self.recv()
+        if tag == ERR:
+            raise WasabiError(self._errtext(payload))
+        if tag != WELCOME:
+            raise WasabiError("unexpected reply to HELLO: tag 0x%02x" % tag)
+        (remote_version,) = struct.unpack_from(">H", payload, 0)
+        if remote_version != VERSION:
+            raise WasabiError(
+                "protocol mismatch: wasabid speaks v%d, this client speaks v%d"
+                % (remote_version, VERSION))
+        self.banner, _ = unpack_str(payload, 2)
+
+    def send(self, tag, payload=b""):
+        if len(payload) > MAX_PAYLOAD:
+            raise WasabiError("frame too large: %d bytes" % len(payload))
+        self.sock.sendall(struct.pack(">BI", tag, len(payload)) + payload)
+
+    def _fill(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise WasabiError("connection closed by the Amiga")
+            self.buf += chunk
+
+    def recv(self):
+        self._fill(5)
+        tag, length = struct.unpack(">BI", self.buf[:5])
+        if length > MAX_PAYLOAD:
+            raise WasabiError("oversized frame from wasabid: %d bytes" % length)
+        self._fill(5 + length)
+        payload = self.buf[5:5 + length]
+        self.buf = self.buf[5 + length:]
+        return tag, payload
+
+    @staticmethod
+    def _errtext(payload):
+        (code,) = struct.unpack_from(">I", payload, 0)
+        msg, _ = unpack_str(payload, 4)
+        return "%s (AmigaDOS error %d)" % (msg, code) if code else msg
+
+    def expect_ok(self):
+        tag, payload = self.recv()
+        if tag == ERR:
+            raise WasabiError(self._errtext(payload))
+        if tag != OK:
+            raise WasabiError("expected OK, got tag 0x%02x" % tag)
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+# --- helpers ----------------------------------------------------------
+
+
+def amiga_date(days, mins, ticks):
+    ts = AMIGA_EPOCH + days * 86400 + mins * 60 + ticks // 50
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def protstr(bits):
+    """Render AmigaDOS protection bits the way List does: hsparwed."""
+    out = []
+    for i, ch in enumerate("hsparwed"):
+        if i < 4:  # h s p a - active high
+            out.append(ch if bits & (1 << (7 - i)) else "-")
+        else:      # r w e d - active LOW
+            out.append("-" if bits & (1 << (7 - i)) else ch)
+    return "".join(out)
+
+
+def drain_to_end(conn, sink):
+    """Collect DATA frames until END. Returns on END, raises on ERR."""
+    while True:
+        tag, payload = conn.recv()
+        if tag == DATA:
+            sink(payload)
+        elif tag == END:
+            return
+        elif tag == ERR:
+            raise WasabiError(conn._errtext(payload))
+        else:
+            raise WasabiError("unexpected tag 0x%02x in data stream" % tag)
+
+
+# --- commands ---------------------------------------------------------
+
+
+def cmd_ping(conn, args):
+    t0 = time.time()
+    conn.send(PING)
+    tag, _ = conn.recv()
+    if tag != PONG:
+        raise WasabiError("no PONG")
+    print("%s - %.1f ms" % (conn.banner, (time.time() - t0) * 1000))
+
+
+def cmd_info(conn, args):
+    conn.send(INFO)
+    drain_to_end(conn, lambda b: sys.stdout.write(b.decode("latin-1")))
+
+
+def cmd_ls(conn, args):
+    conn.send(LS, pack_str(args.path))
+    text = []
+    drain_to_end(conn, lambda b: text.append(b))
+    entries = []
+    for line in b"".join(text).decode("latin-1").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(" ", 6)
+        if len(parts) < 7:
+            continue
+        kind, size, bits, days, mins, ticks, name = parts
+        entries.append((kind, int(size), int(bits), amiga_date(
+            int(days), int(mins), int(ticks)), name))
+    entries.sort(key=lambda e: (e[0] != "d", e[4].lower()))
+    for kind, size, bits, when, name in entries:
+        print("%s %8s %s  %s  %s" % (
+            "d" if kind == "d" else "-",
+            "(dir)" if kind == "d" else size,
+            protstr(bits), when, name))
+    sys.stdout.flush()
+    print("%d entries in %s" % (len(entries), args.path or "the root"),
+          file=sys.stderr)
+
+
+def cmd_put(conn, args):
+    do_put(conn, args.local, args.remote, quiet=args.quiet)
+
+
+def do_put(conn, local, remote, quiet=False):
+    with open(local, "rb") as fh:
+        data = fh.read()
+    conn.send(PUT, struct.pack(">II", len(data), PROT_DEFAULT) + pack_str(remote))
+    sent = 0
+    while sent < len(data):
+        chunk = data[sent:sent + MAX_PAYLOAD]
+        conn.send(DATA, chunk)
+        sent += len(chunk)
+    conn.send(END)
+    conn.expect_ok()
+    if not quiet:
+        print("%s -> %s (%d bytes)" % (local, remote, len(data)), file=sys.stderr)
+
+
+def cmd_get(conn, args):
+    conn.send(GET, pack_str(args.remote))
+    out = open(args.local, "wb") if args.local != "-" else sys.stdout.buffer
+    total = [0]
+
+    def sink(b):
+        out.write(b)
+        total[0] += len(b)
+
+    try:
+        drain_to_end(conn, sink)
+    finally:
+        if out is not sys.stdout.buffer:
+            out.close()
+    if args.local != "-":
+        print("%s -> %s (%d bytes)" % (args.remote, args.local, total[0]),
+              file=sys.stderr)
+
+
+def cmd_run(conn, args):
+    return do_run(conn, args.command, merge=args.merge, detach=args.detach)
+
+
+def do_run(conn, command, merge=False, detach=False):
+    flags = (1 if merge else 0) | (2 if detach else 0)
+    conn.send(RUN, struct.pack(">I", flags) + pack_str(command))
+    while True:
+        tag, payload = conn.recv()
+        if tag == STDOUT:
+            sys.stdout.write(payload.decode("latin-1"))
+            sys.stdout.flush()
+        elif tag == STDERR:
+            sys.stderr.write(payload.decode("latin-1"))
+            sys.stderr.flush()
+        elif tag == EXIT:
+            rc, secondary = struct.unpack(">II", payload)
+            if rc and secondary:
+                print("[rc %d, IoErr %d]" % (rc, secondary), file=sys.stderr)
+            return rc
+        elif tag == ERR:
+            raise WasabiError(conn._errtext(payload))
+        else:
+            raise WasabiError("unexpected tag 0x%02x during RUN" % tag)
+
+
+def cmd_deploy(conn, args):
+    do_put(conn, args.local, args.remote, quiet=False)
+    rc = 0
+    if args.run:
+        rc = do_run(conn, args.run)
+    if args.reboot:
+        print("rebooting the Amiga...", file=sys.stderr)
+        do_reboot(conn, cold=args.cold)
+    return rc
+
+
+def cmd_stream(conn, args):
+    if args.__dict__.get("task") is not None:
+        conn.send(SNOOP, struct.pack(">I", 0) + pack_str(args.task or ""))
+        label = "snoop"
+    else:
+        conn.send(DEBUG, struct.pack(">I", 0))
+        label = "debug"
+    print("[%s stream open - Ctrl-C to stop]" % label, file=sys.stderr)
+    conn.sock.settimeout(None)
+    last_seq = None
+    try:
+        while True:
+            tag, payload = conn.recv()
+            if tag == LOG:
+                stream, seq = struct.unpack_from(">II", payload, 0)
+                text, _ = unpack_str(payload, 8)
+                if last_seq is not None and seq != last_seq + 1:
+                    print("[%d frames lost]" % (seq - last_seq - 1),
+                          file=sys.stderr)
+                last_seq = seq
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            elif tag == ERR:
+                raise WasabiError(conn._errtext(payload))
+    except KeyboardInterrupt:
+        print("\n[%s stream closed]" % label, file=sys.stderr)
+    return 0
+
+
+def do_reboot(conn, cold=False):
+    conn.send(REBOOT, struct.pack(">I", 1 if cold else 0))
+    try:
+        conn.expect_ok()
+    except WasabiError:
+        pass  # the machine may go down before the reply lands
+
+
+def cmd_reboot(conn, args):
+    do_reboot(conn, cold=args.cold)
+    print("reboot sent", file=sys.stderr)
+
+
+def cmd_del(conn, args):
+    conn.send(DEL, pack_str(args.path))
+    conn.expect_ok()
+
+
+def cmd_mkdir(conn, args):
+    conn.send(MKDIR, pack_str(args.path))
+    conn.expect_ok()
+
+
+# --- config and dispatch ----------------------------------------------
+
+
+DISCOVERY_PROBE = b"WASABI?1\n"
+CACHE = os.path.expanduser("~/.cache/wasabi/last-host")
+
+
+def discover(timeout=0.5, port=1234):
+    """Broadcast a probe and collect every wasabid that answers."""
+    found = {}
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(timeout)
+    try:
+        try:
+            sock.sendto(DISCOVERY_PROBE, ("255.255.255.255", port))
+        except OSError:
+            pass
+        sock.sendto(DISCOVERY_PROBE, ("127.0.0.1", port))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sock.settimeout(max(deadline - time.time(), 0.01))
+            try:
+                data, addr = sock.recvfrom(1024)
+            except (socket.timeout, OSError):
+                break
+            line = data.decode("latin-1", "replace").strip()
+            if not line.startswith("WASABI!1 "):
+                continue
+            parts = line[9:].split(" ", 2)
+            if len(parts) < 2:
+                continue
+            name, tcpport = parts[0], int(parts[1])
+            banner = parts[2] if len(parts) > 2 else ""
+            found[addr[0]] = (name, tcpport, banner)
+    finally:
+        sock.close()
+    return found
+
+
+def cached_host():
+    try:
+        with open(CACHE) as fh:
+            host, port = fh.read().split()
+            return host, int(port)
+    except (OSError, ValueError):
+        return None
+
+
+def cache_host(host, port):
+    try:
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        with open(CACHE, "w") as fh:
+            fh.write("%s %d\n" % (host, port))
+    except OSError:
+        pass
+
+
+def resolve_target(args):
+    """Work out which Amiga to talk to: --host, then cache, then probe."""
+    if args.host:
+        return args.host, args.port
+    hit = cached_host()
+    if hit:
+        try:
+            socket.create_connection(hit, timeout=1.0).close()
+            return hit
+        except OSError:
+            pass  # moved or off - fall through to a fresh probe
+    found = discover(port=args.port)
+    if not found:
+        raise WasabiError(
+            "no wasabid answered on this network.\n"
+            "  Is it running? Try: wasabi --host <ip> ping")
+    if len(found) > 1:
+        lines = ["several Amigas answered - pick one with --host:"]
+        for ip, (name, port, banner) in sorted(found.items()):
+            lines.append("  %-15s %s  %s" % (ip, name, banner))
+        raise WasabiError("\n".join(lines))
+    ip, (name, port, _banner) = next(iter(found.items()))
+    cache_host(ip, port)
+    return ip, port
+
+
+def cmd_discover(args):
+    found = discover(port=args.port, timeout=1.0)
+    if not found:
+        print("no wasabid found on this network", file=sys.stderr)
+        return 1
+    for ip, (name, port, banner) in sorted(found.items()):
+        print("%-15s :%-5d %-12s %s" % (ip, port, name, banner))
+    return 0
+
+
+def load_config():
+    cfg = {}
+    path = os.path.expanduser("~/.config/wasabi/config")
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return cfg
+
+
+def main(argv=None):
+    cfg = load_config()
+    p = argparse.ArgumentParser(
+        prog="wasabi", description="Drive a real Amiga over the network.")
+    p.add_argument("--host", default=os.environ.get(
+        "WASABI_HOST", cfg.get("host")),
+        help="Amiga address; omitted means find it by broadcast")
+    p.add_argument("--port", type=int, default=int(os.environ.get(
+        "WASABI_PORT", cfg.get("port", 1234))))
+    p.add_argument("--key", default=os.environ.get(
+        "WASABI_KEY", cfg.get("key", "")))
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("discover", help="find Amigas on this network"
+                   ).set_defaults(fn=cmd_discover, no_conn=True)
+    sub.add_parser("ping", help="check the daemon is alive").set_defaults(
+        fn=cmd_ping)
+    sub.add_parser("info", help="machine and daemon info").set_defaults(
+        fn=cmd_info)
+
+    s = sub.add_parser("ls", help="list a drawer")
+    s.add_argument("path", nargs="?", default="")
+    s.set_defaults(fn=cmd_ls)
+
+    s = sub.add_parser("put", help="upload a file")
+    s.add_argument("local")
+    s.add_argument("remote")
+    s.add_argument("-q", "--quiet", action="store_true")
+    s.set_defaults(fn=cmd_put)
+
+    s = sub.add_parser("get", help="download a file ('-' for stdout)")
+    s.add_argument("remote")
+    s.add_argument("local")
+    s.set_defaults(fn=cmd_get)
+
+    s = sub.add_parser("run", help="execute a command, streaming its output")
+    s.add_argument("command")
+    s.add_argument("--merge", action="store_true",
+                   help="merge stderr into stdout")
+    s.add_argument("--detach", action="store_true",
+                   help="do not wait for the command to finish")
+    s.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("deploy", help="upload, then optionally run or reboot")
+    s.add_argument("local")
+    s.add_argument("remote")
+    s.add_argument("--run", metavar="CMD")
+    s.add_argument("--reboot", action="store_true")
+    s.add_argument("--cold", action="store_true")
+    s.set_defaults(fn=cmd_deploy)
+
+    sub.add_parser("debug", help="live KPrintF stream").set_defaults(
+        fn=cmd_stream)
+
+    s = sub.add_parser("snoop", help="live DOS call trace")
+    s.add_argument("--task", default="", help="AmigaDOS pattern to filter on")
+    s.set_defaults(fn=cmd_stream)
+
+    s = sub.add_parser("reboot", help="reboot the Amiga")
+    s.add_argument("--cold", action="store_true")
+    s.set_defaults(fn=cmd_reboot)
+
+    s = sub.add_parser("del", help="delete a file")
+    s.add_argument("path")
+    s.set_defaults(fn=cmd_del)
+
+    s = sub.add_parser("mkdir", help="create a drawer")
+    s.add_argument("path")
+    s.set_defaults(fn=cmd_mkdir)
+
+    args = p.parse_args(argv)
+
+    # NB: 'local' is a positional in put/get - do not reuse that name here.
+    if getattr(args, "no_conn", False):
+        return args.fn(args) or 0
+
+    try:
+        host, port = resolve_target(args)
+    except WasabiError as exc:
+        print("wasabi: %s" % exc, file=sys.stderr)
+        return 2
+    try:
+        conn = Conn(host, port, args.key)
+    except (OSError, WasabiError) as exc:
+        print("wasabi: cannot reach %s:%d - %s" % (host, port, exc),
+              file=sys.stderr)
+        return 2
+    try:
+        return args.fn(conn, args) or 0
+    except WasabiError as exc:
+        print("wasabi: %s" % exc, file=sys.stderr)
+        return 1
+    except BrokenPipeError:
+        return 1
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
