@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Exercise the wasabi client against the host mock daemon. No Amiga
-# required - this is the harness-first road the rest of the suite uses.
+# required - prove the client on the host before trusting it on iron.
 set -u
 
 cd "$(dirname "$0")/.."

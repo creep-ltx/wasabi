@@ -1,7 +1,6 @@
-# wasabid - cross-built with Bebbo's gcc.
-# NB: the toolchain lives under $(HOME)/opt/amiga on this box, not
-# /opt/amiga (which is what cdiff's Makefile still says, and why that
-# one no longer builds here).
+# wasabid - cross-built with Bebbo's m68k-amigaos-gcc.
+# The toolchain lives under $(HOME)/opt/amiga on this box, not
+# /opt/amiga; override CC if yours is elsewhere.
 
 CC      = $(HOME)/opt/amiga/bin/m68k-amigaos-gcc
 # -Wno-pointer-sign: every string in the NDK is 'unsigned char *', so

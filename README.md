@@ -161,9 +161,9 @@ It is both the test fixture and the reference the C daemon was written
 against: where the two disagree about the wire, the mock is what the
 client was proven with.
 
-The toolchain lives at `$(HOME)/opt/amiga/bin` on this box. (Note for
-future me: `cdiff/Makefile` still points at `/opt/amiga`, which no longer
-exists — that build is currently broken.)
+The cross-compiler is Bebbo's `m68k-amigaos-gcc`, at
+`$(HOME)/opt/amiga/bin` on this box. Override `CC` if yours lives
+elsewhere.
 
 ## What's next
 
