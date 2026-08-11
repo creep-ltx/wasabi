@@ -28,20 +28,36 @@ and land it on real silicon without touching an SD card.**
 
 | Piece | State |
 |---|---|
-| Discovery, handshake, `ping`, `info` | built, tested against the mock |
-| `put` / `get` / `ls` / `del` / `mkdir` | built, tested against the mock |
-| `run` with live output and real exit code | built, tested against the mock |
+| Discovery, handshake, `ping`, `info` | **working on the real A1200** |
+| `put` / `get` / `ls` / `del` / `mkdir` | **working on the real A1200** |
+| `run` with live output and real exit code | **working on the real A1200** |
+| `deploy` (upload + run in one shot) | **working on the real A1200** |
 | `reboot` | built, **never fired in anger** |
 | `debug` (KPrintF stream) | **not implemented** — returns a clear error |
 | `snoop` (DOS call trace) | **not implemented** — returns a clear error |
 
-**`wasabid` has never run on a real Amiga.** It cross-compiles clean and
-loads under vamos, where it correctly reports that there is no TCP/IP
-stack — which proves the executable, its startup and its exit path, and
-nothing at all about its sockets. vamos has no `bsdsocket.library`, so
-the first live run will be the first real test. The client, by contrast,
-is exercised end to end by `make test` against a host mock that speaks
-the same protocol.
+First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
+Emu68 with the lwIP `bsdsocket.library`. Kickstart 47.115, 3.4 ms
+round trip, a 19372-byte binary round-tripped byte-identical, `List
+SYS:C` streamed all 119 entries, and a failing command reported
+`rc 10, IoErr 205` correctly.
+
+The client is additionally exercised end to end by `make test` against a
+host mock that speaks the same protocol — 15 tests, no Amiga required.
+
+### Discovery on a Wi-Fi-to-wired network
+
+The broadcast probe **did not work** on the machine this was built for:
+the Linux box is on Wi-Fi, the Amiga on ethernet, and the bridge does not
+carry broadcast between them — neither `255.255.255.255` nor the
+subnet-directed address gets a reply, while a unicast probe to the same
+port answers instantly.
+
+So `discover` falls back to sweeping the local subnet with unicast
+probes when broadcast finds nothing. 254 small UDP packets cost about a
+second and always work. The sends are non-blocking, because a blocking
+`sendto()` to an address with no ARP entry stalls until resolution gives
+up — 254 of those in a row turned a 1-second probe into 8.
 
 ## Installing
 

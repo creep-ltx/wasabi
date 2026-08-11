@@ -324,34 +324,102 @@ DISCOVERY_PROBE = b"WASABI?1\n"
 CACHE = os.path.expanduser("~/.cache/wasabi/last-host")
 
 
-def discover(timeout=0.5, port=1234):
-    """Broadcast a probe and collect every wasabid that answers."""
+def local_ipv4s():
+    """Every local IPv4 address and netmask, via the interface list."""
+    import fcntl
+    import array
+    out = []
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for _idx, name in socket.if_nameindex():
+            if name == "lo":
+                continue
+            # ioctl() with a mutable buffer returns an int and writes the
+            # answer INTO the buffer - read ifreq, never the return value.
+            ifreq = array.array("B", name.encode()[:15].ljust(40, b"\0"))
+            try:
+                fcntl.ioctl(sock.fileno(), 0x8915, ifreq)   # SIOCGIFADDR
+                ip = ".".join(str(b) for b in ifreq[20:24])
+                fcntl.ioctl(sock.fileno(), 0x891B, ifreq)   # SIOCGIFNETMASK
+                nm = ".".join(str(b) for b in ifreq[20:24])
+            except OSError:
+                continue
+            if ip != "0.0.0.0":
+                out.append((ip, nm))
+    finally:
+        sock.close()
+    return out
+
+
+def _to_int(dotted):
+    a, b, c, d = (int(x) for x in dotted.split("."))
+    return (a << 24) | (b << 16) | (c << 8) | d
+
+
+def _to_str(v):
+    return "%d.%d.%d.%d" % ((v >> 24) & 255, (v >> 16) & 255,
+                            (v >> 8) & 255, v & 255)
+
+
+def _collect(sock, found, deadline):
+    while time.time() < deadline:
+        sock.settimeout(max(deadline - time.time(), 0.01))
+        try:
+            data, addr = sock.recvfrom(1024)
+        except (socket.timeout, OSError):
+            return
+        line = data.decode("latin-1", "replace").strip()
+        if not line.startswith("WASABI!1 "):
+            continue
+        parts = line[9:].split(" ", 2)
+        if len(parts) < 2:
+            continue
+        found[addr[0]] = (parts[0], int(parts[1]),
+                          parts[2] if len(parts) > 2 else "")
+
+
+def discover(timeout=0.5, port=1234, sweep=True):
+    """Find every wasabid on this network.
+
+    Broadcast first. If nothing answers, sweep the local subnet with
+    unicast probes: a Wi-Fi client talking to a wired Amiga frequently
+    cannot get a broadcast across the bridge, and 254 small UDP packets
+    cost nothing next to failing to find the machine at all.
+    """
     found = {}
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    sock.settimeout(timeout)
     try:
-        try:
-            sock.sendto(DISCOVERY_PROBE, ("255.255.255.255", port))
-        except OSError:
-            pass
-        sock.sendto(DISCOVERY_PROBE, ("127.0.0.1", port))
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            sock.settimeout(max(deadline - time.time(), 0.01))
+        targets = ["255.255.255.255", "127.0.0.1"]
+        locals_ = local_ipv4s()
+        for ip, nm in locals_:
+            bcast = _to_int(ip) | (~_to_int(nm) & 0xFFFFFFFF)
+            targets.append(_to_str(bcast))
+        for t in targets:
             try:
-                data, addr = sock.recvfrom(1024)
-            except (socket.timeout, OSError):
-                break
-            line = data.decode("latin-1", "replace").strip()
-            if not line.startswith("WASABI!1 "):
+                sock.sendto(DISCOVERY_PROBE, (t, port))
+            except OSError:
+                pass
+        _collect(sock, found, time.time() + timeout)
+        if found or not sweep:
+            return found
+
+        for ip, nm in locals_:
+            hosts = (~_to_int(nm) & 0xFFFFFFFF) - 1
+            if hosts <= 0 or hosts > 1022:      # don't sweep a /16
                 continue
-            parts = line[9:].split(" ", 2)
-            if len(parts) < 2:
-                continue
-            name, tcpport = parts[0], int(parts[1])
-            banner = parts[2] if len(parts) > 2 else ""
-            found[addr[0]] = (name, tcpport, banner)
+            base = _to_int(ip) & _to_int(nm)
+            # Non-blocking: a blocking sendto() to an address with no ARP
+            # entry stalls until the resolution gives up, and 254 of those
+            # in a row turn a one-second probe into eight.
+            sock.setblocking(False)
+            for h in range(1, hosts + 1):
+                try:
+                    sock.sendto(DISCOVERY_PROBE, (_to_str(base + h), port))
+                except OSError:
+                    pass
+            sock.setblocking(True)
+            _collect(sock, found, time.time() + max(timeout, 1.0))
     finally:
         sock.close()
     return found
