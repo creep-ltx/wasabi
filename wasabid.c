@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b11"
+#define VERSION_STR "wasabid 0.1b12"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b11 (12.8.2026)";
+    "$VER: wasabid 0.1b12 (12.8.2026)";
 
 #define PROTO_VERSION   1
 #define DEF_PORT        1234
@@ -69,6 +69,7 @@ static const char *verstag __attribute__((used)) =
 #define T_RESTART 0x42
 #define T_PS      0x43
 #define T_KILL    0x44
+#define T_SPEED   0x45
 
 struct Library *SocketBase;
 
@@ -1303,6 +1304,62 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
     return send_frame(fd, T_OK, NULL, 0);
 }
 
+/*
+ * Throughput measurement, deliberately storage-free: received bytes are
+ * counted and dropped, sent bytes come from one static-pattern buffer.
+ * Nothing lands in RAM: or on a volume, so a stock 2 MB machine runs
+ * the same 50 MB test a PiStorm does, and the number isolates the
+ * network path instead of blending in a filesystem.
+ */
+static BOOL cmd_speed(int fd, ULONG flags, ULONG size)
+{
+    UBYTE *buf;
+    LONG i;
+
+    if (!size || size > (256UL << 20))
+        return send_err(fd, "size must be 1 byte to 256 MB");
+    buf = AllocMem(MAX_PAYLOAD, MEMF_ANY);
+    if (!buf)
+        return send_err(fd, "out of memory");
+
+    if (flags & 1) {                     /* source: Amiga -> client */
+        ULONG left = size;
+        for (i = 0; i < MAX_PAYLOAD; i++)
+            buf[i] = (UBYTE)i;
+        while (left) {
+            LONG chunk = left > MAX_PAYLOAD ? MAX_PAYLOAD : (LONG)left;
+            if (!send_frame(fd, T_DATA, buf, chunk)) {
+                FreeMem(buf, MAX_PAYLOAD);
+                return FALSE;
+            }
+            left -= chunk;
+        }
+        FreeMem(buf, MAX_PAYLOAD);
+        return send_frame(fd, T_END, NULL, 0);
+    } else {                             /* sink: client -> Amiga */
+        ULONG got = 0;
+        for (;;) {
+            UBYTE tag;
+            LONG n;
+            if (!recv_frame(fd, &tag, buf, &n)) {
+                FreeMem(buf, MAX_PAYLOAD);
+                return FALSE;
+            }
+            if (tag == T_END)
+                break;
+            if (tag != T_DATA) {
+                FreeMem(buf, MAX_PAYLOAD);
+                return FALSE;
+            }
+            got += n;
+        }
+        FreeMem(buf, MAX_PAYLOAD);
+        if (got != size)
+            return send_err(fd, "size mismatch");
+        return send_frame(fd, T_OK, NULL, 0);
+    }
+}
+
 static BOOL cmd_reboot(int fd, ULONG flags)
 {
     (void)flags;
@@ -1457,6 +1514,11 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
             return send_err(fd, "bad KILL header");
         return cmd_kill(fd, get_be32(p), target);
     }
+
+    case T_SPEED:
+        if (len < 8)
+            return send_err(fd, "bad SPEED header");
+        return cmd_speed(fd, get_be32(p), get_be32(p + 4));
 
     case T_REBOOT:
         return cmd_reboot(fd, len >= 4 ? get_be32(p) : 0);

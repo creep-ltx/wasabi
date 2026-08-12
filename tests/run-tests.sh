@@ -125,6 +125,13 @@ out=$($W deploy "$ROOT/../wasabi-restart.$$" C:wasabid.new --restart 2>&1 | \
 check "deploy --restart uploads and reloads" "1" "$out"
 rm -f "$ROOT/../wasabi-restart.$$"
 
+# --- speedtest ---
+out=$($W speedtest 1MB 2>/dev/null | grep -c "MB/s")
+check "speedtest reports both directions" "2" "$out"
+
+out=$($W speedtest 999GB 2>&1 | grep -c "256 MB")
+check "speedtest refuses an absurd size" "1" "$out"
+
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")
 check "ps lists tasks" "1" "$out"

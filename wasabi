@@ -27,7 +27,7 @@ HELLO, WELCOME, ERR, OK, PING, PONG = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
-REBOOT, INFO, RESTART, PS, KILL = 0x40, 0x41, 0x42, 0x43, 0x44
+REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 
 TAGNAMES = {v: k for k, v in list(globals().items()) if isinstance(v, int)}
 
@@ -362,6 +362,45 @@ def cmd_stream(conn, args):
     return 0
 
 
+def parse_size(s):
+    """'5MB', '512KB', '1GB', bare '25' means MB."""
+    m = re.match(r"^(\d+)\s*(b|kb?|mb?|gb?)?$", s.strip(), re.I)
+    if not m:
+        raise WasabiError("cannot parse size %r - try e.g. 5MB" % s)
+    mult = {"b": 1, "k": 1024, "kb": 1024, "m": 1 << 20, "mb": 1 << 20,
+            "g": 1 << 30, "gb": 1 << 30}[(m.group(2) or "mb").lower()]
+    return int(m.group(1)) * mult
+
+
+def cmd_speedtest(conn, args):
+    size = parse_size(args.size)
+    if not size or size > 256 << 20:      # the daemon's cap, same words
+        raise WasabiError("size must be 1 byte to 256 MB")
+    mb = size / float(1 << 20)
+    pattern = bytes(range(256)) * (MAX_PAYLOAD // 256)
+
+    t0 = time.time()
+    conn.send(SPEED, struct.pack(">II", 0, size))
+    sent = 0
+    while sent < size:
+        chunk = min(MAX_PAYLOAD, size - sent)
+        conn.send(DATA, pattern[:chunk])
+        sent += chunk
+    conn.send(END)
+    conn.expect_ok()
+    up = time.time() - t0
+    print("up    %6.2f MB/s   %.1f MB in %.2f s" % (mb / up, mb, up))
+
+    t0 = time.time()
+    conn.send(SPEED, struct.pack(">II", 1, size))
+    got = [0]
+    drain_to_end(conn, lambda b: got.__setitem__(0, got[0] + len(b)))
+    down = time.time() - t0
+    if got[0] != size:
+        raise WasabiError("short download: %d of %d bytes" % (got[0], size))
+    print("down  %6.2f MB/s   %.1f MB in %.2f s" % (mb / down, mb, down))
+
+
 def cmd_ps(conn, args):
     conn.send(PS)
     text = []
@@ -684,6 +723,11 @@ def main(argv=None):
     s.add_argument("--log", metavar="FILE",
                    help="append timestamped lines to FILE")
     s.set_defaults(fn=cmd_stream, mode="snoop")
+
+    s = sub.add_parser("speedtest", help="measure throughput both ways")
+    s.add_argument("size", nargs="?", default="10MB",
+                   help="payload size, e.g. 5MB (default 10MB)")
+    s.set_defaults(fn=cmd_speedtest)
 
     s = sub.add_parser("ps", help="list tasks and processes")
     s.add_argument("pattern", nargs="?", default="",

@@ -91,6 +91,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x42 | RESTART  | C→S | — |
 | 0x43 | PS       | C→S | — |
 | 0x44 | KILL     | C→S | `u32 flags`, `str target` |
+| 0x45 | SPEED    | C→S | `u32 flags`, `u32 size` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -268,6 +269,19 @@ must match exactly one task: no matches, several matches, and the daemon
 itself are each a distinct `ERR`. The action happens under `Disable()`
 after re-finding the task in the scheduler lists, so a target that
 exited after `PS` is reported gone, never a stale pointer.
+
+### SPEED — storage-free throughput measurement
+
+`flags` bit 0 picks the direction. Clear: the client follows with `DATA`
+frames totalling exactly `size` bytes, then `END`; the server counts and
+**discards** every byte and replies `OK`, or `ERR` on a size mismatch.
+Set: the server sends `DATA` frames totalling `size` bytes from a static
+pattern buffer, then `END`.
+
+Nothing touches RAM: or any volume in either direction — the test cannot
+fill a machine up, and the number isolates the network path. `size` must
+be 1 byte to 256 MB; anything else is an `ERR`. Timing is entirely the
+client's business.
 
 ## Teardown and the SetFunction rule
 

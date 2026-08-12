@@ -37,6 +37,7 @@ and land it on real silicon without touching an SD card.**
 | `restart` (in-place self-update) | **working on the real A1200** — `put C:wasabid` + `restart`, no reboot |
 | `snoop` (DOS call trace) | **working on the real A1200** — SnoopDOS-style patches on 14 dos/exec calls |
 | `ps` / `kill` | **working on the real A1200** — full task list; Ctrl-C or RemTask |
+| `speedtest` | **working on the real A1200** — ~95 MB/s up, ~60 MB/s down on this network |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
 Emu68 with the lwIP `bsdsocket.library`. Kickstart 47.115, 3.4 ms
@@ -45,7 +46,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 25 tests, no Amiga required.
+host mock that speaks the same protocol — 27 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -107,6 +108,7 @@ wasabi debug [--with-snoop] [--log F]   live KPrintF stream
 wasabi snoop [--task PAT] [--log F]     live DOS call trace
 wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter
 wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
+wasabi speedtest [SIZE]      throughput both ways (5MB, 512KB... max 256MB)
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
@@ -254,15 +256,18 @@ what lets output captured in parallel terminals be lined up afterwards:
 2026-08-12 08:11:53.257 snoop | c:wasabid  Open("T:wasabi-run-2", readwrite) = ok
 ```
 
-## What's next
+## Speedtest
 
-- **`wasabi speedtest <size>`** — push and pull a payload of a given size
-  (`wasabi speedtest 5MB`, `10MB`, `25MB`, `50MB`…) and report the
-  throughput each way, so the effect of a driver stack or MTU change is
-  one command to measure. The daemon discards on receive and generates
-  on send — nothing is stored, so no machine can be filled up by it, and
-  the figure isolates the network path instead of blending in a
-  filesystem. A later `--via PATH` mode could measure through a real
-  volume; that variant must first check `info`'s free-memory numbers and
-  refuse a size that does not fit with a healthy margin.
+`wasabi speedtest 25MB` pushes, then pulls, that many bytes and reports
+MB/s each way — so the effect of a driver stack or MTU change is one
+command to measure. The daemon counts-and-discards on receive and
+generates on send: nothing is stored anywhere, a stock 2 MB machine runs
+the same test a PiStorm does, and the figure isolates the network path
+instead of blending in a filesystem. (A future `--via PATH` mode could
+measure through a real volume; it must first check `info`'s free-memory
+numbers and refuse a size that does not fit with a healthy margin.)
+
+On this network — Wi-Fi client to the A1200's Emu68 lwIP stack over
+gigabit ethernet — 25 MB moves up at ~97 MB/s and down at ~64 MB/s.
+
 `PROTOCOL.md` is the wire format, and the contract between the two halves.

@@ -29,7 +29,7 @@ HELLO, WELCOME, ERR, OK, PING, PONG = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
-REBOOT, INFO, RESTART, PS, KILL = 0x40, 0x41, 0x42, 0x43, 0x44
+REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -169,6 +169,8 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_simple(payload, os.remove)
         elif tag == MKDIR:
             self.do_simple(payload, os.mkdir)
+        elif tag == SPEED:
+            self.do_speed(payload)
         elif tag == PS:
             self.do_ps()
         elif tag == KILL:
@@ -264,6 +266,26 @@ class Handler(socketserver.BaseRequestHandler):
             t.join()
         rc = proc.wait()
         self.send(EXIT, struct.pack(">II", rc if rc >= 0 else 20, 0))
+
+    def do_speed(self, payload):
+        """Storage-free throughput: count-and-discard, or generate."""
+        flags, size = struct.unpack_from(">II", payload, 0)
+        if not size or size > 256 << 20:
+            return self.err("size must be 1 byte to 256 MB")
+        if flags & 1:
+            self.send_data(b"\xa5" * size)
+        else:
+            got = 0
+            while True:
+                tag, data = self.recv()
+                if tag == END:
+                    break
+                if tag != DATA:
+                    return self.err("unexpected tag during SPEED")
+                got += len(data)
+            if got != size:
+                return self.err("size mismatch")
+            self.send(OK)
 
     def do_simple(self, payload, fn):
         path, _ = unpack_str(payload)
