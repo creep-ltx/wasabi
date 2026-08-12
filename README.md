@@ -11,7 +11,7 @@ Two halves:
 
 ```
 $ wasabi discover
-192.168.1.42    :1234  amiga        wasabid 0.1
+192.168.1.42    :1234  amiga        wasabid 0.1b16
 
 $ wasabi deploy ccon-handler L:ccon-handler --reboot
 ccon-handler -> L:ccon-handler (106912 bytes)
@@ -310,11 +310,11 @@ checks — cheapest first, each catching what the one before it cannot:
 
 ```
 $ wasabi update wasabid
-updating to wasabid 0.1b14
-wasabid -> C:wasabid.new (32440 bytes)
-  identity   wasabid 0.1b14 (2026-08-12)
+updating to wasabid 0.1b16
+wasabid -> C:wasabid.new (32856 bytes)
+  identity   wasabid 0.1b16 (2026-08-12)
   selftest   ok
-  live       wasabid 0.1b14 served a handshake and a ping on port 1235
+  live       wasabid 0.1b16 served a handshake and a ping on port 1235
 installed - the daemon is reloading itself
 ```
 
@@ -356,10 +356,14 @@ it** — installing that binary would have taken the machine off the
 network at the next restart. Only connecting to it caught it:
 
 ```
-  identity   wasabid 0.1b14 (2026-08-12)
+$ wasabi update wasabid-broken
+updating to wasabid 0.1b16
+  identity   wasabid 0.1b16 (2026-08-12)
   selftest   ok
-wasabi: it did not come up as a daemon on port 1235 (Connection refused).
-The running daemon is untouched
+wasabi: it did not come up as a daemon on port 1235 ([Errno 111]
+Connection refused); a test instance may still be on port 1235 - find it
+with 'wasabi ps' and stop it with 'wasabi kill'. The running daemon is
+untouched
 ```
 
 What none of this catches is a binary that passes every check and then
@@ -376,12 +380,14 @@ the daemon lists what it can do in its `WELCOME`, and `info` shows it:
 ```
 $ wasabi info
 wasabid 0.1b16, protocol v1
+exec.library 47.13
+chip free 1948 KB, fast free 1875667 KB
 can: debug del get info install kill ls mkdir ping ps put quit reboot
      restart run snoop speed
 
-$ wasabi ps                       # against an older one
-wasabi: this daemon (wasabid 0.1b11) has no 'speed' - update it with
-'wasabi update wasabid'
+$ wasabi speedtest 10MB      # against a build made without 'speed'
+wasabi: this daemon (wasabid 0.1b16-nospeed) has no 'speed' - update it
+with 'wasabi update wasabid'
 ```
 
 Adding that list broke nothing in either direction, by construction:
