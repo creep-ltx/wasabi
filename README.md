@@ -589,6 +589,17 @@ Measured on the A1200, 50 MB each way, three runs:
 | `Dump:` (PFS3) | 13.3 | 20.0 |
 | `Crap:` (SFS\2) | 12.6–13.5 | 20.0 |
 
+**Do not use the machine while measuring.** The daemon is single
+threaded, so a `speedtest` never returns to `select()` until it
+finishes — another client's request queues behind it, and the time
+spent serving that request lands inside the timing, because the client
+measures from request to `END`. This is not hypothetical: the first
+`RAM:` read here came out at 17.9 MB/s, slower than PFS3, which was
+obviously wrong. It was a concurrent `wasabi info` from another
+terminal, and three repeats put the real figure at 42–55. If a number
+looks impossible, check whether anything else was talking to the Amiga
+before blaming the filesystem.
+
 PFS3 and SFS\2 are indistinguishable here. `RAM:` is about three times
 faster than either — but still less than half the wire, so more than
 half of a RAM disk's theoretical speed goes on `ram-handler` and the DOS
