@@ -5,6 +5,9 @@ set -u
 
 cd "$(dirname "$0")/.."
 
+# macOS ships no GNU timeout; Homebrew's coreutils spells it gtimeout.
+command -v timeout >/dev/null 2>&1 || timeout() { gtimeout "$@"; }
+
 PORT=${PORT:-14231}
 KEY=hunter2
 ROOT=$(mktemp -d /tmp/wasabi-test.XXXXXX)

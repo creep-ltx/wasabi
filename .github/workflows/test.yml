@@ -1,0 +1,22 @@
+# The client half of the suite: wasabi against the host mock, no Amiga
+# and no cross-compiler required. The macOS job is the only macOS
+# testing this project gets - nobody here owns one.
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  client:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: GNU timeout for the stream tests (macOS)
+        if: runner.os == 'macOS'
+        run: brew list coreutils >/dev/null 2>&1 || brew install coreutils
+      - run: ./tests/run-tests.sh
