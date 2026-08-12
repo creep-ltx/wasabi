@@ -103,6 +103,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x45 | SPEED    | C→S | `u32 flags`, `u32 size`, `str target` |
 | 0x46 | QUIT     | C→S | — |
 | 0x47 | INSTALL  | C→S | `str sidecar` |
+| 0x48 | SCREEN   | C→S | `str screenname` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -123,7 +124,7 @@ speak v1 to a v2 client.
 
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
-`speed,speedfile,quit,install` for a current build. Self-update makes version skew
+`speed,speedfile,quit,install,screen` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -380,6 +381,23 @@ in `caps`, because a daemon that predates it would silently ignore the
 target and report network speed as though it were disk speed. `size` must
 be 1 byte to 256 MB; anything else is an `ERR`. Timing is entirely the
 client's business.
+
+### SCREEN — grab a screen as raw pixels
+
+Server replies with `DATA` frames then `END`. The first twelve bytes are
+`u32 width`, `u32 height`, `u32 bytes-per-pixel` (3, meaning RGB), and
+the rest is `width * height * 3` bytes of pixels, top row first.
+
+**Uncompressed on purpose.** The network is the fastest component in
+this system by a wide margin, so shipping 3.7 MB raw costs about thirty
+milliseconds of wire while compressing it on the Amiga would cost
+seconds. The client makes the PNG.
+
+`screenname` empty means the default public screen. Only public screens
+can be grabbed, since the server holds a `LockPubScreen()` for the
+duration — a screen that closed mid-read would otherwise leave the
+server reading freed memory. Requires `cybergraphics.library`;
+advertised as `screen` in `caps`.
 
 ## Teardown and the SetFunction rule
 

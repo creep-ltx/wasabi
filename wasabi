@@ -14,6 +14,7 @@ import argparse
 import os
 import random
 import re
+import zlib
 import socket
 import struct
 import sys
@@ -29,7 +30,7 @@ PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
-QUIT, INSTALL = 0x46, 0x47
+QUIT, INSTALL, SCREEN = 0x46, 0x47, 0x48
 
 TAGNAMES = {v: k for k, v in list(globals().items()) if isinstance(v, int)}
 
@@ -622,6 +623,53 @@ def cmd_speedtest(conn, args):
     print("down  %6.2f MB/s   %.1f MB in %.2f s" % (mb / down, mb, down))
 
 
+def write_png(path, w, h, rgb):
+    """Minimal PNG writer: zlib is stdlib, so this costs no dependency.
+
+    The Amiga sends raw pixels precisely so that this end does the
+    compressing - it is the fast machine, and it is idle while the
+    Amiga reads its framebuffer.
+    """
+    rows = b"".join(b"\0" + rgb[y * w * 3:(y + 1) * w * 3] for y in range(h))
+
+    def chunk(typ, data):
+        return (struct.pack(">I", len(data)) + typ + data +
+                struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF))
+
+    blob = (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows, 6))
+            + chunk(b"IEND", b""))
+    with open(path, "wb") as fh:
+        fh.write(blob)
+    return len(blob)
+
+
+def cmd_screen(conn, args):
+    if conn.caps and "screen" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) cannot grab the screen - update it with "
+            "'wasabi update wasabid'" % conn.banner)
+    t0 = time.time()
+    conn.send(SCREEN, pack_str(args.screen or ""))
+    blob = []
+    drain_to_end(conn, blob.append)
+    data = b"".join(blob)
+    if len(data) < 12:
+        raise WasabiError("the daemon sent no image data")
+    w, h, bpp = struct.unpack_from(">III", data, 0)
+    pixels = data[12:]
+    want = w * h * bpp
+    if len(pixels) != want:
+        raise WasabiError("short grab: %d of %d bytes for %dx%d"
+                          % (len(pixels), want, w, h))
+    grabbed = time.time() - t0
+    size = write_png(args.file, w, h, pixels)
+    print("%dx%d -> %s (%d KB, %.1f MB raw in %.1f s)"
+          % (w, h, args.file, size // 1024, want / 1e6, grabbed),
+          file=sys.stderr)
+
+
 def cmd_ps(conn, args):
     conn.send(PS)
     text = []
@@ -998,6 +1046,12 @@ def main(argv=None):
                    help="write through a real volume (e.g. Dump:) instead of "
                         "discarding - measures the filesystem, not the wire")
     s.set_defaults(fn=cmd_speedtest)
+
+    s = sub.add_parser("screen", help="grab the screen as a PNG")
+    s.add_argument("file", nargs="?", default="screen.png")
+    s.add_argument("--screen", metavar="NAME",
+                   help="public screen to grab (default: the front one)")
+    s.set_defaults(fn=cmd_screen)
 
     s = sub.add_parser("ps", help="list tasks and processes")
     s.add_argument("pattern", nargs="?", default="",

@@ -19,6 +19,12 @@
 #include <dos/dosextens.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
+#include <intuition/screens.h>
+#include <proto/intuition.h>
+#include <cybergraphx/cybergraphics.h>
+#define __NOLIBBASE__            /* see cmd_screen() */
+#include <proto/cybergraphics.h>
+#undef __NOLIBBASE__
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -31,10 +37,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b21"
+#define VERSION_STR "wasabid 0.1b22"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b21 (12.8.2026)";
+    "$VER: wasabid 0.1b22 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -54,7 +60,7 @@ static const char *verstag __attribute__((used)) =
  * PROTO_VERSION stays the hard gate, and only for framing changes.
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
-                 "reboot,restart,ps,kill,speed,speedfile,quit,install"
+                 "reboot,restart,ps,kill,speed,speedfile,quit,install,screen"
 #define DEF_PORT        1234
 #define MAX_PAYLOAD     65536
 #define MAX_CLIENTS     8
@@ -90,8 +96,21 @@ static const char *verstag __attribute__((used)) =
 #define T_SPEED   0x45
 #define T_QUIT    0x46
 #define T_INSTALL 0x47
+#define T_SCREEN  0x48
 
 struct Library *SocketBase;
+/*
+ * Opened on demand by `screen` and closed on the way out - a daemon that
+ * never grabs one should not hold the graphics stack open.
+ *
+ * Opened by hand rather than by the startup code on purpose: libnix's
+ * auto-open for this library asks for "CyberGfx.library", which is not
+ * what it is called on any machine here, and a failed auto-open kills
+ * the binary before main() runs. The daemon's own self-test caught that
+ * and refused the update, which is the only reason this is a comment
+ * and not a machine that needed the keyboard.
+ */
+static struct Library *g_cgfx;
 
 /* --- the one running command -------------------------------------- */
 
@@ -1839,6 +1858,81 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
  * the same 50 MB test a PiStorm does, and the number isolates the
  * network path instead of blending in a filesystem.
  */
+/*
+ * Grab a screen and send it as raw RGB.
+ *
+ * Raw, not compressed, and that is the whole design. Everything on this
+ * machine is slower than its network: the wire does 109 MB/s while the
+ * disk manages 20 and the CPU is the bottleneck behind every slow thing
+ * we have measured. A 1280x960 screen is 3.5 MB, which is thirty
+ * milliseconds of wire - far less than the Amiga would spend deflating
+ * it. So the Amiga reads pixels and nothing else; the Linux box, which
+ * is idle and fast, turns them into a PNG.
+ *
+ * ReadPixelArray() is CyberGraphX's, not graphics.library's, because
+ * only it returns true RGB - ReadPixelArray8() hands back pen numbers,
+ * which mean nothing on a 24-bit screen.
+ *
+ * The stream is a 12-byte header (width, height, bytes per pixel) then
+ * the rows, in DATA frames, then END.
+ */
+static BOOL cmd_screen(int fd, const char *scrname)
+{
+    struct Screen *sc;
+    UBYTE *buf, hdr[12];
+    LONG rowbytes, band, y;
+    ULONG w, h;
+    BOOL ok = TRUE;
+
+    if (!g_cgfx)
+        g_cgfx = OpenLibrary("cybergraphics.library", 40);
+    if (!g_cgfx)
+        return send_err(fd, "no cybergraphics.library - screen grabbing "
+                            "needs an RTG stack such as Picasso96 or CGX");
+
+    /* A locked public screen cannot close under us mid-read. Private
+     * screens are not reachable this way, which is a real limitation
+     * and better than a pointer that stops being valid. */
+    sc = LockPubScreen(scrname[0] ? (STRPTR)scrname : NULL);
+    if (!sc)
+        return send_err(fd, scrname[0] ? "no public screen by that name"
+                                       : "cannot lock the default public screen");
+    w = (ULONG)sc->Width;
+    h = (ULONG)sc->Height;
+    rowbytes = (LONG)w * 3;
+    if (!w || !h || rowbytes > MAX_PAYLOAD) {
+        UnlockPubScreen(NULL, sc);
+        return send_err(fd, "that screen is too wide to send a row at a time");
+    }
+    band = MAX_PAYLOAD / rowbytes;       /* whole rows per frame */
+    if (band < 1) band = 1;
+
+    buf = AllocMem(band * rowbytes, MEMF_ANY);
+    if (!buf) {
+        UnlockPubScreen(NULL, sc);
+        return send_err(fd, "out of memory for the grab buffer");
+    }
+
+    put_be32(hdr, w);
+    put_be32(hdr + 4, h);
+    put_be32(hdr + 8, 3);                /* bytes per pixel, RECTFMT_RGB */
+    if (!send_frame(fd, T_DATA, hdr, 12))
+        ok = FALSE;
+
+    for (y = 0; ok && y < (LONG)h; y += band) {
+        LONG n = (y + band > (LONG)h) ? ((LONG)h - y) : band;
+        __ReadPixelArray_base(g_cgfx, buf, 0, 0, (UWORD)rowbytes,
+                              &sc->RastPort, 0, (UWORD)y,
+                              (UWORD)w, (UWORD)n, RECTFMT_RGB);
+        if (!send_frame(fd, T_DATA, buf, n * rowbytes))
+            ok = FALSE;
+    }
+
+    FreeMem(buf, band * rowbytes);
+    UnlockPubScreen(NULL, sc);
+    return ok ? send_frame(fd, T_END, NULL, 0) : FALSE;
+}
+
 /* Join a target drawer and a name the way AmigaDOS wants it. */
 static void speed_path(char *out, const char *target, LONG outsz)
 {
@@ -2220,6 +2314,13 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         return cmd_kill(fd, get_be32(p), target);
     }
 
+    case T_SCREEN: {
+        char scr[64];
+        if (len < 2 || !get_str(p, len, 0, scr, sizeof(scr)))
+            scr[0] = '\0';
+        return cmd_screen(fd, scr);
+    }
+
     case T_SPEED: {
         char target[200];
         if (len < 8)
@@ -2564,6 +2665,7 @@ out:
     if (disco_fd >= 0) CloseSocket(disco_fd);
     if (listen_fd >= 0) CloseSocket(listen_fd);
     FreeMem(payload, MAX_PAYLOAD);
+    if (g_cgfx) CloseLibrary(g_cgfx);
     CloseLibrary(SocketBase);
 
     /*

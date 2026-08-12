@@ -47,7 +47,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 46 tests, no Amiga required.
+host mock that speaks the same protocol — 48 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -113,6 +113,7 @@ wasabi snoop [--task PAT] [--log F]     live DOS call trace
 wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter
 wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
 wasabi speedtest [SIZE] [--target PATH]  latency and throughput both ways
+wasabi screen [FILE]         grab the screen as a PNG
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
@@ -541,6 +542,37 @@ nothing* and just sends the command. Both directions were checked
 against the A1200 — a current client against a daemon with no list, and
 a client checked out of git from before the list against one that sends
 it.
+
+## Seeing the screen
+
+`wasabi screen shot.png` grabs the front public screen and writes a PNG
+locally. 1280x960 in **0.1 seconds**, which is a design decision rather
+than luck:
+
+```
+$ wasabi screen shot.png
+1280x960 -> shot.png (1362 KB, 3.7 MB raw in 0.1 s)
+```
+
+**The Amiga sends raw pixels and does no compression at all.** Every
+measurement in this file says the same thing — the wire is the fastest
+part of this machine. 109 MB/s on the network against 20 MB/s from disk,
+20 MB/s of ChaCha20, and a CPU that is the bottleneck behind every slow
+thing here. A 1280x960 screen is 3.7 MB, which is thirty milliseconds of
+wire and far less than the Amiga would spend deflating it. So the Amiga
+reads its framebuffer and stops; the Linux box, idle and fast, makes the
+PNG. Doing the "wasteful" thing is several times quicker end to end than
+a screen grabber that compresses on the Amiga first.
+
+Pixels come from CyberGraphX's `ReadPixelArray()`, not
+`graphics.library`'s `ReadPixelArray8()` — only the former returns true
+RGB, the latter hands back pen numbers which mean nothing on a 24-bit
+screen. It needs an RTG stack (Picasso96 or CGX) and grabs *public*
+screens; a private screen cannot be locked this way, and a lock is what
+stops the screen closing mid-read.
+
+The PNG encoder on the client is about fifteen lines around `zlib`,
+which is in the standard library — so this costs no dependency.
 
 ## Speedtest
 

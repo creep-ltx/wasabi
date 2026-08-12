@@ -174,6 +174,21 @@ check "speedtest measures latency" "1" "$out"
 out=$($W speedtest 999GB 2>&1 | grep -c "256 MB")
 check "speedtest refuses an absurd size" "1" "$out"
 
+# --- screen grab: raw over the wire, PNG written here ---
+SHOT=$ROOT/../wasabi-shot.$$
+$W screen "$SHOT" >/dev/null 2>&1
+if [ -s "$SHOT" ] && head -c8 "$SHOT" | grep -q PNG; then
+    ok "screen writes a real PNG"
+else
+    no "screen writes a real PNG"
+fi
+out=$(python3 -c "
+import struct,sys
+d=open('$SHOT','rb').read()
+print('%dx%d' % struct.unpack('>II', d[16:24]))" 2>/dev/null)
+check "and its dimensions match what was sent" "8x4" "$out"
+rm -f "$SHOT"
+
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")
 check "ps lists tasks" "1" "$out"
