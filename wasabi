@@ -901,10 +901,14 @@ def local_ipv4s():
     except ImportError:
         return []
     import array
-    if sys.platform == "darwin":
-        SIOCGIFADDR, SIOCGIFNETMASK = 0xC0206921, 0xC0206925
-    else:
+    if sys.platform.startswith("linux"):
         SIOCGIFADDR, SIOCGIFNETMASK = 0x8915, 0x891B
+    else:
+        # Darwin inherited these numbers from BSD, so macOS, FreeBSD
+        # and OpenBSD all agree. NetBSD's larger ifreq encodes a
+        # different number, so there the ioctl fails clean and the
+        # sweep degrades to the broadcast fallback, as before.
+        SIOCGIFADDR, SIOCGIFNETMASK = 0xC0206921, 0xC0206925
     out = []
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:

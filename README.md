@@ -8,8 +8,8 @@ Two halves:
 
 - **`wasabid`** — a small daemon on the Amiga (C, Bebbo's gcc, one file).
 - **`wasabi`** — the client (Python 3, stdlib only, one file). At home
-  on Linux and macOS; elsewhere discovery's subnet sweep degrades to
-  plain broadcast and `--host` always works.
+  on Linux, macOS, FreeBSD and OpenBSD; elsewhere discovery's subnet
+  sweep degrades to plain broadcast and `--host` always works.
 
 ```
 $ wasabi discover
