@@ -259,6 +259,10 @@ what lets output captured in parallel terminals be lined up afterwards:
 - **`wasabi speedtest <size>`** — push and pull a payload of a given size
   (`wasabi speedtest 5MB`, `10MB`, `25MB`, `50MB`…) and report the
   throughput each way, so the effect of a driver stack or MTU change is
-  one command to measure. Uses the existing `PUT`/`GET` path against a
-  `RAM:` target; no new wire tags needed.
+  one command to measure. The daemon discards on receive and generates
+  on send — nothing is stored, so no machine can be filled up by it, and
+  the figure isolates the network path instead of blending in a
+  filesystem. A later `--via PATH` mode could measure through a real
+  volume; that variant must first check `info`'s free-memory numbers and
+  refuse a size that does not fit with a healthy margin.
 `PROTOCOL.md` is the wire format, and the contract between the two halves.
