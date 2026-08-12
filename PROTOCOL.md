@@ -282,10 +282,14 @@ when the caller is low on stack. Covered LVOs, verified against the NDK
 
 ### REBOOT
 
-`flags` bit 0 requests a cold reboot. The daemon replies `OK`, flushes
-every mounted volume, waits for the socket to drain, then calls
-`ColdReboot()`. The connection dies with the machine; the client treats a
-close after `OK` as success.
+The daemon replies `OK`, asks every mounted volume's handler to write out
+its dirty buffers (`ACTION_FLUSH`), waits a moment for the socket to
+drain, then calls `ColdReboot()`. The connection dies with the machine;
+the client treats a close after `OK` as success.
+
+`flags` bit 0 (cold) is accepted and ignored: `ColdReboot()` is the only
+reset exec sanctions a program to make, so every reboot is cold. The bit
+stays reserved for a build that finds a genuinely warm path.
 
 ### RESTART
 

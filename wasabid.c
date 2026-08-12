@@ -39,10 +39,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b25"
+#define VERSION_STR "wasabid 0.1b26"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b25 (12.8.2026)";
+    "$VER: wasabid 0.1b26 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -137,6 +137,12 @@ struct RunJob {
 static struct RunJob  g_job;
 static struct RunJob *g_handoff;     /* parent -> runner, one at a time */
 static int            g_run_client = -1;
+static BOOL           g_job_active;  /* a runner is alive. Distinct from
+                                      * g_run_client: the client can hang up
+                                      * mid-run, and the slot is only free
+                                      * again once the runner reports done -
+                                      * otherwise a new RUN would recycle
+                                      * g_job under the old runner's feet. */
 static BPTR           g_run_read;    /* our read end of the temp file */
 static LONG           g_run_sent;    /* bytes already forwarded */
 
@@ -663,17 +669,20 @@ static BOOL start_run(int cl, const char *cmd)
     g_run_read = Open(g_job.outname, MODE_OLDFILE);
     g_run_sent = 0;
     g_run_client = cl;
+    g_job_active = TRUE;
     return TRUE;
 }
 
-/* Forward whatever the child has flushed. Returns FALSE if the client died. */
+/* Forward whatever the child has flushed. Returns FALSE if the client died.
+ * Also runs headless (g_run_client == -1) after the client hung up, so the
+ * runner's temp file still gets cleaned up and the slot freed on done. */
 static BOOL pump_run(void)
 {
     UBYTE buf[RUNBUF];
-    int fd = g_clients[g_run_client].fd;
+    int fd = (g_run_client >= 0) ? g_clients[g_run_client].fd : -1;
     LONG n;
 
-    if (g_run_read) {
+    if (g_run_read && fd >= 0) {
         while ((n = Read(g_run_read, buf, sizeof(buf))) > 0) {
             g_run_sent += n;
             if (!send_frame(fd, T_STDOUT, buf, n))
@@ -684,17 +693,27 @@ static BOOL pump_run(void)
         UBYTE ex[8];
         /* One last sweep: the child may have flushed as it exited. */
         if (g_run_read) {
-            while ((n = Read(g_run_read, buf, sizeof(buf))) > 0)
-                if (!send_frame(fd, T_STDOUT, buf, n))
-                    return FALSE;
+            if (fd >= 0) {
+                while ((n = Read(g_run_read, buf, sizeof(buf))) > 0)
+                    if (!send_frame(fd, T_STDOUT, buf, n))
+                        return FALSE;
+            }
             Close(g_run_read);
             g_run_read = 0;
         }
         DeleteFile(g_job.outname);
-        put_be32(ex, (ULONG)g_job.rc);
-        put_be32(ex + 4, (ULONG)g_job.ioerr);
+        g_job_active = FALSE;            /* the runner is gone; RUN is free */
+        if (fd >= 0) {
+            put_be32(ex, (ULONG)g_job.rc);
+            put_be32(ex + 4, (ULONG)g_job.ioerr);
+            /* Send EXIT while g_run_client is still valid: clearing it
+             * first meant a failed send made the main loop drop(-1) -
+             * an out-of-bounds write into whatever sits before the
+             * client table. */
+            if (!send_frame(fd, T_EXIT, ex, 8))
+                return FALSE;
+        }
         g_run_client = -1;
-        return send_frame(fd, T_EXIT, ex, 8);
     }
     return TRUE;
 }
@@ -2244,14 +2263,40 @@ static BOOL cmd_speed(int fd, ULONG flags, ULONG size, const char *target)
     }
 }
 
+/*
+ * Ask every mounted volume's handler to write out its dirty buffers.
+ * Same locking shape as info_volumes(): collect under the DOS list lock,
+ * talk to the handlers after releasing it - DoPkt to a handler that then
+ * wants the list itself must not find us holding it.
+ */
+static void flush_volumes(void)
+{
+    struct MsgPort *ports[16];
+    LONG count = 0, i;
+    struct DosList *dl;
+
+    dl = LockDosList(LDF_VOLUMES | LDF_READ);
+    while ((dl = NextDosEntry(dl, LDF_VOLUMES | LDF_READ)) && count < 16)
+        if (dl->dol_Task)
+            ports[count++] = dl->dol_Task;
+    UnLockDosList(LDF_VOLUMES | LDF_READ);
+
+    for (i = 0; i < count; i++)
+        DoPkt(ports[i], ACTION_FLUSH, 0, 0, 0, 0, 0);
+}
+
 static BOOL cmd_reboot(int fd, ULONG flags)
 {
-    (void)flags;
+    (void)flags;                         /* bit 0 (cold) is accepted and
+                                          * ignored: ColdReboot() is the only
+                                          * reset exec sanctions a program to
+                                          * make, so every reboot is cold */
     if (!send_frame(fd, T_OK, NULL, 0))
         return FALSE;
-    /* Give the ack a moment to leave the wire, then flush and go. */
+    flush_volumes();
+    /* Give the ack a moment to leave the wire, then go. */
     Delay(25);
-    CloseSocket(g_clients[0].fd);        /* best effort; we are going down */
+    CloseSocket(fd);                     /* best effort; we are going down */
     ColdReboot();
     return TRUE;                         /* not reached */
 }
@@ -2444,7 +2489,7 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         char cmd[512];
         if (len < 4 || !get_str(p, len, 4, cmd, sizeof(cmd)))
             return send_err(fd, "bad RUN header");
-        if (g_run_client >= 0)
+        if (g_job_active)
             return send_err(fd, "another command is already running");
         if (!start_run(cl, cmd))
             return send_err(fd, "could not start the command");
@@ -2521,7 +2566,10 @@ static void drop(int cl)
 {
     if (g_run_client == cl) {            /* the run outlives its client */
         if (g_run_read) { Close(g_run_read); g_run_read = 0; }
-        g_run_client = -1;
+        g_run_client = -1;               /* g_job_active stays set: the
+                                          * runner is still alive, and
+                                          * pump_run() cleans up and frees
+                                          * the slot when it finishes */
     }
     if (g_dbg_client == cl)
         debug_stop();
@@ -2723,7 +2771,7 @@ int main(int argc, char **argv)
          * newline, so a growing file has no readable-fd to select on -
          * only a short timer catches it. */
         {
-            BOOL busy = (g_run_client >= 0 || g_dbg_client >= 0 ||
+            BOOL busy = (g_job_active || g_dbg_client >= 0 ||
                          g_snoop_client >= 0);
             tv.tv_secs  = busy ? 0 : 2;
             tv.tv_micro = busy ? 50000 : 0;
@@ -2734,9 +2782,10 @@ int main(int argc, char **argv)
         if (sigs & SIGBREAKF_CTRL_C)
             break;
 
-        if (g_run_client >= 0)
+        if (g_job_active)
             if (!pump_run())
-                drop(g_run_client);
+                drop(g_run_client);      /* only reachable with a client:
+                                          * headless pump never says FALSE */
 
         if (g_dbg_client >= 0)
             if (!debug_pump())

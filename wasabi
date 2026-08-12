@@ -135,7 +135,11 @@ class Conn:
 
 def amiga_date(days, mins, ticks):
     ts = AMIGA_EPOCH + days * 86400 + mins * 60 + ticks // 50
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+    # A DateStamp is the Amiga's local wall time already, so render it
+    # verbatim: gmtime() applies no offset. localtime() here shifted every
+    # timestamp by this box's UTC offset - the mock hid it, because the
+    # mock derives stamps from st_mtime, for which localtime IS right.
+    return time.strftime("%Y-%m-%d %H:%M", time.gmtime(ts))
 
 
 def protstr(bits):
@@ -1104,7 +1108,9 @@ def main(argv=None):
     s.set_defaults(fn=cmd_kill)
 
     s = sub.add_parser("reboot", help="reboot the Amiga")
-    s.add_argument("--cold", action="store_true")
+    s.add_argument("--cold", action="store_true",
+                   help="accepted for the wire's sake; every reboot is "
+                        "currently cold (ColdReboot is all exec offers)")
     s.set_defaults(fn=cmd_reboot)
 
     sub.add_parser("restart", help="reload the daemon in place (self-update)"

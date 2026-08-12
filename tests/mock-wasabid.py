@@ -247,7 +247,11 @@ class Handler(socketserver.BaseRequestHandler):
             lines = []
             for name in os.listdir(full):
                 st = os.stat(os.path.join(full, name))
-                secs = int(st.st_mtime) - AMIGA_EPOCH
+                # A real DateStamp is local wall time, so build one the way
+                # the Amiga would: shift the UTC epoch by this host's offset.
+                # The client renders it verbatim.
+                local = int(st.st_mtime) + time.localtime(st.st_mtime).tm_gmtoff
+                secs = local - AMIGA_EPOCH
                 days, rem = divmod(max(secs, 0), 86400)
                 mins, s = divmod(rem, 60)
                 lines.append("%s %d %d %d %d %d %s" % (

@@ -230,3 +230,16 @@ self-update, bounded I/O) got 90% of the rigor and it shows — the bugs that
 remain are all in the mundane connective tissue (client-slot bookkeeping, an
 error path, a doc drifting from code). That is the right failure distribution
 to have, and all four real findings are cheap to fix.
+
+---
+
+*Postscript: the four "Bad" findings were fixed in wasabid 0.1b26, the
+commit after this audit landed — EXIT now goes out before the run slot is
+cleared; the slot is gated on `g_job_active`, which only a finished runner
+frees (and the headless pump deletes the orphaned `T:` file); REBOOT
+flushes every volume via `ACTION_FLUSH`, closes the requester's own
+socket, and the protocol doc now says plainly that every reboot is cold;
+`amiga_date` renders wall time via `gmtime()`, with the mock generating
+real local-wall DateStamps to match the iron. The `ColdReboot()` flush
+behavior still needs a pass on the real A1200; everything else is covered
+by the suite (50/50) and a manual timezone check.*
