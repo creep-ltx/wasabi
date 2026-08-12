@@ -1,8 +1,10 @@
 # Wasabi
 
-Drive a real Amiga from a Linux box. Upload a binary anywhere on the
-system, run it and watch its output arrive live, and reboot the machine —
-from the same terminal the code was written in.
+Drive a real Amiga from a Linux box — and watch it think. The serial
+debug stream and a SnoopDOS-style call trace arrive live over the
+network, and the same connection uploads a binary anywhere on the
+system, runs it with its output streaming back, and reboots the
+machine — all from the terminal the code was written in.
 
 Two halves:
 
@@ -23,8 +25,26 @@ $ wasabi run "Version SYS:C/List FULL"
 List 45.16 (2.7.2021)
 ```
 
-The point is the loop: **edit on Linux, build with the cross-compiler,
-and land it on real silicon without touching an SD card.**
+The point is the whole loop with the machine's inner voice inside it:
+**edit on Linux, cross-compile, `put`, `run` — and the serial debug
+stream and the SnoopDOS-style call trace pour into the development
+machine while your code executes on real silicon.** No SD card
+shuffling, no serial cable, no second tool: every `KPrintF()` byte the
+machine writes and fourteen patched dos/exec calls, each naming its
+caller and its real result, land in the terminal next to your editor:
+
+```
+$ wasabi debug --with-snoop
+debug | [wasabi: 192.168.68.117 connected]
+snoop | c:wasabid            Open("T:wasabi-run-3", readwrite) = ok
+snoop | Background CLI       Lock("List", read) = ok
+snoop | Background CLI       LoadSeg("List") = ok
+snoop | List                 OpenLibrary("locale.library", v38) = ok
+```
+
+That is `wasabi run "List SYS:C"` seen from the inside — the daemon
+opening the runner's temp file, the shell finding the binary, List
+pulling in its libraries — captured live off the A1200.
 
 ## Status
 
