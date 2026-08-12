@@ -231,23 +231,51 @@ def cmd_put(conn, args):
     do_put(conn, args.local, args.remote, quiet=args.quiet)
 
 
+# The PUT header carries the size as a u32, and the daemon counts what
+# arrives in a ULONG, so this is the wire's ceiling and not an arbitrary
+# one. Bigger than this needs a protocol change, not a bigger buffer.
+MAX_FILE = 0xFFFFFFFF
+
+
+def _put_header(conn, size, remote):
+    if size > MAX_FILE:
+        raise WasabiError(
+            "%s is %d bytes; the protocol carries the size in 32 bits, so "
+            "%d is the most it can send" % (remote, size, MAX_FILE))
+    conn.send(PUT, struct.pack(">II", size, PROT_DEFAULT) + pack_str(remote))
+
+
 def put_bytes(conn, data, remote):
-    conn.send(PUT, struct.pack(">II", len(data), PROT_DEFAULT) + pack_str(remote))
-    sent = 0
-    while sent < len(data):
-        chunk = data[sent:sent + MAX_PAYLOAD]
-        conn.send(DATA, chunk)
-        sent += len(chunk)
+    """Upload something already in memory."""
+    _put_header(conn, len(data), remote)
+    for i in range(0, len(data), MAX_PAYLOAD):
+        conn.send(DATA, data[i:i + MAX_PAYLOAD])
     conn.send(END)
     conn.expect_ok()
 
 
 def do_put(conn, local, remote, quiet=False):
+    """Upload a file, a chunk at a time.
+
+    Read straight from disk into each frame rather than loading the file
+    first: a deploy should cost the same memory whether it is a 30 KB
+    handler or a 4 GB disk image, and the client should not need more
+    RAM than the thing it is sending.
+    """
+    size = os.path.getsize(local)
+    _put_header(conn, size, remote)
+    sent = 0
     with open(local, "rb") as fh:
-        data = fh.read()
-    put_bytes(conn, data, remote)
+        while sent < size:
+            chunk = fh.read(min(MAX_PAYLOAD, size - sent))
+            if not chunk:
+                raise WasabiError("%s shrank while it was being sent" % local)
+            conn.send(DATA, chunk)
+            sent += len(chunk)
+    conn.send(END)
+    conn.expect_ok()
     if not quiet:
-        print("%s -> %s (%d bytes)" % (local, remote, len(data)), file=sys.stderr)
+        print("%s -> %s (%d bytes)" % (local, remote, size), file=sys.stderr)
 
 
 def cmd_get(conn, args):

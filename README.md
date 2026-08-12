@@ -131,6 +131,15 @@ which matters when the target is `L:` and the machine is about to boot.
 an *exclusive* lock, so the daemon could never open the file to tail it.
 `MODE_READWRITE` is a shared lock and both processes can hold it.
 
+**One thing at a time, and a big transfer really means it.** A `PUT` is
+served inside the receive loop, so the daemon does not return to
+`select()` until the whole file has arrived — nothing else is answered
+meanwhile. At 30 KB that is 3 ms and invisible; a 4 GiB upload locks
+everything out for five minutes, and other clients time out rather than
+being refused. The honest fix is the per-client input buffer that
+`recv_frame`'s comment describes, which still is not warranted for one
+developer and one Amiga — but it is a real cost, not a theoretical one.
+
 **Only one `run` at a time.** A deliberate limit — it makes the handoff
 to the runner process unambiguous, and one developer driving one Amiga
 has no use for two concurrent builds. A second `run` gets a clear error,
@@ -164,6 +173,24 @@ console emits in lumps no matter what the daemon does. AmigaDOS commands
 that write with `Write()` stream immediately.
 
 **`T:` should be in RAM** for `run` to feel live. It normally is.
+
+**Files stop at 4 GiB − 1, and that is the wire, not a buffer.** `PUT`
+carries the size in a `u32` and the daemon counts arrivals in a `ULONG`,
+so the client refuses anything larger up front rather than truncating
+it. Going past that needs a 64-bit size — a new tag behind a capability
+— not a bigger buffer. `GET` has no size field and streams until `END`,
+so downloads have no such limit.
+
+The filesystem usually gives up first anyway: PFS3 caps a file at 4 GB,
+so only an SFS\2 volume can hold the largest thing wasabi can send.
+Measured on the A1200: 4,294,967,295 bytes to SFS\2 in 317 s, about
+13.5 MB/s — disk-bound, since the same network moves 109 MB/s.
+
+**Sizes past 2 GB are read unsigned.** OS 3.x's `Examine()` returns
+`fib_Size` as a *signed* 32-bit LONG, so a 4 GB file reports as `-1`.
+Since a file cannot be negative bytes long, `ls` reads it unsigned,
+which is correct all the way to 4 GB — conveniently the same ceiling the
+protocol has.
 
 **Nobody is at that keyboard, so nothing may ask a question.** A DOS
 requester — "Please insert volume Work: in any drive" — is not a

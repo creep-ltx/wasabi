@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b19"
+#define VERSION_STR "wasabid 0.1b20"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b19 (12.8.2026)";
+    "$VER: wasabid 0.1b20 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -1677,9 +1677,14 @@ static BOOL cmd_ls(int fd, const char *path)
         return send_err(fd, "Examine failed");
     }
     while (ExNext(lock, fib)) {
-        LONG n = sprintf(line, "%c %ld %ld %ld %ld %ld %s\n",
+        LONG n = sprintf(line, "%c %lu %ld %ld %ld %ld %s\n",
                          fib->fib_DirEntryType > 0 ? 'd' : 'f',
-                         (long)fib->fib_Size,
+                         /* Unsigned on purpose: OS 3.x hands back a signed
+                          * 32-bit size, so anything past 2 GB arrives
+                          * negative. A file cannot be -1 bytes long, and
+                          * reading it unsigned is right up to 4 GB - which
+                          * is also the most this protocol can carry. */
+                         (unsigned long)(ULONG)fib->fib_Size,
                          (long)fib->fib_Protection,
                          (long)fib->fib_Date.ds_Days,
                          (long)fib->fib_Date.ds_Minute,
