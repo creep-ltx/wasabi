@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b16"
+#define VERSION_STR "wasabid 0.1b17"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b16 (12.8.2026)";
+    "$VER: wasabid 0.1b17 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -193,6 +193,195 @@ static char g_key[128];
 static BOOL g_quit;
 static BOOL g_restart;               /* relaunch ourselves on the way out */
 static int  g_port = DEF_PORT;        /* the port we listen on */
+static char g_extra_args[128];       /* replayed on restart, so a running
+                                      * allow-list survives a self-update */
+
+/* --- who is allowed to talk to us ---------------------------------- */
+
+/*
+ * wasabid runs arbitrary commands. The failure that would actually hurt
+ * is not a hostile neighbour - it is the daemon being reachable from the
+ * internet at all, because somebody forwarded a port, or their router
+ * did it for them via UPnP, or the Amiga ended up in a DMZ. So by
+ * default we answer only addresses that cannot be routed in from
+ * outside: RFC1918 plus loopback.
+ *
+ * Not narrower than that on purpose. Restricting to 192.168 would lock
+ * out every home on an ISP router that hands out 10.0.0.x - Xfinity's
+ * default, among others - and buy nothing, because 10/8 and 172.16/12
+ * are no more reachable from the internet than 192.168/16 is.
+ *
+ * Loopback matters more than it looks: a connection arriving through an
+ * SSH tunnel terminating on the Amiga comes from 127.0.0.1, so tunnels
+ * and this check compose instead of fighting.
+ *
+ * A mesh VPN (Tailscale hands out 100.64.0.0/10) is a real and sensible
+ * way to reach a machine, and is not RFC1918 - hence `allow <cidr>`.
+ */
+#define MAX_ALLOW 8
+
+struct AllowNet { ULONG base, mask; };
+static struct AllowNet g_allow[MAX_ALLOW];
+static LONG g_allow_n;
+static BOOL g_allow_any;             /* `allow any` - the loaded footgun */
+
+/* Refusals, counted per address rather than logged per event: a port
+ * scanner would otherwise write a very large file about one host. */
+#define REFUSE_MAX 24
+
+struct Refusal { ULONG ip; ULONG count; };
+static struct Refusal g_refused[REFUSE_MAX];
+static LONG  g_refused_n;
+static ULONG g_refused_total;
+static BOOL  g_refused_dirty;
+static LONG  g_refused_written;      /* ds_Minute of the last file write */
+
+#define REFUSE_FILE "L:wasabid.refused"
+
+static BOOL parse_cidr(const char *s, struct AllowNet *out)
+{
+    ULONG oct[4], v = 0;
+    LONG bits = 32, i = 0;
+    const char *p = s;
+
+    for (i = 0; i < 4; i++) {
+        LONG d = 0, n = 0;
+        while (*p >= '0' && *p <= '9') { d = d * 10 + (*p++ - '0'); n++; }
+        if (!n || d > 255)
+            return FALSE;
+        oct[i] = (ULONG)d;
+        if (i < 3) {
+            if (*p != '.') return FALSE;
+            p++;
+        }
+    }
+    if (*p == '/') {
+        p++;
+        bits = 0;
+        while (*p >= '0' && *p <= '9') bits = bits * 10 + (*p++ - '0');
+        if (bits < 0 || bits > 32) return FALSE;
+    }
+    if (*p)
+        return FALSE;
+    v = (oct[0] << 24) | (oct[1] << 16) | (oct[2] << 8) | oct[3];
+    out->mask = bits ? (0xFFFFFFFFUL << (32 - bits)) : 0;
+    out->base = v & out->mask;
+    return TRUE;
+}
+
+/* addr is in host byte order. */
+static BOOL addr_allowed(ULONG a)
+{
+    LONG i;
+    if (g_allow_any)
+        return TRUE;
+    if ((a >> 24) == 127)    return TRUE;    /* 127.0.0.0/8    loopback   */
+    if ((a >> 24) == 10)     return TRUE;    /* 10.0.0.0/8                */
+    if ((a >> 20) == 0xAC1)  return TRUE;    /* 172.16.0.0/12             */
+    if ((a >> 16) == 0xC0A8) return TRUE;    /* 192.168.0.0/16            */
+    if ((a >> 16) == 0xA9FE) return TRUE;    /* 169.254.0.0/16 link-local */
+    for (i = 0; i < g_allow_n; i++)
+        if ((a & g_allow[i].mask) == g_allow[i].base)
+            return TRUE;
+    return FALSE;
+}
+
+/* Push a string into the debug ring, so refusals arrive on `wasabi
+ * debug` in order with everything else and need no second channel. */
+static void dbg_say(const char *s)
+{
+    while (*s)
+        wasabi_store((UBYTE)*s++);
+}
+
+static void note_refusal(ULONG a)
+{
+    char line[80];
+    LONG i, worst = 0;
+
+    g_refused_total++;
+    g_refused_dirty = TRUE;
+
+    for (i = 0; i < g_refused_n; i++)
+        if (g_refused[i].ip == a) {
+            g_refused[i].count++;
+            goto said;
+        }
+    if (g_refused_n < REFUSE_MAX) {
+        g_refused[g_refused_n].ip = a;
+        g_refused[g_refused_n].count = 1;
+        g_refused_n++;
+    } else {
+        /* Full: replace the quietest, so persistent knockers survive. */
+        for (i = 1; i < REFUSE_MAX; i++)
+            if (g_refused[i].count < g_refused[worst].count)
+                worst = i;
+        g_refused[worst].ip = a;
+        g_refused[worst].count = 1;
+    }
+said:
+    sprintf(line, "[wasabi: refused %lu.%lu.%lu.%lu - not on the LAN]\n",
+            (unsigned long)((a >> 24) & 255), (unsigned long)((a >> 16) & 255),
+            (unsigned long)((a >> 8) & 255), (unsigned long)(a & 255));
+    dbg_say(line);
+}
+
+/*
+ * Write the whole (small) table, not an append: it is a tally, and one
+ * rewrite of a couple of hundred bytes is cheaper than an ever-growing
+ * file nobody reads. Called from the main loop and rate-limited to once
+ * a minute, so a scan in progress cannot turn into disk thrash.
+ */
+static void refusals_save(BOOL force)
+{
+    struct DateStamp now;
+    BPTR fh;
+    LONG i;
+
+    if (!g_refused_dirty)
+        return;
+    DateStamp(&now);
+    if (!force && now.ds_Minute == g_refused_written)
+        return;
+    fh = Open(REFUSE_FILE, MODE_NEWFILE);
+    if (!fh)
+        return;                      /* not worth failing the daemon over */
+    {
+        char line[80];
+        LONG n = sprintf(line, "total %lu\n", (unsigned long)g_refused_total);
+        Write(fh, line, n);
+        for (i = 0; i < g_refused_n; i++) {
+            ULONG a = g_refused[i].ip;
+            n = sprintf(line, "%lu.%lu.%lu.%lu %lu\n",
+                        (unsigned long)((a >> 24) & 255),
+                        (unsigned long)((a >> 16) & 255),
+                        (unsigned long)((a >> 8) & 255),
+                        (unsigned long)(a & 255),
+                        (unsigned long)g_refused[i].count);
+            Write(fh, line, n);
+        }
+    }
+    Close(fh);
+    g_refused_written = now.ds_Minute;
+    g_refused_dirty = FALSE;
+}
+
+/* Pick the running total back up across a restart or a reboot. */
+static void refusals_load(void)
+{
+    BPTR fh = Open(REFUSE_FILE, MODE_OLDFILE);
+    char line[80];
+    if (!fh)
+        return;
+    if (FGets(fh, line, sizeof(line) - 1)) {
+        ULONG t = 0;
+        const char *p = line;
+        while (*p && (*p < '0' || *p > '9')) p++;
+        while (*p >= '0' && *p <= '9') t = t * 10 + (*p++ - '0');
+        g_refused_total = t;
+    }
+    Close(fh);
+}
 
 /* --- byte order helpers ------------------------------------------- */
 
@@ -364,6 +553,16 @@ static void runner_entry(void)
     BPTR out, in;
 
     job->taken = TRUE;                 /* release the parent */
+
+    /*
+     * No requesters. There is nobody at that keyboard, so "Please insert
+     * volume AmiSSL: in any drive" is not a question - it is a wedge:
+     * the runner blocks inside SystemTags() forever, taking the daemon's
+     * single run slot and 128 KB of stack with it, and only someone
+     * physically at the machine can clear it. With this, DOS fails the
+     * call instead and the client gets an error it can act on.
+     */
+    ((struct Process *)FindTask(NULL))->pr_WindowPtr = (APTR)-1;
 
     out = Open(job->outname, MODE_READWRITE);
     in  = Open("NIL:", MODE_OLDFILE);
@@ -1703,6 +1902,11 @@ static void answer_probe(int s, int port)
     buf[n] = '\0';
     if (strncmp(buf, "WASABI?1", 8) != 0)
         return;
+    /* Do not announce ourselves to anything we would refuse anyway. */
+    if (!addr_allowed(ntohl(from.sin_addr.s_addr))) {
+        note_refusal(ntohl(from.sin_addr.s_addr));
+        return;
+    }
     n = sprintf(reply, "WASABI!1 amiga %d %s\n", port, VERSION_STR);
     sendto(s, reply, n, 0, (struct sockaddr *)&from, fromlen);
 }
@@ -1735,6 +1939,9 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
             memcpy(w + n, VERSION_STR, bl); n += bl;
             w[n++] = (UBYTE)(kl >> 8); w[n++] = (UBYTE)kl;
             memcpy(w + n, CAPS_STR, kl); n += kl;
+            /* Appended after caps, same compatibility argument: an older
+             * client stops at the banner and never sees it. */
+            put_be32(w + n, g_refused_total); n += 4;
             return send_frame(fd, T_WELCOME, w, n);
         }
     }
@@ -1920,14 +2127,56 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
         return selftest(argc > 2 ? argv[2] : "-");
 
-    /* Optional first argument: a port number. Lets a test instance run
-     * on a spare port beside a live one without a bind clash. */
-    if (argc > 1) {
-        LONG p = atol(argv[1]);
-        if (p > 0 && p < 65536)
-            port = (int)p;
+    /*
+     * Arguments, in any order:
+     *   <port>          listen somewhere else - lets a trial instance run
+     *                   beside a live one without a bind clash
+     *   allow <cidr>    also answer this range, e.g. a Tailscale 100.64/10
+     *   allow any       answer anybody at all; see the warning below
+     */
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "allow") == 0 && i + 1 < argc) {
+            const char *what = argv[++i];
+            if (strcmp(what, "any") == 0)
+                g_allow_any = TRUE;
+            else if (g_allow_n < MAX_ALLOW &&
+                     parse_cidr(what, &g_allow[g_allow_n]))
+                g_allow_n++;
+            else
+                Printf("wasabid: ignoring bad allow '%s'\n", (LONG)what);
+        } else {
+            LONG p = atol(argv[i]);
+            if (p > 0 && p < 65536)
+                port = (int)p;
+        }
     }
     g_port = port;                       /* remembered for restart */
+    /* Replayed on restart, so a self-update does not silently drop the
+     * allow-list and lock the operator out of their own machine. */
+    {
+        LONG k, n = 0;
+        for (k = 0; k < g_allow_n && n < (LONG)sizeof(g_extra_args) - 40; k++) {
+            ULONG b = g_allow[k].base, m = g_allow[k].mask;
+            LONG bits = 0;
+            while (m & 0x80000000UL) { bits++; m <<= 1; }
+            n += sprintf(g_extra_args + n, " allow %lu.%lu.%lu.%lu/%ld",
+                         (unsigned long)((b >> 24) & 255),
+                         (unsigned long)((b >> 16) & 255),
+                         (unsigned long)((b >> 8) & 255),
+                         (unsigned long)(b & 255), (long)bits);
+        }
+        if (g_allow_any)
+            sprintf(g_extra_args + n, " allow any");
+    }
+
+    /* The daemon has no console either: a requester raised by ls, get or
+     * put would hang the whole loop, not just one command. */
+    {
+        struct Task *me = FindTask(NULL);
+        if (me->tc_Node.ln_Type == NT_PROCESS)
+            ((struct Process *)me)->pr_WindowPtr = (APTR)-1;
+    }
+    refusals_load();
 
     for (i = 0; i < MAX_CLIENTS; i++)
         g_clients[i].fd = -1;
@@ -1968,6 +2217,11 @@ int main(int argc, char **argv)
     Printf("%s listening on port %ld%s. Break C to stop.\n",
            (LONG)VERSION_STR, (long)port,
            (LONG)(g_key[0] ? "" : " (NO KEY SET - see ENV:wasabi.key)"));
+    if (g_allow_any)
+        Printf("wasabid: WARNING - 'allow any' is set. This daemon runs "
+               "arbitrary\n         commands and will now answer ANY "
+               "address, including the\n         open internet. Do not "
+               "leave it like this.\n");
 
     while (!g_quit) {
         fd_set rd;
@@ -2017,6 +2271,8 @@ int main(int argc, char **argv)
             if (!snoop_pump())
                 drop(g_snoop_client);
 
+        refusals_save(FALSE);            /* rate-limited to once a minute */
+
         if (n <= 0)
             continue;
 
@@ -2024,7 +2280,14 @@ int main(int argc, char **argv)
             answer_probe(disco_fd, port);
 
         if (FD_ISSET(listen_fd, &rd)) {
-            int fd = accept(listen_fd, NULL, NULL);
+            struct sockaddr_in peer;
+            socklen_t peerlen = sizeof(peer);
+            int fd = accept(listen_fd, (struct sockaddr *)&peer, &peerlen);
+            if (fd >= 0 && !addr_allowed(ntohl(peer.sin_addr.s_addr))) {
+                note_refusal(ntohl(peer.sin_addr.s_addr));
+                CloseSocket(fd);     /* before HELLO: it never gets a turn */
+                fd = -1;
+            }
             if (fd >= 0) {
                 int slot = -1;
                 for (i = 0; i < MAX_CLIENTS; i++)
@@ -2058,6 +2321,7 @@ int main(int argc, char **argv)
     Printf("wasabid: stopping\n");
 
 out:
+    refusals_save(TRUE);
     debug_stop();                        /* clears client and removes patch */
     snoop_stop();
     /* A task may still be between the snoop stub's use-count bump and its
@@ -2086,7 +2350,7 @@ out:
     if (g_restart) {
         char self[128], cmd[160];
         if (GetProgramName(self, sizeof(self)) && self[0]) {
-            sprintf(cmd, "Run >NIL: %s %d", self, g_port);
+            sprintf(cmd, "Run >NIL: %s %d%s", self, g_port, g_extra_args);
             Execute(cmd, 0, 0);
         }
     }

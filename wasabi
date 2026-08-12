@@ -80,9 +80,12 @@ class Conn:
         # predates them sends nothing more, and an empty set means
         # "cannot tell" - never "supports nothing".
         self.caps = set()
+        self.refused = None
         if off < len(payload):
-            caps, _ = unpack_str(payload, off)
+            caps, off = unpack_str(payload, off)
             self.caps = {c.strip() for c in caps.split(",") if c.strip()}
+        if off + 4 <= len(payload):
+            (self.refused,) = struct.unpack_from(">I", payload, off)
 
     def send(self, tag, payload=b""):
         if len(payload) > MAX_PAYLOAD:
@@ -195,6 +198,8 @@ def cmd_info(conn, args):
         print("can: %s" % " ".join(sorted(conn.caps)))
     else:
         print("can: (this wasabid predates the capability list)")
+    if conn.refused is not None:
+        print("refused: %d connection(s) from off the LAN" % conn.refused)
 
 
 def cmd_ls(conn, args):
@@ -659,6 +664,35 @@ def cmd_mkdir(conn, args):
 
 DISCOVERY_PROBE = b"WASABI?1\n"
 CACHE = os.path.expanduser("~/.cache/wasabi/last-host")
+SEEN_REFUSED = os.path.expanduser("~/.cache/wasabi/refused-%s")
+
+
+def warn_if_refusals_grew(conn, host):
+    """Say something only when the count has gone up since last time.
+
+    A standing "673 refused connections" on every command is wallpaper
+    within a day; a number that moves is a signal. So remember what we
+    last saw for this host and speak up only on the difference.
+    """
+    if not conn.refused:
+        return
+    path = SEEN_REFUSED % host.replace("/", "_")
+    try:
+        with open(path) as fh:
+            before = int(fh.read().strip())
+    except (OSError, ValueError):
+        before = 0
+    if conn.refused > before:
+        new = conn.refused - before
+        print("wasabi: %d connection(s) refused as off-LAN since you last "
+              "looked (%d in total) - 'wasabi debug' shows them as they "
+              "happen" % (new, conn.refused), file=sys.stderr)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write("%d\n" % conn.refused)
+    except OSError:
+        pass
 
 
 def local_ipv4s():
@@ -975,6 +1009,8 @@ def main(argv=None):
         print("wasabi: cannot reach %s:%d - %s" % (host, port, exc),
               file=sys.stderr)
         return 2
+    warn_if_refusals_grew(conn, host)
+
     # Only refuse when the daemon actually told us what it can do; an
     # empty set means it predates the list, so try and report the result.
     if needs and conn.caps and needs not in conn.caps:

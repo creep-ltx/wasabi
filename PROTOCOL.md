@@ -74,7 +74,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | Tag  | Name     | Direction | Payload |
 |------|----------|-----------|---------|
 | 0x01 | HELLO    | C→S | `u16 version`, `str key` |
-| 0x02 | WELCOME  | S→C | `u16 version`, `str banner`, `str caps` |
+| 0x02 | WELCOME  | S→C | `u16 version`, `str banner`, `str caps`, `u32 refused` |
 | 0x03 | ERR      | S→C | `u32 code`, `str message` |
 | 0x04 | OK       | S→C | — |
 | 0x05 | PING     | C→S | — |
@@ -138,6 +138,26 @@ before the list against a daemon that sends one.
 
 `PROTO_VERSION` remains the hard gate, and only for framing changes.
 Features negotiate through `caps`.
+
+`refused` is how many connections the daemon has turned away as not
+being on the LAN, counted since the tally file was last cleared. It is
+appended after `caps` on the same compatibility argument, and exists so
+the operator learns that something has been knocking without having to
+go looking for it.
+
+## Who may connect
+
+The daemon closes any connection from an address it does not recognise
+as local — RFC1918, loopback and link-local by default — **before** the
+peer can send `HELLO`, and does not answer that address's discovery
+probes either. Extra ranges can be permitted at startup (`allow <cidr>`,
+for a mesh VPN) or the check disabled entirely (`allow any`), which
+warns loudly because `wasabid` is a remote-code-execution daemon.
+
+This is a guard against exposure by accident — a forwarded port, UPnP, a
+DMZ — not against anyone already on the LAN. Spoofing does not defeat
+it for TCP: an off-path attacker forging a private source address never
+receives the SYN-ACK and cannot complete the handshake.
 
 ## Commands
 

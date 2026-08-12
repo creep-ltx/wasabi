@@ -220,6 +220,22 @@ out=$(./wasabi --host 127.0.0.1 --port $((PORT+8)) --key "$KEY" ps 2>&1 | \
 check "a pre-capability daemon is not second-guessed" "1" "$out"
 kill $PRE_PID 2>/dev/null
 
+# --- refused off-LAN connections, reported to the operator ---
+rm -f "$HOME/.cache/wasabi/refused-127.0.0.1"
+./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+9)) --key "$KEY" \
+    --refused 673 >>"$ROOT/mock.log" 2>&1 &
+REF_PID=$!
+sleep 1
+R="./wasabi --host 127.0.0.1 --port $((PORT+9)) --key $KEY"
+out=$($R ping 2>&1 | grep -c "673 connection(s) refused")
+check "a rising refusal count is reported once" "1" "$out"
+out=$($R ping 2>&1 | grep -c "refused as off-LAN")
+check "and not repeated when it has not moved" "0" "$out"
+out=$($R info 2>/dev/null | grep -c "^refused: 673")
+check "info always shows the total" "1" "$out"
+kill $REF_PID 2>/dev/null
+rm -f "$HOME/.cache/wasabi/refused-127.0.0.1"
+
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")
 if [ "$out" -ge 1 ]; then ok "a missing file reports an error"

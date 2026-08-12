@@ -43,6 +43,8 @@ BANNER = None
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,quit,install")
+# Off-LAN connections the daemon has turned away, reported in WELCOME.
+REFUSED = 0
 # The path this mock pretends to be running from, so it can refuse a plain
 # PUT over itself exactly as the daemon does.
 SELF = "C:wasabid"
@@ -162,6 +164,7 @@ class Handler(socketserver.BaseRequestHandler):
                 BANNER or "mock-wasabid on %s" % os.uname().nodename)
             if CAPS:
                 welcome += pack_str(CAPS)
+                welcome += struct.pack(">I", REFUSED)
             self.send(WELCOME, welcome)
             # Once a stream is subscribed, alternate between watching for
             # further frames (a second subscription - debug and snoop may
@@ -502,7 +505,7 @@ def discovery_responder(port, name):
 
 
 def main():
-    global ROOT, KEY, PORT, BANNER, CAPS
+    global ROOT, KEY, PORT, BANNER, CAPS, REFUSED
     p = argparse.ArgumentParser()
     p.add_argument("--root", default=ROOT)
     p.add_argument("--port", type=int, default=1234)
@@ -511,7 +514,10 @@ def main():
                    help="what to call ourselves in WELCOME")
     p.add_argument("--caps", default=CAPS,
                    help="capability list; empty plays a pre-caps daemon")
+    p.add_argument("--refused", type=int, default=0,
+                   help="off-LAN refusals to report in WELCOME")
     args = p.parse_args()
+    REFUSED = args.refused
     ROOT, KEY, PORT, BANNER = args.root, args.key, args.port, args.banner
     CAPS = args.caps
     os.makedirs(ROOT, exist_ok=True)

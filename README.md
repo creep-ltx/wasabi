@@ -11,7 +11,7 @@ Two halves:
 
 ```
 $ wasabi discover
-192.168.1.42    :1234  amiga        wasabid 0.1b16
+192.168.1.42    :1234  amiga        wasabid 0.1b17
 
 $ wasabi deploy ccon-handler L:ccon-handler --reboot
 ccon-handler -> L:ccon-handler (106912 bytes)
@@ -47,7 +47,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 42 tests, no Amiga required.
+host mock that speaks the same protocol — 45 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -116,7 +116,8 @@ wasabi speedtest [SIZE]      latency, then throughput both ways (max 256MB)
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
-config file.
+config file. The daemon takes `wasabid [port] [allow CIDR|any]`, and is
+LAN-only unless told otherwise.
 
 ## Four things the Amiga side gets right on purpose
 
@@ -164,14 +165,76 @@ that write with `Write()` stream immediately.
 
 **`T:` should be in RAM** for `run` to feel live. It normally is.
 
+**Nobody is at that keyboard, so nothing may ask a question.** A DOS
+requester — "Please insert volume Work: in any drive" — is not a
+question when the machine is being driven over a network; it is a wedge.
+It cost a run slot and 128 KB of stack, permanently, until someone
+walked over and clicked. Both the daemon and each runner set
+`pr_WindowPtr = -1`, so DOS fails the call instead and the error comes
+back down the wire: `List DF0:` now returns `rc 20, IoErr 226 - no disk
+in drive` rather than hanging forever.
+
+**Some programs escape `run`'s output capture.** `run` redirects
+`SYS_Output`, and a program that writes to its own stream instead of the
+process's `Output()` handle will not be caught — AmiSSL's `OpenSSL` is
+built `-DOPENSSL_NO_STDIO` and does exactly this, printing nothing
+through wasabi while working perfectly. The workaround is to redirect on
+the Amiga side and fetch the file: `run "cmd >T:out"` then `get T:out -`.
+
 ## Security
 
 `wasabid` executes arbitrary commands as whatever started it, over a
 plaintext socket, on a machine with no memory protection. The key in
 `ENV:wasabi.key` stops an accidental connection from a misconfigured
-tool; it stops nothing else. Do not port-forward it. The discovery
-responder answers everyone, deliberately — needing the key to *find* the
-machine would defeat the point, and it reveals no more than a port scan.
+tool; it stops nothing else.
+
+**It answers only addresses that cannot be routed in from the
+internet** — RFC1918 (`10/8`, `172.16/12`, `192.168/16`) plus loopback
+and link-local. Anything else is closed before it can send `HELLO`. This
+is not about hostile neighbours; it is about the mistake that actually
+hurts a tool like this: somebody forwards port 1234, or their router
+does it for them via UPnP, or the Amiga lands in a DMZ, and an
+unauthenticated remote shell is now on the open internet. The check
+lives in the daemon, where a router configuration cannot undo it.
+
+Not narrower than RFC1918 on purpose. Restricting to `192.168` would
+lock out every home whose ISP router hands out `10.0.0.x` — Xfinity's
+default among others — and buy nothing, since `10/8` is exactly as
+unroutable from outside as `192.168/16`.
+
+Loopback is allowed deliberately: a connection arriving through an SSH
+tunnel that terminates on the Amiga comes from `127.0.0.1`, so tunnels
+and this check compose rather than fight.
+
+A mesh VPN is a legitimate way to reach a machine and is not RFC1918
+(Tailscale uses `100.64.0.0/10`), so ranges can be added:
+
+```
+Run >NIL: C:wasabid                          plain: RFC1918 + loopback
+Run >NIL: C:wasabid allow 100.64.0.0/10      plus a Tailscale range
+Run >NIL: C:wasabid allow any                off - warns loudly at startup
+```
+
+Refusals are counted per address rather than logged per event, because a
+port scan would otherwise write a very large file about one host. The
+tally lives in `L:wasabid.refused`, survives a restart, and shows up
+where you will actually see it:
+
+```
+$ wasabi ping
+wasabi: 673 connection(s) refused as off-LAN since you last looked
+(673 in total) - 'wasabi debug' shows them as they happen
+wasabid 0.1b17 - 3.2 ms
+```
+
+That warning appears only when the number has *risen* since you last
+connected — a standing count on every command is wallpaper within a day,
+whereas one that moves is a signal. `wasabi info` always shows the
+total, and each refusal appears on the `debug` stream as it happens.
+
+The discovery responder answers anyone *on the LAN*, deliberately —
+needing the key to *find* the machine would defeat the point, and it
+reveals no more than a port scan. It stays silent to everyone else.
 
 ## Building and testing
 
