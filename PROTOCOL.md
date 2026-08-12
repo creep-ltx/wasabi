@@ -58,6 +58,13 @@ larger length must close the connection rather than try to allocate it.
 That cap is the only thing standing between a stray byte and a 4GB
 `AllocMem()` on a machine with no MMU protection.
 
+**Send a frame whole.** The daemon gives a peer ten seconds to finish
+what it started — on either direction, since a client that stops reading
+a stream blocks the daemon's `send()` just as surely — and then drops the
+connection. It is one process with one loop, so an unbounded wait is the
+whole machine's wait. Nothing legitimate comes close: a full 64 KB frame
+crosses a LAN in well under a millisecond.
+
 Strings are **not** NUL-terminated on the wire. Where a payload holds a
 string it is `u16 len` followed by `len` bytes, Latin-1 (the Amiga's
 charset). The C side always terminates them itself after bounds-checking.

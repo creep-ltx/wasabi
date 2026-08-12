@@ -118,7 +118,7 @@ wasabi speedtest [SIZE]      latency, then throughput both ways (max 256MB)
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
 config file.
 
-## Three things the Amiga side gets right on purpose
+## Four things the Amiga side gets right on purpose
 
 **`put` is atomic.** The daemon writes to a sibling `.wasabi-tmp` and
 renames over the target at the very end. An interrupted upload can
@@ -134,6 +134,19 @@ an *exclusive* lock, so the daemon could never open the file to tail it.
 to the runner process unambiguous, and one developer driving one Amiga
 has no use for two concurrent builds. A second `run` gets a clear error,
 not a queue.
+
+**No blocking read or write is unbounded.** wasabid is one process with
+one loop, so a single wedged peer used to take the machine with it: send
+half a frame and stall, or subscribe to `debug` and stop reading, and the
+daemon blocked in `recv()` or `send()` forever — nothing else served, not
+even Ctrl-C honoured. Every blocking read and write now waits on
+`WaitSelect()` with a ten-second bound (and watches Ctrl-C while it
+does), then drops that client. Measured on the A1200: a client that sent
+half a frame and went silent was cut off after 10.0 s, a `ping` issued
+one second into the stall was answered 9.0 s later — the remainder of the
+timeout — and everything after it was instant again. Ten seconds is
+enormous next to an honest frame; 64 KB crosses this network in under a
+millisecond, and throughput is unchanged at line rate.
 
 ## Things that are the way they are because AmigaOS is
 
@@ -396,12 +409,6 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 In priority order — each one shrinks a real "machine goes down or
 corrupts silently" risk, none needs a protocol version bump:
 
-- **Receive timeouts** — `recv_frame()` blocks, so a client that sends
-  half a frame and stalls hangs the daemon for everyone, forever. A
-  `WaitSelect()` with a few-seconds timeout before each blocking read
-  turns that into "the stalled client gets dropped". The full
-  per-client-buffer state machine is only warranted if wasabi ever
-  becomes multi-user.
 - **Capabilities in `WELCOME`** — self-update makes version skew an
   everyday event, and a new client asking an old daemon for `ps` gets a
   confusing "unknown command". A capability list appended to the

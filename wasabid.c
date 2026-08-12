@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b14"
+#define VERSION_STR "wasabid 0.1b15"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b14 (12.8.2026)";
+    "$VER: wasabid 0.1b15 (12.8.2026)";
 
 #define PROTO_VERSION   1
 #define DEF_PORT        1234
@@ -197,10 +197,55 @@ static UWORD get_be16(const UBYTE *p)
 
 /* --- framing ------------------------------------------------------- */
 
+/*
+ * Every blocking read and write in the daemon waits here first, and that
+ * is the whole point: wasabid is one process with one loop, so a single
+ * wedged peer blocking in recv() or send() takes the machine with it -
+ * no other client served, no stream pumped, no Ctrl-C honoured, nothing
+ * to do but walk to the Amiga.
+ *
+ * Two peers can do it. One sends half a frame and stalls; one subscribes
+ * to the debug stream and stops reading until the socket buffers fill.
+ * Both used to be forever. Now both are ten seconds, and then that
+ * client is dropped - the rest of the machine never notices.
+ *
+ * Ten seconds is enormous next to an honest frame: 64 KB crosses this
+ * network in under a millisecond, and the client sends a frame's body
+ * straight after its header. Nothing legitimate waits that long.
+ *
+ * CTRL-C is watched alongside the socket, so a wedged transfer can never
+ * make the daemon unkillable from its own keyboard. The signal is
+ * consumed here, so it is turned into g_quit for the main loop to see.
+ */
+#define IO_TIMEOUT_SECS 10
+
+static BOOL io_wait(int fd, BOOL forwrite)
+{
+    fd_set set;
+    struct timeval tv;
+    ULONG sigs = SIGBREAKF_CTRL_C;
+    LONG n;
+
+    FD_ZERO(&set);
+    FD_SET(fd, &set);
+    tv.tv_secs  = IO_TIMEOUT_SECS;
+    tv.tv_micro = 0;
+    n = WaitSelect(fd + 1, forwrite ? NULL : &set, forwrite ? &set : NULL,
+                   NULL, &tv, &sigs);
+    if (sigs & SIGBREAKF_CTRL_C) {
+        g_quit = TRUE;
+        return FALSE;
+    }
+    return n > 0;                    /* 0 = timed out, <0 = the socket died */
+}
+
 static BOOL send_all(int fd, const UBYTE *buf, LONG len)
 {
     while (len > 0) {
-        LONG n = send(fd, (void *)buf, len, 0);
+        LONG n;
+        if (!io_wait(fd, TRUE))
+            return FALSE;
+        n = send(fd, (void *)buf, len, 0);
         if (n <= 0)
             return FALSE;
         buf += n;
@@ -222,7 +267,10 @@ static BOOL send_frame(int fd, UBYTE tag, const void *payload, LONG len)
 static BOOL recv_all(int fd, UBYTE *buf, LONG len)
 {
     while (len > 0) {
-        LONG n = recv(fd, (void *)buf, len, 0);
+        LONG n;
+        if (!io_wait(fd, FALSE))
+            return FALSE;
+        n = recv(fd, (void *)buf, len, 0);
         if (n <= 0)
             return FALSE;
         buf += n;
@@ -232,10 +280,14 @@ static BOOL recv_all(int fd, UBYTE *buf, LONG len)
 }
 
 /*
- * Read one whole frame. Blocking: select() has already told us bytes are
- * waiting, and a client that sends half a frame then stalls will hold up
- * the daemon. Acceptable on a LAN with one user; the fix, if it ever
- * bites, is a per-client input buffer and a real state machine.
+ * Read one whole frame, in the caller's own time rather than the main
+ * loop's: PUT and SPEED read their bodies straight through this. A peer
+ * that stops mid-frame is bounded by io_wait() and then dropped, so the
+ * daemon stays the daemon.
+ *
+ * This is still not a state machine - one client is served at a time
+ * while its frame arrives, which is fine for one developer and one
+ * Amiga. Multi-user would want a per-client input buffer instead.
  */
 static BOOL recv_frame(int fd, UBYTE *tag, UBYTE *payload, LONG *len)
 {
