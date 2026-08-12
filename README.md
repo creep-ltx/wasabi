@@ -37,7 +37,7 @@ and land it on real silicon without touching an SD card.**
 | `restart` (in-place self-update) | **working on the real A1200** — `put C:wasabid` + `restart`, no reboot |
 | `snoop` (DOS call trace) | **working on the real A1200** — SnoopDOS-style patches on 14 dos/exec calls |
 | `ps` / `kill` | **working on the real A1200** — full task list; Ctrl-C or RemTask |
-| `speedtest` | **working on the real A1200** — ~95 MB/s up, ~60 MB/s down on this network |
+| `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
 Emu68 with the lwIP `bsdsocket.library`. Kickstart 47.115, 3.4 ms
@@ -281,7 +281,13 @@ instead of blending in a filesystem. (A future `--via PATH` mode could
 measure through a real volume; it must first check `info`'s free-memory
 numbers and refuse a size that does not fit with a healthy margin.)
 
-On this network — Wi-Fi client to the A1200's Emu68 lwIP stack over
-gigabit ethernet — 25 MB moves up at ~97 MB/s and down at ~64 MB/s.
+On this network the ceiling turns out to be the wire itself — a 256 MB
+test runs the A1200's Emu68 lwIP stack at gigabit line rate both ways:
+
+```
+ping    2.33 ms     min 2.14 / max 3.99 / jitter 0.31  (200 pings)
+up    109.12 MB/s   256.0 MB in 2.35 s
+down  105.02 MB/s   256.0 MB in 2.44 s
+```
 
 `PROTOCOL.md` is the wire format, and the contract between the two halves.
