@@ -183,14 +183,33 @@ so downloads have no such limit.
 
 The filesystem usually gives up first anyway: PFS3 caps a file at 4 GB,
 so only an SFS\2 volume can hold the largest thing wasabi can send.
-Measured on the A1200: 4,294,967,295 bytes to SFS\2 in 317 s, about
-13.5 MB/s — disk-bound, since the same network moves 109 MB/s.
+Measured on the A1200, both directions on the same SFS\2 volume:
 
-**Sizes past 2 GB are read unsigned.** OS 3.x's `Examine()` returns
-`fib_Size` as a *signed* 32-bit LONG, so a 4 GB file reports as `-1`.
-Since a file cannot be negative bytes long, `ls` reads it unsigned,
-which is correct all the way to 4 GB — conveniently the same ceiling the
-protocol has.
+| | Size | Time | Rate |
+|---|---|---|---|
+| `put` (write) | 4,294,967,295 | 317 s | 13.5 MB/s |
+| `get` (read) | 4,831,838,208 | 232 s | 20.8 MB/s |
+
+Reads run 1.5× faster, which is the expected direction — writing also
+allocates blocks and updates metadata. Both are disk-bound: the same
+network moves 109 MB/s, so wasabi is 5–8× away from being the limit.
+
+That read was a **4.5 GiB file, larger than `put` can send**, which is
+the asymmetry above demonstrated rather than argued: `get` declares no
+size and simply streams until `END`.
+
+**Sizes are read unsigned, and still wrap past 4 GiB.** OS 3.x's
+`Examine()` returns `fib_Size` as a *signed* 32-bit LONG, so a 4 GB file
+reports as `-1`. Since a file cannot be negative bytes long, `ls` reads
+it unsigned, which is correct to 4 GB — the same ceiling `put` has.
+
+Beyond that nothing can save it: that 4.5 GiB file lists as 536,870,912
+bytes, because `fib_Size` is the true size modulo 2³², and 512 MiB is
+far too plausible to detect. Reporting it properly needs the 64-bit
+filesystem extension (`ACTION_GET_FILE_SIZE64`, which SFS\2 supports),
+but that means opening every file to ask — far too expensive for a
+directory listing. So `ls` is honest to 4 GB and wrong above it, and
+that is written down here rather than discovered later.
 
 **Nobody is at that keyboard, so nothing may ask a question.** A DOS
 requester — "Please insert volume Work: in any drive" — is not a
