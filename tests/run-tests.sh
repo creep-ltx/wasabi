@@ -81,7 +81,8 @@ fi
 rm -f "$ROOT/../wasabi-big.$$" "$ROOT/../wasabi-back.$$"
 
 # --- put is atomic: no temp file left behind ---
-out=$(find "$ROOT" -name "*.wasabi-tmp" | wc -l)
+# tr strips the padding BSD wc puts in front of its number.
+out=$(find "$ROOT" -name "*.wasabi-tmp" | wc -l | tr -d ' \t')
 check "put leaves no temp file behind" "0" "$out"
 
 # --- run: output and exit code ---
@@ -159,7 +160,9 @@ out=$($W put "$NEWD" C:wasabid 2>&1 | grep -c "wasabi update")
 check "put refuses to overwrite the running daemon" "1" "$out"
 check "and leaves it alone" "old daemon" "$(cat "$ROOT/C/wasabid")"
 
-out=$($W update /etc/hostname 2>&1 | grep -c "not a wasabid binary")
+# LICENSE is a local file guaranteed to exist and to carry no $VER tag
+# (/etc/hostname, the old choice, does not exist on macOS).
+out=$($W update LICENSE 2>&1 | grep -c "not a wasabid binary")
 check "update refuses a file with no \$VER tag" "1" "$out"
 check "still leaves the daemon alone" "old daemon" "$(cat "$ROOT/C/wasabid")"
 
@@ -202,7 +205,12 @@ check "speedtest refuses an absurd size" "1" "$out"
 # --- screen grab: raw over the wire, PNG written here ---
 SHOT=$ROOT/../wasabi-shot.$$
 $W grab "$SHOT" >/dev/null 2>&1
-if [ -s "$SHOT" ] && head -c8 "$SHOT" | grep -q PNG; then
+# The magic is checked in python: BSD grep will not commit to an exit
+# status on bytes it considers binary.
+if [ -s "$SHOT" ] && python3 -c "
+import sys
+sys.exit(0 if open('$SHOT','rb').read(8) == b'\x89PNG\r\n\x1a\n' else 1)"
+then
     ok "grab writes a real PNG"
 else
     no "grab writes a real PNG"
