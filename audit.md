@@ -1,5 +1,14 @@
 # Wasabi — Full Audit
 
+> **Status: CLOSED.** Every actionable finding below is fixed and was
+> verified on the real A1200 — the four bugs in 0.1b26, the cleanup
+> tier in 0.1b27, the exit-with-a-live-runner hazard in 0.1b30/b31 —
+> and wasabid 0.1 shipped with the ledger empty. Only two things
+> remain, by choice: CI once the repo has a remote, and the
+> documented-by-design decisions the audit endorsed. This file stays as
+> the record of what was found and why the fixes look the way they do;
+> the postscripts at the bottom trace the closure.
+
 *Audited 2026-08-12, at `12b14f9` (wasabid 0.1b25). Every file read in full:
 `wasabid.c` (2,838 lines), `wasabi` (1,171), `tests/mock-wasabid.py` (561),
 `tests/run-tests.sh` (269), `tests/dbgemit.c`, `tests/slowwrite.c`,
