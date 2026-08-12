@@ -121,8 +121,16 @@ wasabi screen [--cycle|--to-front T]    list screens, flip between them
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
-config file. The daemon takes `wasabid [port] [allow CIDR|any]`, and is
-LAN-only unless told otherwise.
+config file. The daemon takes `wasabid [port] [name ID] [allow
+CIDR|any]`, and is LAN-only unless told otherwise. `name` is what
+discovery replies call the machine — two Amigas on one LAN stop being
+interchangeable "amiga"s — and it overrides `ENV:HOSTNAME`, which is
+the fallback (then plain `amiga`). It survives `restart` and
+self-update, like the allow-list:
+
+```
+Run >NIL: C:wasabid name a1200
+```
 
 ## Four things the Amiga side gets right on purpose
 

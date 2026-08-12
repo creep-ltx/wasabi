@@ -39,10 +39,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b27"
+#define VERSION_STR "wasabid 0.1b28"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b27 (12.8.2026)";
+    "$VER: wasabid 0.1b28 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -226,12 +226,16 @@ struct Client {
 
 static struct Client g_clients[MAX_CLIENTS];
 static char g_key[128];
-static char g_name[32] = "amiga";    /* discovery name; ENV:HOSTNAME wins */
+static char g_name[32] = "amiga";    /* discovery name: the 'name' startup
+                                      * argument, else ENV:HOSTNAME, else
+                                      * this default */
+static BOOL g_name_set;              /* 'name' given on the command line */
 static BOOL g_quit;
 static BOOL g_restart;               /* relaunch ourselves on the way out */
 static int  g_port = DEF_PORT;        /* the port we listen on */
 static char g_extra_args[128];       /* replayed on restart, so a running
-                                      * allow-list survives a self-update */
+                                      * allow-list and name survive a
+                                      * self-update */
 
 /* --- who is allowed to talk to us ---------------------------------- */
 
@@ -2679,11 +2683,21 @@ int main(int argc, char **argv)
      * Arguments, in any order:
      *   <port>          listen somewhere else - lets a trial instance run
      *                   beside a live one without a bind clash
+     *   name <id>       what discovery replies call this machine, so two
+     *                   Amigas on one LAN are telling apart; overrides
+     *                   ENV:HOSTNAME
      *   allow <cidr>    also answer this range, e.g. a Tailscale 100.64/10
      *   allow any       answer anybody at all; see the warning below
      */
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "allow") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "name") == 0 && i + 1 < argc) {
+            char *p;
+            strncpy(g_name, argv[++i], sizeof(g_name) - 1);
+            g_name[sizeof(g_name) - 1] = '\0';
+            for (p = g_name; *p; p++)
+                if (*p == ' ') *p = '-'; /* the reply is space-delimited */
+            g_name_set = TRUE;
+        } else if (strcmp(argv[i], "allow") == 0 && i + 1 < argc) {
             const char *what = argv[++i];
             if (strcmp(what, "any") == 0)
                 g_allow_any = TRUE;
@@ -2713,6 +2727,8 @@ int main(int argc, char **argv)
                          (unsigned long)((b >> 8) & 255),
                          (unsigned long)(b & 255), (long)bits);
         }
+        if (g_name_set && n < (LONG)sizeof(g_extra_args) - 40)
+            n += sprintf(g_extra_args + n, " name %s", g_name);
         if (g_allow_any)
             sprintf(g_extra_args + n, " allow any");
     }
@@ -2733,15 +2749,18 @@ int main(int argc, char **argv)
         g_key[0] = '\0';
 
     /* Name for discovery replies: two Amigas answering as "amiga" are
-     * indistinguishable. Roadshow and rondoval's stack both set
-     * ENV:HOSTNAME; without it the old default stands. The protocol's
-     * name field is space-delimited, so spaces become dashes. */
-    if (GetVar("HOSTNAME", g_name, sizeof(g_name), 0) > 0) {
-        char *p;
-        for (p = g_name; *p; p++)
-            if (*p == ' ') *p = '-';
-    } else
-        strcpy(g_name, "amiga");
+     * indistinguishable. The 'name' argument wins; else Roadshow and
+     * rondoval's stack both set ENV:HOSTNAME; without either the old
+     * default stands. The name field is space-delimited, so spaces
+     * become dashes. */
+    if (!g_name_set) {
+        if (GetVar("HOSTNAME", g_name, sizeof(g_name), 0) > 0) {
+            char *p;
+            for (p = g_name; *p; p++)
+                if (*p == ' ') *p = '-';
+        } else
+            strcpy(g_name, "amiga");
+    }
 
     SocketBase = OpenLibrary("bsdsocket.library", 4);
     if (!SocketBase) {
