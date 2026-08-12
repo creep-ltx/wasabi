@@ -7,7 +7,9 @@ from the same terminal the code was written in.
 Two halves:
 
 - **`wasabid`** — a small daemon on the Amiga (C, Bebbo's gcc, one file).
-- **`wasabi`** — the Linux client (Python 3, stdlib only, one file).
+- **`wasabi`** — the client (Python 3, stdlib only, one file). At home
+  on Linux and macOS; elsewhere discovery's subnet sweep degrades to
+  plain broadcast and `--host` always works.
 
 ```
 $ wasabi discover
@@ -83,7 +85,7 @@ It needs a working `bsdsocket.library` — on a PiStorm32/CM4 that means
 (lwIP over `genet.device`), or Roadshow, or AmiTCP. Anything that
 provides the standard API.
 
-**Linux.** Drop the client somewhere on `$PATH`:
+**Linux or macOS.** Drop the client somewhere on `$PATH`:
 
 ```
 ln -s $PWD/wasabi ~/.local/bin/wasabi

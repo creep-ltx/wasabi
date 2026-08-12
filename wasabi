@@ -65,10 +65,16 @@ class Conn:
         # Keepalive, tuned tight: a machine that is reset or freezes
         # mid-connection sends no FIN, and a blocking recv() would wait
         # on it forever. ~25 s of unanswered probes declares it dead.
+        # macOS spells the idle-time option TCP_KEEPALIVE where Linux
+        # says TCP_KEEPIDLE; missing either would quietly leave the
+        # 2-hour system default, which is no keepalive at all.
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        for opt, val in (("TCP_KEEPIDLE", 10), ("TCP_KEEPINTVL", 5),
-                         ("TCP_KEEPCNT", 3)):
-            if hasattr(socket, opt):    # Linux names; harmless to skip
+        idle = getattr(socket, "TCP_KEEPIDLE",
+                       getattr(socket, "TCP_KEEPALIVE", None))
+        if idle is not None:
+            self.sock.setsockopt(socket.IPPROTO_TCP, idle, 10)
+        for opt, val in (("TCP_KEEPINTVL", 5), ("TCP_KEEPCNT", 3)):
+            if hasattr(socket, opt):    # absent on Windows; skip
                 self.sock.setsockopt(socket.IPPROTO_TCP,
                                      getattr(socket, opt), val)
         self.buf = b""
@@ -881,22 +887,37 @@ def warn_if_refusals_grew(conn, host):
 
 
 def local_ipv4s():
-    """Every local IPv4 address and netmask, via the interface list."""
-    import fcntl
+    """Every local IPv4 address and netmask, via the interface list.
+
+    The ioctl numbers are per-OS; the ifreq layout happily is not - a
+    sockaddr_in puts the address at bytes 20:24 of the request on Linux
+    (2-byte family, 2-byte port) and on the BSDs/macOS (1-byte length,
+    1-byte family, 2-byte port) alike. Windows has no fcntl at all;
+    there this returns nothing and discovery degrades to the plain
+    broadcast, which still works - as do the cache and --host.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return []
     import array
+    if sys.platform == "darwin":
+        SIOCGIFADDR, SIOCGIFNETMASK = 0xC0206921, 0xC0206925
+    else:
+        SIOCGIFADDR, SIOCGIFNETMASK = 0x8915, 0x891B
     out = []
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         for _idx, name in socket.if_nameindex():
-            if name == "lo":
+            if name in ("lo", "lo0"):
                 continue
             # ioctl() with a mutable buffer returns an int and writes the
             # answer INTO the buffer - read ifreq, never the return value.
             ifreq = array.array("B", name.encode()[:15].ljust(40, b"\0"))
             try:
-                fcntl.ioctl(sock.fileno(), 0x8915, ifreq)   # SIOCGIFADDR
+                fcntl.ioctl(sock.fileno(), SIOCGIFADDR, ifreq)
                 ip = ".".join(str(b) for b in ifreq[20:24])
-                fcntl.ioctl(sock.fileno(), 0x891B, ifreq)   # SIOCGIFNETMASK
+                fcntl.ioctl(sock.fileno(), SIOCGIFNETMASK, ifreq)
                 nm = ".".join(str(b) for b in ifreq[20:24])
             except OSError:
                 continue
