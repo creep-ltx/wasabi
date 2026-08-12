@@ -12,6 +12,7 @@ Talks to wasabid on the Amiga side. See PROTOCOL.md for the wire format.
 
 import argparse
 import os
+import re
 import socket
 import struct
 import sys
@@ -26,7 +27,7 @@ HELLO, WELCOME, ERR, OK, PING, PONG = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
-REBOOT, INFO, RESTART = 0x40, 0x41, 0x42
+REBOOT, INFO, RESTART, PS, KILL = 0x40, 0x41, 0x42, 0x43, 0x44
 
 TAGNAMES = {v: k for k, v in list(globals().items()) if isinstance(v, int)}
 
@@ -132,6 +133,23 @@ def protstr(bits):
         else:      # r w e d - active LOW
             out.append("-" if bits & (1 << (7 - i)) else ch)
     return "".join(out)
+
+
+def amiga_pattern(pat):
+    """AmigaDOS wildcards -> anchored regex: '#?' and '*' are any-run,
+    '?' any single char, case-insensitive, whole-name match."""
+    out, i = [], 0
+    while i < len(pat):
+        if pat[i:i + 2] == "#?" or pat[i] == "*":
+            out.append(".*")
+            i += 2 if pat[i] == "#" else 1
+        elif pat[i] == "?":
+            out.append(".")
+            i += 1
+        else:
+            out.append(re.escape(pat[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z", re.I)
 
 
 def drain_to_end(conn, sink):
@@ -339,6 +357,44 @@ def cmd_stream(conn, args):
         if logf:
             logf.close()
     return 0
+
+
+def cmd_ps(conn, args):
+    conn.send(PS)
+    text = []
+    drain_to_end(conn, lambda b: text.append(b))
+    rx = amiga_pattern(args.pattern) if args.pattern else None
+    rows = []
+    for line in b"".join(text).decode("latin-1").splitlines():
+        parts = line.split(" ", 6)
+        if len(parts) < 7:
+            continue
+        addr, kind, pri, state, stack, cli, rest = parts
+        name, _, cmd = rest.partition("\t")
+        if rx and not (rx.match(name) or (cmd and rx.match(cmd))):
+            continue
+        rows.append((addr, kind, int(pri), state, int(stack), int(cli),
+                     name, cmd))
+    rows.sort(key=lambda r: (r[1] != "p", r[5] if r[5] >= 0 else 999,
+                             r[6].lower()))
+    print("%-10s %-4s %4s %-6s %7s %4s  %s"
+          % ("ADDR", "KIND", "PRI", "STATE", "STACK", "CLI", "NAME"))
+    for addr, kind, pri, state, stack, cli, name, cmd in rows:
+        label = name
+        if cmd and cmd.lower() != name.lower():
+            label += " (%s)" % cmd
+        print("%-10s %-4s %4d %-6s %7d %4s  %s" % (
+            addr, "proc" if kind == "p" else "task", pri, state, stack,
+            cli if cli >= 0 else "-", label))
+    print("%d tasks" % len(rows), file=sys.stderr)
+
+
+def cmd_kill(conn, args):
+    flags = 1 if args.force else 0
+    conn.send(KILL, struct.pack(">I", flags) + pack_str(args.target))
+    conn.expect_ok()
+    print("%s %s" % ("removed" if args.force else "sent Ctrl-C to",
+                     args.target), file=sys.stderr)
 
 
 def do_reboot(conn, cold=False):
@@ -615,6 +671,17 @@ def main(argv=None):
     s.add_argument("--log", metavar="FILE",
                    help="append timestamped lines to FILE")
     s.set_defaults(fn=cmd_stream, mode="snoop")
+
+    s = sub.add_parser("ps", help="list tasks and processes")
+    s.add_argument("pattern", nargs="?", default="",
+                   help="AmigaDOS wildcard to filter on")
+    s.set_defaults(fn=cmd_ps)
+
+    s = sub.add_parser("kill", help="stop a task (polite Ctrl-C by default)")
+    s.add_argument("target", help="task/command name, or 0xADDRESS from ps")
+    s.add_argument("--force", action="store_true",
+                   help="RemTask() it - no cleanup, last resort")
+    s.set_defaults(fn=cmd_kill)
 
     s = sub.add_parser("reboot", help="reboot the Amiga")
     s.add_argument("--cold", action="store_true")

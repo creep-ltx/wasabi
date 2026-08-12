@@ -36,6 +36,7 @@ and land it on real silicon without touching an SD card.**
 | `debug` (KPrintF stream) | **working on the real A1200** — standalone, own RawPutChar patch |
 | `restart` (in-place self-update) | **working on the real A1200** — `put C:wasabid` + `restart`, no reboot |
 | `snoop` (DOS call trace) | **working on the real A1200** — SnoopDOS-style patches on 14 dos/exec calls |
+| `ps` / `kill` | **working on the real A1200** — full task list; Ctrl-C or RemTask |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
 Emu68 with the lwIP `bsdsocket.library`. Kickstart 47.115, 3.4 ms
@@ -44,7 +45,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 18 tests, no Amiga required.
+host mock that speaks the same protocol — 24 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -103,6 +104,8 @@ wasabi del PATH / mkdir PATH
 wasabi reboot [--cold]
 wasabi debug [--with-snoop] [--log F]   live KPrintF stream
 wasabi snoop [--task PAT] [--log F]     live DOS call trace
+wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter
+wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the

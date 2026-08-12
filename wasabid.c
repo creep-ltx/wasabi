@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b10"
+#define VERSION_STR "wasabid 0.1b11"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b10 (12.8.2026)";
+    "$VER: wasabid 0.1b11 (12.8.2026)";
 
 #define PROTO_VERSION   1
 #define DEF_PORT        1234
@@ -67,6 +67,8 @@ static const char *verstag __attribute__((used)) =
 #define T_REBOOT  0x40
 #define T_INFO    0x41
 #define T_RESTART 0x42
+#define T_PS      0x43
+#define T_KILL    0x44
 
 struct Library *SocketBase;
 
@@ -973,6 +975,167 @@ static void snoop_stop(void)
     g_snoop_client = -1;
 }
 
+/* --- ps and kill --------------------------------------------------- */
+
+/*
+ * A snapshot of every task on the machine: ThisTask plus the TaskReady
+ * and TaskWait lists. Those lists are the scheduler's working state, so
+ * the walk happens under Disable() and copies everything out - a task
+ * pointer is only trustworthy while interrupts stay off.
+ */
+struct PsEnt {
+    APTR  addr;
+    char  kind;                      /* 'p'rocess or 't'ask */
+    BYTE  pri;
+    UBYTE state;                     /* 0 run, 1 ready, 2 wait */
+    ULONG stack;
+    LONG  cli;                       /* CLI number, -1 when none */
+    char  name[48];
+    char  cmd[48];                   /* CLI command in flight, if any */
+};
+
+#define PS_MAX 128
+
+static struct PsEnt g_ps[PS_MAX];
+
+static void ps_add(LONG *n, struct Task *t, UBYTE state)
+{
+    struct PsEnt *e;
+    if (*n >= PS_MAX)
+        return;
+    e = &g_ps[(*n)++];
+    e->addr  = t;
+    e->kind  = t->tc_Node.ln_Type == NT_PROCESS ? 'p' : 't';
+    e->pri   = t->tc_Node.ln_Pri;
+    e->state = state;
+    e->stack = (ULONG)((char *)t->tc_SPUpper - (char *)t->tc_SPLower);
+    e->cli   = -1;
+    e->cmd[0] = '\0';
+    snoop_copystr(e->name, sizeof(e->name), t->tc_Node.ln_Name);
+    if (e->kind == 'p') {
+        struct Process *pr = (struct Process *)t;
+        struct CommandLineInterface *cli =
+            (struct CommandLineInterface *)BADDR(pr->pr_CLI);
+        if (pr->pr_TaskNum > 0)
+            e->cli = pr->pr_TaskNum;
+        if (cli) {
+            UBYTE *b = (UBYTE *)BADDR(cli->cli_CommandName);
+            if (b && b[0]) {                 /* a BSTR: length, then bytes */
+                LONG bn = b[0];
+                if (bn > (LONG)sizeof(e->cmd) - 1)
+                    bn = sizeof(e->cmd) - 1;
+                memcpy(e->cmd, b + 1, bn);
+                e->cmd[bn] = '\0';
+            }
+        }
+    }
+}
+
+static LONG ps_collect(void)
+{
+    LONG n = 0;
+    struct Task *t;
+    Disable();
+    ps_add(&n, SysBase->ThisTask, 0);
+    for (t = (struct Task *)SysBase->TaskReady.lh_Head;
+         t->tc_Node.ln_Succ; t = (struct Task *)t->tc_Node.ln_Succ)
+        ps_add(&n, t, 1);
+    for (t = (struct Task *)SysBase->TaskWait.lh_Head;
+         t->tc_Node.ln_Succ; t = (struct Task *)t->tc_Node.ln_Succ)
+        ps_add(&n, t, 2);
+    Enable();
+    return n;
+}
+
+static BOOL cmd_ps(int fd)
+{
+    static const char * const statename[] = { "run", "ready", "wait" };
+    char line[160];
+    LONG n = ps_collect(), i;
+
+    for (i = 0; i < n; i++) {
+        struct PsEnt *e = &g_ps[i];
+        LONG ln = sprintf(line, "0x%08lx %c %ld %s %lu %ld %s\t%s\n",
+                          (unsigned long)e->addr, e->kind, (long)e->pri,
+                          statename[e->state], (unsigned long)e->stack,
+                          (long)e->cli, e->name, e->cmd);
+        if (!send_frame(fd, T_DATA, line, ln))
+            return FALSE;
+    }
+    return send_frame(fd, T_END, NULL, 0);
+}
+
+/* Case-insensitive whole-string compare; pure, so safe under Disable. */
+static BOOL str_ieq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+            return FALSE;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+/*
+ * Find the task named (or addressed) by target and either Signal() it
+ * CTRL-C - what the Break command does - or RemTask() it outright.
+ * The target must match exactly one task; a name is matched against
+ * both the task name and the CLI command it is running. The action
+ * happens under Disable() after re-finding the task in the lists, so a
+ * target that exited since ps cannot be a stale pointer. RemTask frees
+ * none of the locks, semaphores or DOS state the task holds - it is the
+ * last resort the --force flag says it is.
+ */
+static BOOL cmd_kill(int fd, ULONG flags, const char *target)
+{
+    struct Task *hit = NULL;
+    APTR addr = NULL;
+    LONG matches = 0, n, i;
+    BOOL alive = FALSE;
+
+    if (target[0] == '0' && (target[1] == 'x' || target[1] == 'X'))
+        addr = (APTR)strtoul(target, NULL, 16);
+
+    n = ps_collect();
+    for (i = 0; i < n; i++) {
+        struct PsEnt *e = &g_ps[i];
+        if (addr ? (e->addr == addr)
+                 : (str_ieq(e->name, target) ||
+                    (e->cmd[0] && str_ieq(e->cmd, target)))) {
+            matches++;
+            hit = (struct Task *)e->addr;
+        }
+    }
+    if (!matches)
+        return send_err(fd, "no task or process by that name");
+    if (matches > 1)
+        return send_err(fd,
+            "ambiguous - several tasks match; use the 0x address from ps");
+    if (hit == FindTask(NULL))
+        return send_err(fd, "that is wasabid itself - use restart or reboot");
+
+    {
+        struct Task *t;
+        Disable();
+        for (t = (struct Task *)SysBase->TaskReady.lh_Head;
+             t->tc_Node.ln_Succ; t = (struct Task *)t->tc_Node.ln_Succ)
+            if (t == hit) alive = TRUE;
+        for (t = (struct Task *)SysBase->TaskWait.lh_Head;
+             t->tc_Node.ln_Succ; t = (struct Task *)t->tc_Node.ln_Succ)
+            if (t == hit) alive = TRUE;
+        if (alive) {
+            if (flags & 1)
+                RemTask(hit);
+            else
+                Signal(hit, SIGBREAKF_CTRL_C);
+        }
+        Enable();
+    }
+    if (!alive)
+        return send_err(fd, "that task is already gone");
+    return send_frame(fd, T_OK, NULL, 0);
+}
+
 /* --- commands ------------------------------------------------------ */
 
 static BOOL cmd_info(int fd)
@@ -1283,6 +1446,16 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         if (!start_run(cl, cmd))
             return send_err(fd, "could not start the command");
         return TRUE;                     /* output follows from pump_run */
+    }
+
+    case T_PS:
+        return cmd_ps(fd);
+
+    case T_KILL: {
+        char target[64];
+        if (len < 4 || !get_str(p, len, 4, target, sizeof(target)))
+            return send_err(fd, "bad KILL header");
+        return cmd_kill(fd, get_be32(p), target);
     }
 
     case T_REBOOT:

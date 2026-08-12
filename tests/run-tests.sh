@@ -118,6 +118,25 @@ if [ "${n:-0}" -ge 2 ]; then ok "--log stamps every line"
 else no "--log stamps every line (got ${n:-0})"; fi
 rm -f "$STREAMLOG"
 
+# --- ps / kill ---
+out=$($W ps 2>/dev/null | grep -c "input.device")
+check "ps lists tasks" "1" "$out"
+
+out=$($W ps 'input#?' 2>/dev/null | grep -c "device")
+check "ps honours a filter" "1" "$out"
+
+$W kill Wait >/dev/null 2>&1
+check "kill by command name succeeds" "0" "$?"
+
+out=$($W kill nosuchtask 2>&1 | grep -c "no task")
+check "kill of a missing task errors" "1" "$out"
+
+out=$($W kill con_handler 2>&1 | grep -c "ambiguous")
+check "kill of an ambiguous name errors" "1" "$out"
+
+out=$($W kill wasabid 2>&1 | grep -c "restart or reboot")
+check "kill refuses the daemon itself" "1" "$out"
+
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")
 if [ "$out" -ge 1 ]; then ok "a missing file reports an error"

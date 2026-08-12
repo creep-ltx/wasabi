@@ -88,6 +88,8 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x40 | REBOOT   | C→S | `u32 flags` |
 | 0x41 | INFO     | C→S | — |
 | 0x42 | RESTART  | C→S | — |
+| 0x43 | PS       | C→S | — |
+| 0x44 | KILL     | C→S | `u32 flags`, `str target` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -225,6 +227,38 @@ out — *after* it has closed the listen socket, so the fresh instance can
 bind the same port — it relaunches itself via `GetProgramName()` (the
 path it was invoked by) on the same port. The client treats a close after
 `OK` as success and reconnects.
+
+### PS — list every task on the machine
+
+A snapshot of exec's scheduler state: `ThisTask` plus the `TaskReady` and
+`TaskWait` lists, walked under `Disable()` with everything copied out —
+a task pointer is only trustworthy while interrupts are off. Server
+replies with `DATA` frames, one task per line, then `END`:
+
+```
+<addr> <kind> <pri> <state> <stack> <cli> <name>\t<cmd>
+```
+
+`addr` is `0x`-hex (the task's address — its only stable identity),
+`kind` is `p`rocess or `t`ask, `state` is `run`/`ready`/`wait`, `cli` is
+the CLI number or `-1`, and `cmd` — after the tab, since both names may
+hold spaces — is the CLI command the process is running, empty otherwise.
+Filtering is the client's job.
+
+### KILL — stop a task
+
+`flags` bit 0 clear: `Signal()` the target `SIGBREAKF_CTRL_C` — exactly
+what the `Break` command does, and only as effective as the target's
+willingness to listen. Bit 0 set: `RemTask()` it outright, which releases
+none of the locks, semaphores or DOS state the task holds — a last
+resort, flagged accordingly (`--force`).
+
+`target` is either a name — matched case-insensitively against both the
+task name and the running CLI command — or a `0x` address from `PS`. It
+must match exactly one task: no matches, several matches, and the daemon
+itself are each a distinct `ERR`. The action happens under `Disable()`
+after re-finding the task in the scheduler lists, so a target that
+exited after `PS` is reported gone, never a stale pointer.
 
 ## Teardown and the SetFunction rule
 

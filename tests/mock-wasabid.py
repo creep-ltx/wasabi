@@ -29,7 +29,7 @@ HELLO, WELCOME, ERR, OK, PING, PONG = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
-REBOOT, INFO = 0x40, 0x41
+REBOOT, INFO, PS, KILL = 0x40, 0x41, 0x43, 0x44
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -169,6 +169,10 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_simple(payload, os.remove)
         elif tag == MKDIR:
             self.do_simple(payload, os.mkdir)
+        elif tag == PS:
+            self.do_ps()
+        elif tag == KILL:
+            self.do_kill(payload)
         elif tag in (DEBUG, SNOOP):
             self.do_stream(tag, payload)
         elif tag == REBOOT:
@@ -265,6 +269,35 @@ class Handler(socketserver.BaseRequestHandler):
             self.send(OK)
         except (OSError, ValueError) as exc:
             self.err(str(exc), 205)
+
+    MOCK_TASKS = [  # addr, kind, pri, state, stack, cli, name, cmd - the
+                    # daemon's ps wire format; con_handler is deliberately
+                    # duplicated so the ambiguous-kill path is testable
+        ("0x0804f010", "p", 0, "run", 4096, 1, "wasabid", "c:wasabid"),
+        ("0x08051200", "p", 0, "wait", 4096, 2, "Background CLI", "Wait"),
+        ("0x08032400", "t", 5, "wait", 6144, -1, "input.device", ""),
+        ("0x08036000", "t", 5, "wait", 4096, -1, "con_handler", ""),
+        ("0x08037000", "t", 5, "wait", 4096, -1, "con_handler", ""),
+    ]
+
+    def do_ps(self):
+        lines = ["%s %s %d %s %d %d %s\t%s" % r for r in self.MOCK_TASKS]
+        self.send_data(("\n".join(lines) + "\n").encode("latin-1"))
+
+    def do_kill(self, payload):
+        target, _ = unpack_str(payload, 4)
+        tl = target.lower()
+        hits = [r for r in self.MOCK_TASKS
+                if r[0].lower() == tl or r[6].lower() == tl or
+                (r[7] and r[7].lower() == tl)]
+        if not hits:
+            return self.err("no task or process by that name", 205)
+        if len(hits) > 1:
+            return self.err(
+                "ambiguous - several tasks match; use the 0x address from ps")
+        if hits[0][6] == "wasabid":
+            return self.err("that is wasabid itself - use restart or reboot")
+        self.send(OK)
 
     SNOOP_SAMPLES = [  # shaped like the C daemon's snoop_format() output
         ("cfile", 'Open("S:Startup-Sequence", read) = ok'),
