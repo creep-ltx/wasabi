@@ -32,11 +32,12 @@ stops answering. An explicit `--host` always wins and never probes.
 reveals only what a port scan would, and needing the key to *find* the
 machine would defeat the point. The key still gates every TCP session.
 
-There is deliberately no periodic beacon by default: a machine that
-shouts every 30 seconds is noise on a network that may be shared, and
-probe/response gets the same result at the moment it is actually wanted.
-`BEACON=<secs>` in the config turns one on for setups where the client
-cannot broadcast.
+There is deliberately no periodic beacon: a machine that shouts every 30
+seconds is noise on a network that may be shared, and probe/response gets
+the same result at the moment it is actually wanted — the client's
+unicast sweep covers the bridge that eats broadcasts. A `BEACON=<secs>`
+option remains a possible future addition for a network where even the
+sweep cannot reach the machine.
 
 Full mDNS is the obvious future upgrade — the Emu68 driver stack already
 ships an `mdns` tool, so `amiga.local` may resolve on this network
@@ -139,6 +140,14 @@ Server replies with `DATA` frames then `END`, or a single `ERR`.
 |-----|---------|
 | 0   | merge stderr into stdout |
 | 1   | do not wait — detach and reply `EXIT 0` at once |
+
+**Today's `wasabid` ignores both flags**: output arrives merged on
+`STDOUT` (one redirected file carries everything `SystemTagList()`
+produces) and the daemon always waits for the command. The flags are
+reserved wire protocol, honoured by the host mock; a daemon that grows
+real stderr separation or detach will find clients already sending them.
+To run something without waiting, use the shell's own detach:
+`wasabi run "Run <command>"` returns as soon as `Run` has spawned it.
 
 The server runs the command through `SystemTagList()` with its input and
 output redirected, and forwards whatever appears as `STDOUT`/`STDERR`

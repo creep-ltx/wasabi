@@ -651,9 +651,11 @@ def main(argv=None):
     s = sub.add_parser("run", help="execute a command, streaming its output")
     s.add_argument("command")
     s.add_argument("--merge", action="store_true",
-                   help="merge stderr into stdout")
+                   help="merge stderr into stdout (wasabid ignores this "
+                        "for now - output already arrives merged)")
     s.add_argument("--detach", action="store_true",
-                   help="do not wait for the command to finish")
+                   help="do not wait (wasabid ignores this for now - "
+                        "use: wasabi run \"Run CMD\" instead)")
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("deploy",
