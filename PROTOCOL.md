@@ -85,6 +85,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x32 | LOG      | S→C | `u32 stream`, `u32 seq`, `str text` |
 | 0x40 | REBOOT   | C→S | `u32 flags` |
 | 0x41 | INFO     | C→S | — |
+| 0x42 | RESTART  | C→S | — |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -195,6 +196,17 @@ have patched, on pain of unbounded recursion.
 every mounted volume, waits for the socket to drain, then calls
 `ColdReboot()`. The connection dies with the machine; the client treats a
 close after `OK` as success.
+
+### RESTART
+
+Reloads the daemon in place — the fast half of self-update. `put` over a
+running `C:wasabid` succeeds because `LoadSeg` copies the binary into
+memory and does not lock the file, so `put` then `RESTART` swaps in a new
+build without a reboot. The daemon replies `OK`, then exits; on the way
+out — *after* it has closed the listen socket, so the fresh instance can
+bind the same port — it relaunches itself via `GetProgramName()` (the
+path it was invoked by) on the same port. The client treats a close after
+`OK` as success and reconnects.
 
 ## Teardown and the SetFunction rule
 

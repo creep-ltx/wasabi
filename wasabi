@@ -26,7 +26,7 @@ HELLO, WELCOME, ERR, OK, PING, PONG = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
-REBOOT, INFO = 0x40, 0x41
+REBOOT, INFO, RESTART = 0x40, 0x41, 0x42
 
 TAGNAMES = {v: k for k, v in list(globals().items()) if isinstance(v, int)}
 
@@ -307,6 +307,15 @@ def cmd_reboot(conn, args):
     print("reboot sent", file=sys.stderr)
 
 
+def cmd_restart(conn, args):
+    conn.send(RESTART)
+    try:
+        conn.expect_ok()
+    except WasabiError:
+        pass  # the daemon exits right after acking
+    print("restart sent - the daemon is reloading itself", file=sys.stderr)
+
+
 def cmd_del(conn, args):
     conn.send(DEL, pack_str(args.path))
     conn.expect_ok()
@@ -555,6 +564,9 @@ def main(argv=None):
     s = sub.add_parser("reboot", help="reboot the Amiga")
     s.add_argument("--cold", action="store_true")
     s.set_defaults(fn=cmd_reboot)
+
+    sub.add_parser("restart", help="reload the daemon in place (self-update)"
+                   ).set_defaults(fn=cmd_restart)
 
     s = sub.add_parser("del", help="delete a file")
     s.add_argument("path")

@@ -30,10 +30,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define VERSION_STR "wasabid 0.1b6"
+#define VERSION_STR "wasabid 0.1b8"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b6 (12.8.2026)";
+    "$VER: wasabid 0.1b8 (12.8.2026)";
 
 #define PROTO_VERSION   1
 #define DEF_PORT        1234
@@ -65,6 +65,7 @@ static const char *verstag __attribute__((used)) =
 #define T_LOG     0x32
 #define T_REBOOT  0x40
 #define T_INFO    0x41
+#define T_RESTART 0x42
 
 struct Library *SocketBase;
 
@@ -165,6 +166,8 @@ struct Client {
 static struct Client g_clients[MAX_CLIENTS];
 static char g_key[128];
 static BOOL g_quit;
+static BOOL g_restart;               /* relaunch ourselves on the way out */
+static int  g_port = DEF_PORT;        /* the port we listen on */
 
 /* --- byte order helpers ------------------------------------------- */
 
@@ -669,6 +672,22 @@ static BOOL cmd_reboot(int fd, ULONG flags)
     return TRUE;                         /* not reached */
 }
 
+/*
+ * Relaunch ourselves - the fast half of self-update: `put C:wasabid`
+ * then `restart` reloads the new binary without a full reboot. We only
+ * flag it here; the actual relaunch happens in the exit path, AFTER the
+ * listen socket is closed, so the fresh daemon can bind the same port
+ * without racing us for it.
+ */
+static BOOL cmd_restart(int fd)
+{
+    if (!send_frame(fd, T_OK, NULL, 0))
+        return FALSE;
+    g_restart = TRUE;
+    g_quit = TRUE;
+    return TRUE;
+}
+
 /* --- discovery ------------------------------------------------------ */
 
 static int open_discovery(int port)
@@ -789,6 +808,9 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_REBOOT:
         return cmd_reboot(fd, len >= 4 ? get_be32(p) : 0);
 
+    case T_RESTART:
+        return cmd_restart(fd);
+
     case T_DEBUG:
         return debug_start(cl);
 
@@ -832,6 +854,7 @@ int main(int argc, char **argv)
         if (p > 0 && p < 65536)
             port = (int)p;
     }
+    g_port = port;                       /* remembered for restart */
 
     for (i = 0; i < MAX_CLIENTS; i++)
         g_clients[i].fd = -1;
@@ -968,5 +991,18 @@ out:
     if (listen_fd >= 0) CloseSocket(listen_fd);
     FreeMem(payload, MAX_PAYLOAD);
     CloseLibrary(SocketBase);
+
+    /*
+     * Relaunch now that the port is free. GetProgramName() gives the path
+     * we were invoked by (C:wasabid, RAM:wasabid.b6, ...), so the fresh
+     * daemon keeps our identity and port. Run detaches it; we then exit.
+     */
+    if (g_restart) {
+        char self[128], cmd[160];
+        if (GetProgramName(self, sizeof(self)) && self[0]) {
+            sprintf(cmd, "Run >NIL: %s %d", self, g_port);
+            Execute(cmd, 0, 0);
+        }
+    }
     return RETURN_OK;
 }
