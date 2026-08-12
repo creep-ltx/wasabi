@@ -47,7 +47,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 45 tests, no Amiga required.
+host mock that speaks the same protocol — 46 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -97,7 +97,7 @@ broadcast and caches the answer.
 ```
 wasabi discover              find Amigas on this network
 wasabi ping                  round-trip time and daemon banner
-wasabi info                  Kickstart version, RAM, and what it can do
+wasabi info                  version, RAM, volumes, and what it can do
 wasabi ls [PATH]             list a drawer; no path lists the volumes
 wasabi put LOCAL REMOTE      upload a file
 wasabi get REMOTE LOCAL      download a file ('-' for stdout)
@@ -471,9 +471,14 @@ the daemon lists what it can do in its `WELCOME`, and `info` shows it:
 
 ```
 $ wasabi info
-wasabid 0.1b16, protocol v1
+wasabid 0.1b19, protocol v1
 exec.library 47.13
-chip free 1948 KB, fast free 1875667 KB
+chip free 1948 KB, fast free 1872842 KB
+volumes:
+  Dump:           32892 MB total  31326 MB free    4% used
+  Crap:           20471 MB total  15863 MB free   22% used
+  Work:            2860 MB total   2775 MB free    2% used
+  AmigaOS:         1901 MB total   1877 MB free    1% used
 can: debug del get info install kill ls mkdir ping ps put quit reboot
      restart run snoop speed
 

@@ -189,9 +189,16 @@ class Handler(socketserver.BaseRequestHandler):
         if tag == PING:
             self.send(PONG)
         elif tag == INFO:
+            st = os.statvfs(ROOT)
+            total = st.f_blocks * st.f_frsize // (1 << 20)
+            free = st.f_bavail * st.f_frsize // (1 << 20)
+            pct = 100 - (free * 100 // total) if total else 0
             self.send_data(
                 ("mock-wasabid, protocol v%d\nroot: %s\nhost: %s\n"
-                 % (VERSION, ROOT, os.uname().nodename)).encode("latin-1"))
+                 "volumes:\n"
+                 "  %-14s %6d MB total %6d MB free  %3d%% used\n"
+                 % (VERSION, ROOT, os.uname().nodename,
+                    "Mock:", total, free, pct)).encode("latin-1"))
         elif tag == LS:
             self.do_ls(payload)
         elif tag == PUT:

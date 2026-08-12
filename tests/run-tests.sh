@@ -197,6 +197,9 @@ check "kill refuses the daemon itself" "1" "$out"
 out=$($W info 2>/dev/null | grep -c "^can: .*speed")
 check "info reports what the daemon can do" "1" "$out"
 
+out=$($W info 2>/dev/null | grep -cE "^  [A-Za-z]+: +[0-9]+ MB total +[0-9]+ MB free")
+check "info lists volumes with size and free" "1" "$out"
+
 # A daemon too old for ps: the client should name it, not send blindly.
 ./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+7)) --key "$KEY" \
     --caps "ping,info,ls,put,get,run" >>"$ROOT/mock.log" 2>&1 &

@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b18"
+#define VERSION_STR "wasabid 0.1b19"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b18 (12.8.2026)";
+    "$VER: wasabid 0.1b19 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -1537,17 +1537,93 @@ static BOOL cmd_kill(int fd, ULONG flags, const char *target)
 
 /* --- commands ------------------------------------------------------ */
 
+/*
+ * Volume sizes, in megabytes and without touching a float.
+ *
+ * NumBlocks * BytesPerBlock overflows a LONG on anything past 4 GB - a
+ * 58 GB drive at 512-byte blocks is 58e9 - so divide first: every real
+ * block size (512, 1024, 2048, 4096) divides a megabyte exactly.
+ */
+static void vol_megabytes(struct InfoData *id, ULONG *total, ULONG *freemb)
+{
+    ULONG bpb = (ULONG)id->id_BytesPerBlock;
+    ULONG per_mb;
+
+    if (!bpb) bpb = 512;
+    per_mb = 1048576UL / bpb;
+    if (!per_mb) per_mb = 1;             /* absurd block size; do not divide by 0 */
+    *total  = (ULONG)id->id_NumBlocks / per_mb;
+    *freemb = (ULONG)(id->id_NumBlocks - id->id_NumBlocksUsed) / per_mb;
+}
+
+/*
+ * Names are collected under the DOS list lock and everything else is
+ * done after releasing it: Lock() itself wants the DOS list, and taking
+ * it twice is how a machine stops responding.
+ */
+static BOOL info_volumes(int fd)
+{
+    char names[16][40];
+    LONG count = 0, i;
+    struct DosList *dl;
+    char line[160];
+
+    dl = LockDosList(LDF_VOLUMES | LDF_READ);
+    while ((dl = NextDosEntry(dl, LDF_VOLUMES | LDF_READ)) && count < 16) {
+        UBYTE *b = (UBYTE *)BADDR(dl->dol_Name);
+        LONG len = b ? b[0] : 0;
+        if (len > 38) len = 38;
+        memcpy(names[count], b + 1, len);
+        names[count][len] = '\0';
+        count++;
+    }
+    UnLockDosList(LDF_VOLUMES | LDF_READ);
+
+    for (i = 0; i < count; i++) {
+        struct InfoData id;
+        char path[44];
+        BPTR lock;
+        ULONG total, freemb, pct = 0;
+        LONG n;
+
+        sprintf(path, "%s:", names[i]);
+        lock = Lock(path, ACCESS_READ);  /* pr_WindowPtr is -1: no requester */
+        if (!lock)
+            continue;
+        if (Info(lock, &id)) {
+            vol_megabytes(&id, &total, &freemb);
+            if (id.id_NumBlocks >= 100)
+                pct = (ULONG)id.id_NumBlocksUsed /
+                      ((ULONG)id.id_NumBlocks / 100);
+            n = sprintf(line, "  %-14s %6lu MB total %6lu MB free  %3lu%% used%s\n",
+                        path, (unsigned long)total, (unsigned long)freemb,
+                        (unsigned long)pct,
+                        id.id_DiskState == ID_WRITE_PROTECTED
+                            ? "  (read-only)" : "");
+            if (!send_frame(fd, T_DATA, line, n)) {
+                UnLock(lock);
+                return FALSE;
+            }
+        }
+        UnLock(lock);
+    }
+    return TRUE;
+}
+
 static BOOL cmd_info(int fd)
 {
     char text[512];
     LONG n = sprintf(text,
         "%s, protocol v%d\n"
         "exec.library %ld.%ld\n"
-        "chip free %ld KB, fast free %ld KB\n",
+        "chip free %ld KB, fast free %ld KB\n"
+        "volumes:\n",
         VERSION_STR, PROTO_VERSION,
         (long)SysBase->LibNode.lib_Version, (long)SysBase->LibNode.lib_Revision,
         (long)(AvailMem(MEMF_CHIP) >> 10), (long)(AvailMem(MEMF_FAST) >> 10));
     if (!send_frame(fd, T_DATA, text, n))
+        return FALSE;
+    if (!info_volumes(fd))
         return FALSE;
     return send_frame(fd, T_END, NULL, 0);
 }
