@@ -184,11 +184,27 @@ Covered calls are `Open`, `Lock`, `LoadSeg`, `Execute`, `SystemTagList`,
 `OpenLibrary`, `OpenDevice` and `FindPort`.
 
 `taskfilter` restricts output to tasks whose name matches an AmigaDOS
-pattern; empty means everything.
+pattern (`#?`, `?`, `*`, case-insensitive); empty means everything. The
+filter is applied daemon-side against the caller's name — the CLI command
+being run if the caller is a CLI running one, else the task's `ln_Name`.
+
+Snoop output rides `LOG` frames with `stream` set to **1**, distinct from
+the debug stream's **0**, so a client subscribed to both can keep them
+apart. Each line reads `<task> <Call>(<args>) = <result>`.
 
 Unlike the `RawPutChar` patch these run in ordinary task context, so they
-may format text — but they must never call a function they themselves
-have patched, on pain of unbounded recursion.
+may format text — but the trampoline still runs in the *caller's* context
+and must never call a function it has itself patched, on pain of unbounded
+recursion: the daemon-side record reads `SysBase->ThisTask` directly and
+only copies memory. The log line is emitted *after* the original returns,
+so it carries the real return value and `IoErr()`. Two safeguards follow
+SnoopDOS: a per-stub enabled flag lets a patch that cannot be removed idle
+as a near-no-op, and an event is dropped (and counted) rather than built
+when the caller is low on stack. Covered LVOs, verified against the NDK
+`fd` files: `Open` -30, `DeleteFile` -72, `Rename` -78, `Lock` -84,
+`CreateDir` -120, `LoadSeg` -150, `Execute` -222, `MakeLink` -444,
+`SystemTagList` -606, `SetVar` -900, `GetVar` -906 on `dos.library`;
+`FindPort` -390, `OpenDevice` -444, `OpenLibrary` -552 on `exec.library`.
 
 ### REBOOT
 

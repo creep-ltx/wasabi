@@ -34,7 +34,8 @@ and land it on real silicon without touching an SD card.**
 | `deploy` (upload + run in one shot) | **working on the real A1200** |
 | `reboot` | **working on the real A1200** |
 | `debug` (KPrintF stream) | **working on the real A1200** — standalone, own RawPutChar patch |
-| `snoop` (DOS call trace) | **not implemented** — returns a clear error |
+| `restart` (in-place self-update) | **working on the real A1200** — `put C:wasabid` + `restart`, no reboot |
+| `snoop` (DOS call trace) | **working on the real A1200** — SnoopDOS-style patches on 14 dos/exec calls |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
 Emu68 with the lwIP `bsdsocket.library`. Kickstart 47.115, 3.4 ms
@@ -43,7 +44,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 15 tests, no Amiga required.
+host mock that speaks the same protocol — 16 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -100,8 +101,8 @@ wasabi run "CMD"             execute, stream output, return its exit code
 wasabi deploy L R [--run C] [--reboot]
 wasabi del PATH / mkdir PATH
 wasabi reboot [--cold]
-wasabi debug                 live KPrintF stream          (not yet)
-wasabi snoop [--task PAT]    live DOS call trace          (not yet)
+wasabi debug                 live KPrintF stream
+wasabi snoop [--task PAT]    live DOS call trace
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
@@ -186,19 +187,68 @@ Proven on the real A1200 (12 Aug 2026): a test program emitting via
 `RawPutChar` streams through live, the patch installs and removes cleanly
 across repeated sessions, and the machine stays healthy afterward.
 
+## The snoop stream
+
+`wasabi snoop` is the SnoopDOS trick delivered over the wire: the daemon
+`SetFunction()`s fourteen of the `dos.library` and `exec.library` calls a
+developer most wants to watch — `Open`, `Lock`, `LoadSeg`, `Execute`,
+`SystemTagList`, `GetVar`, `SetVar`, `DeleteFile`, `Rename`, `CreateDir`,
+`MakeLink`, `OpenLibrary`, `OpenDevice`, `FindPort` — and logs each call
+with its caller, its string/numeric arguments and its real result:
+
+```
+$ wasabi snoop --task '#?'
+Shell                Open("S:Startup-Sequence", read) = ok
+Shell                Lock("DH0:Tools", read) = ok
+cfile                LoadSeg("C:List") = ok
+wasabid              GetVar("wasabi.key") = ok
+```
+
+`--task PAT` filters on the caller's name with AmigaDOS wildcards
+(`#?`, `?`, `*`); no filter means everything. The caller is named the way
+SnoopDOS names it — the CLI command being run if there is one, else the
+task name.
+
+Each patch is a tiny stub that pushes a descriptor and jumps to one
+common trampoline. The trampoline runs in the **calling** task's context,
+so — like the debug patch, and for the same reasons — the C it invokes
+allocates nothing, holds only a short `Disable()`, and reads
+`SysBase->ThisTask` directly rather than through any call it has patched,
+on pain of unbounded recursion. Two more rules come straight from Eddy
+Carroll's SnoopDOS source: the stub tests an enabled flag first and falls
+through to the untouched original when snooping is off (so a patch that
+*cannot* be removed idles at a few instructions), and it refuses to build
+an event when the caller is low on stack, counting the drop instead of
+overflowing. Unlike SnoopDOS, the log line is emitted **after** the
+original returns, so every line carries the true result and `IoErr()`
+rather than "pending".
+
+Teardown follows the same chain rule as the debug patch — a stub whose
+vector was chained over stays installed and idle rather than corrupt the
+chain — and the exit path waits briefly for any task still inside a stub
+before the code segment can unload. Events ride the same `LOG` frame as
+debug output, on **stream 1** (debug is stream 0), so a monitor can tell
+serial debug and the call trace apart.
+
+Proven on the real A1200 (12 Aug 2026): `List SYS:C` traces its `Lock` /
+`LoadSeg` and the `OpenLibrary` storm that follows, a `--task` filter
+narrows the stream to one caller exactly, sessions open and close
+repeatedly, and the machine stays healthy after teardown. The event ring
+holds 512 entries (~107 KB) because a PiStorm-fast CPU can fire more than
+150 patched calls between two 50 ms drains — the first cut held 64 and
+`List SYS:C` alone overflowed it. A burst that still overflows is dropped
+and counted, never silently lost.
+
 ## What's next
 
-- **`snoop`** — the DOS call trace, the other half that makes this a
-  daemon and not an FTP server. It patches a dozen `dos.library` entry
-  points (the SnoopDOS trick); these run in ordinary task context and may
-  format text, but must never call a function they have themselves
-  patched. Not written yet — returns a clear error.
-- **CLI output as a second stream** — `LOG` carries a `stream` field so a
-  monitor can show serial debug (stream 0) and CLI/console output
-  (stream 1) side by side and keep them apart. Only stream 0 exists today.
-- **Self-update** — `wasabi put wasabid C:wasabid` works even while the
-  daemon is running (`LoadSeg` copies the binary into memory and does not
-  lock the file, confirmed on hardware), so all that is missing is a
-  `restart` command to reload it without a full reboot.
+- **`wasabi speedtest <size>`** — push and pull a payload of a given size
+  (`wasabi speedtest 5MB`, `10MB`, `25MB`, `50MB`…) and report the
+  throughput each way, so the effect of a driver stack or MTU change is
+  one command to measure. Uses the existing `PUT`/`GET` path against a
+  `RAM:` target; no new wire tags needed.
+- **CLI output as a third stream** — `LOG` carries a `stream` field so a
+  monitor can show serial debug (stream 0), the snoop trace (stream 1)
+  and CLI/console output (a future stream 2) side by side and keep them
+  apart. Streams 0 and 1 exist today.
 
 `PROTOCOL.md` is the wire format, and the contract between the two halves.

@@ -29,11 +29,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b9"
+#define VERSION_STR "wasabid 0.1b10"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b9 (12.8.2026)";
+    "$VER: wasabid 0.1b10 (12.8.2026)";
 
 #define PROTO_VERSION   1
 #define DEF_PORT        1234
@@ -131,6 +132,7 @@ void wasabi_store(UBYTE c);          /* forward decl; defined below */
 
 asm(
     "    .text                       \n"
+    "    .even                       \n"
     "    .globl _wasabi_rawput_patch \n"
     "_wasabi_rawput_patch:           \n"
     "    movem.l %d0-%d1/%a0-%a1,-(%sp) \n"
@@ -493,6 +495,484 @@ static void debug_stop(void)
     g_dbg_client = -1;
 }
 
+/* --- the snoop stream ---------------------------------------------- */
+
+/*
+ * The SnoopDOS trick, after Eddy Carroll's public source: SetFunction()
+ * patches on the dos.library and exec.library calls a developer most
+ * wants to see. Unlike SnoopDOS we log AFTER the original returns, so
+ * every line carries the real result and IoErr() instead of "pending".
+ *
+ * Each patch is a two-instruction stub that pushes its descriptor and
+ * jumps to one common trampoline. The trampoline runs in the CALLER's
+ * context - any task on the machine - so the same rules as the debug
+ * patch apply, plus one more: nothing reachable from here may call a
+ * function we patch, or it recurses without bound. The C side therefore
+ * reads SysBase->ThisTask directly and only ever copies memory.
+ *
+ * Three ideas are borrowed straight from SnoopDOS's patchcode.s:
+ *  - the stub tests an enabled flag first and falls through to the
+ *    original untouched when snooping is off, so a patch that cannot be
+ *    removed (someone chained onto it) idles at a few instructions;
+ *  - a use count is bumped while a caller is inside the stub, so the
+ *    daemon can wait for stragglers before its code segment unloads;
+ *  - events are dropped, and counted, when the calling task is low on
+ *    stack rather than overflowing it building the record.
+ */
+
+#define SN_EVMAX   512               /* events in the ring, power of two.
+                                      * ~107 KB of BSS: a PiStorm-fast CPU
+                                      * can fire >150 patched calls between
+                                      * two 50 ms drains (List SYS:C did),
+                                      * and 64 dropped most of that burst */
+#define SN_NONE    0xFF              /* "no such argument" register index */
+
+/* Register-file indices: the trampoline saves d0-d7/a0-a6 in order. */
+#define RF_D0 0
+#define RF_D1 1
+#define RF_D2 2
+#define RF_D3 3
+#define RF_A0 8
+#define RF_A1 9
+
+#define SN_DOS  0                    /* which library the LVO lives in */
+#define SN_EXEC 1
+
+#define NK_NONE     0                /* how to render the numeric arg */
+#define NK_OPENMODE 1
+#define NK_LOCKMODE 2
+#define NK_VERSION  3
+#define NK_UNIT     4
+
+#define RK_BOOL 0                    /* how to read d0: nonzero = ok */
+#define RK_RC   1                    /* a return code (SystemTagList) */
+#define RK_LEN  2                    /* -1 = fail, else a length (GetVar) */
+#define RK_ZERO 3                    /* zero = ok (OpenDevice) */
+
+#define SNF_SOFT2 1                  /* str2 is a string only if d3 != 0 */
+
+struct SnoopFn {
+    APTR        orig;                /* MUST be first: the asm reads (a2) */
+    const char *name;
+    APTR        stub;
+    UBYTE       lib;                 /* SN_DOS / SN_EXEC */
+    WORD        lvo;
+    UBYTE       str1, str2;          /* register-file index of string args */
+    UBYTE       numreg;              /* index of the numeric arg */
+    UBYTE       nkind, rkind, flags;
+    UBYTE       installed;
+};
+
+struct SnoopEv {
+    struct SnoopFn *fn;
+    char  task[32];
+    char  s1[100];
+    char  s2[64];
+    BOOL  has2;
+    LONG  num;
+    LONG  res;
+    LONG  err;                       /* pr_Result2 after the call */
+};
+
+static struct SnoopEv g_snev[SN_EVMAX];
+static volatile ULONG g_snev_head;   /* producer (patches) advances */
+static volatile ULONG g_snev_tail;   /* consumer (daemon) advances */
+static volatile ULONG g_snev_lost;
+
+static int          g_snoop_client = -1;
+static ULONG        g_snoop_seq;
+static char         g_snoop_pat[64];
+static struct Task *g_snoop_self;    /* the daemon; its own calls are not
+                                      * logged, or draining the ring over
+                                      * bsdsocket could feed the ring */
+
+/* Read by the trampoline, so plain globals with asm-visible names. */
+volatile UWORD wasabi_snoop_on;      /* stubs record only while set */
+volatile UWORD wasabi_snoop_users;   /* callers currently inside a stub */
+
+void snoop_record(struct SnoopFn *d, ULONG *regs, LONG res);
+
+/*
+ * The common trampoline. Entered from a per-function stub that has just
+ * pushed its descriptor, so the stack is [desc][caller RA] and every
+ * argument register still holds the caller's value.
+ *
+ * Off: put the original's address where the descriptor was and rts into
+ * it, clobbering nothing (the a0 juggle is because 68000 has no
+ * memory-to-memory move through a pointer).
+ *
+ * On: bump the use count, save the full register file, call the original
+ * with the caller's registers intact, hand descriptor + register file +
+ * result to C, then restore with d0 (and d1 - old dos.library returned
+ * results in both, and SnoopDOS keeps that quirk alive) as the result.
+ */
+asm(
+    "    .text                          \n"
+    "    .even                          \n"
+    "    .globl _wasabi_snoop_common    \n"
+    "_wasabi_snoop_common:              \n"
+    "    tst.w   _wasabi_snoop_on       \n"
+    "    bne     snoop_live             \n"
+    "    move.l  %a0,-(%sp)             \n"  /* [a0][desc][RA] */
+    "    move.l  4(%sp),%a0             \n"  /* a0 = desc */
+    "    move.l  (%a0),%a0              \n"  /* a0 = desc->orig */
+    "    move.l  %a0,4(%sp)             \n"  /* [a0][orig][RA] */
+    "    move.l  (%sp)+,%a0             \n"  /* [orig][RA] */
+    "    rts                            \n"  /* jump to the original */
+    "snoop_live:                        \n"
+    "    addq.w  #1,_wasabi_snoop_users \n"
+    "    movem.l %d0-%d7/%a0-%a6,-(%sp) \n"  /* the 60-byte register file */
+    "    move.l  60(%sp),%a2            \n"  /* a2 = desc */
+    "    move.l  (%a2),%a3              \n"  /* a3 = desc->orig */
+    "    jsr     (%a3)                  \n"  /* argument regs untouched */
+    "    move.l  %d0,-(%sp)             \n"  /* C arg 3: the result */
+    "    pea     4(%sp)                 \n"  /* C arg 2: the register file */
+    "    move.l  %a2,-(%sp)             \n"  /* C arg 1: the descriptor */
+    "    jsr     _snoop_record          \n"
+    "    addq.l  #8,%sp                 \n"
+    "    move.l  (%sp)+,%d0             \n"  /* result back... */
+    "    move.l  %d0,(%sp)              \n"  /* ...into the file's d0 slot */
+    "    movem.l (%sp)+,%d0-%d7/%a0-%a6 \n"
+    "    addq.l  #4,%sp                 \n"  /* drop the descriptor */
+    "    subq.w  #1,_wasabi_snoop_users \n"
+    "    move.l  %d0,%d1                \n"
+    "    rts                            \n"
+);
+
+#define SNOOP_DESC(nm, lib, lvo, s1, s2, nreg, nk, rk, fl)                 \
+extern void snoop_stub_##nm(void);                                         \
+asm("    .text                          \n"                                \
+    "    .even                          \n"                                \
+    "    .globl _snoop_stub_" #nm "     \n"                                \
+    "_snoop_stub_" #nm ":               \n"                                \
+    "    pea     _snoop_desc_" #nm "    \n"                                \
+    "    jmp     _wasabi_snoop_common   \n");                              \
+struct SnoopFn snoop_desc_##nm = {                                         \
+    NULL, #nm, (APTR)snoop_stub_##nm, lib, lvo, s1, s2, nreg, nk, rk, fl, \
+    FALSE };
+
+/* LVOs verified against the NDK's dos_lib.fd / exec_lib.fd. */
+SNOOP_DESC(Open,          SN_DOS,  -30,  RF_D1, SN_NONE, RF_D2,
+           NK_OPENMODE, RK_BOOL, 0)
+SNOOP_DESC(Lock,          SN_DOS,  -84,  RF_D1, SN_NONE, RF_D2,
+           NK_LOCKMODE, RK_BOOL, 0)
+SNOOP_DESC(LoadSeg,       SN_DOS,  -150, RF_D1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(Execute,       SN_DOS,  -222, RF_D1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(SystemTagList, SN_DOS,  -606, RF_D1, SN_NONE, SN_NONE,
+           NK_NONE, RK_RC, 0)
+SNOOP_DESC(GetVar,        SN_DOS,  -906, RF_D1, SN_NONE, SN_NONE,
+           NK_NONE, RK_LEN, 0)
+SNOOP_DESC(SetVar,        SN_DOS,  -900, RF_D1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(DeleteFile,    SN_DOS,  -72,  RF_D1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(Rename,        SN_DOS,  -78,  RF_D1, RF_D2, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(CreateDir,     SN_DOS,  -120, RF_D1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(MakeLink,      SN_DOS,  -444, RF_D1, RF_D2, SN_NONE,
+           NK_NONE, RK_BOOL, SNF_SOFT2)
+SNOOP_DESC(OpenLibrary,   SN_EXEC, -552, RF_A1, SN_NONE, RF_D0,
+           NK_VERSION, RK_BOOL, 0)
+SNOOP_DESC(OpenDevice,    SN_EXEC, -444, RF_A0, SN_NONE, RF_D0,
+           NK_UNIT, RK_ZERO, 0)
+SNOOP_DESC(FindPort,      SN_EXEC, -390, RF_A1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+
+static struct SnoopFn *snoop_fns[] = {
+    &snoop_desc_Open,        &snoop_desc_Lock,      &snoop_desc_LoadSeg,
+    &snoop_desc_Execute,     &snoop_desc_SystemTagList,
+    &snoop_desc_GetVar,      &snoop_desc_SetVar,    &snoop_desc_DeleteFile,
+    &snoop_desc_Rename,      &snoop_desc_CreateDir, &snoop_desc_MakeLink,
+    &snoop_desc_OpenLibrary, &snoop_desc_OpenDevice, &snoop_desc_FindPort,
+};
+#define SN_NFN (LONG)(sizeof(snoop_fns) / sizeof(snoop_fns[0]))
+
+/* strncpy that always terminates and tolerates a NULL source. */
+static void snoop_copystr(char *dst, LONG dstsz, const char *src)
+{
+    LONG i = 0;
+    if (!src) src = "(null)";
+    while (i < dstsz - 1 && src[i]) { dst[i] = src[i]; i++; }
+    dst[i] = '\0';
+}
+
+/* The expensive half, in its own frame so the headroom check in
+ * snoop_record() has already passed before this local exists. */
+static void __attribute__((noinline))
+snoop_record2(struct SnoopFn *d, ULONG *regs, LONG res)
+{
+    struct SnoopEv ev;
+    struct Task *t = SysBase->ThisTask;
+    ULONG next;
+
+    ev.fn   = d;
+    ev.num  = (d->numreg != SN_NONE) ? (LONG)regs[d->numreg] : 0;
+    ev.res  = res;
+    ev.err  = 0;
+    ev.has2 = FALSE;
+    ev.task[0] = '\0';
+
+    /* Name the culprit the way SnoopDOS does: the CLI command being run
+     * if there is one, else the task name. */
+    if (t->tc_Node.ln_Type == NT_PROCESS) {
+        struct Process *pr = (struct Process *)t;
+        struct CommandLineInterface *cli =
+            (struct CommandLineInterface *)BADDR(pr->pr_CLI);
+        ev.err = pr->pr_Result2;
+        if (cli) {
+            UBYTE *b = (UBYTE *)BADDR(cli->cli_CommandName);
+            if (b && b[0]) {                 /* a BSTR: length, then bytes */
+                LONG n = b[0];
+                if (n > (LONG)sizeof(ev.task) - 1)
+                    n = sizeof(ev.task) - 1;
+                memcpy(ev.task, b + 1, n);
+                ev.task[n] = '\0';
+            }
+        }
+    }
+    if (!ev.task[0])
+        snoop_copystr(ev.task, sizeof(ev.task), t->tc_Node.ln_Name);
+
+    if (d->str1 != SN_NONE)
+        snoop_copystr(ev.s1, sizeof(ev.s1), (const char *)regs[d->str1]);
+    else
+        ev.s1[0] = '\0';
+    if (d->str2 != SN_NONE) {
+        ev.has2 = TRUE;
+        if ((d->flags & SNF_SOFT2) && !regs[RF_D3])
+            strcpy(ev.s2, "(hard link to a lock)");
+        else
+            snoop_copystr(ev.s2, sizeof(ev.s2), (const char *)regs[d->str2]);
+    } else
+        ev.s2[0] = '\0';
+
+    Disable();
+    next = (g_snev_head + 1) & (SN_EVMAX - 1);
+    if (next == g_snev_tail)
+        g_snev_lost++;                       /* full: drop, count it */
+    else {
+        g_snev[g_snev_head] = ev;
+        g_snev_head = next;
+    }
+    Enable();
+}
+
+/*
+ * Producer half, called from the trampoline in the context of whatever
+ * task made the call - after the original has already returned.
+ */
+void snoop_record(struct SnoopFn *d, ULONG *regs, LONG res)
+{
+    struct Task *t = SysBase->ThisTask;
+    char probe;
+
+    if (!wasabi_snoop_on || t == g_snoop_self)
+        return;
+    /* SnoopDOS's stack rule: if sp is inside the task's declared stack,
+     * insist on headroom before building the event on it; an sp outside
+     * the bounds (CLI programs swap stacks) is assumed to be roomy. */
+    if ((APTR)&probe > t->tc_SPLower && (APTR)&probe <= t->tc_SPUpper &&
+        (char *)&probe - (char *)t->tc_SPLower < 800) {
+        Disable(); g_snev_lost++; Enable();
+        return;
+    }
+    snoop_record2(d, regs, res);
+}
+
+static struct Library *snoop_base(struct SnoopFn *d)
+{
+    return d->lib == SN_EXEC ? (struct Library *)SysBase
+                             : (struct Library *)DOSBase;
+}
+
+static void snoop_install(void)
+{
+    LONG i;
+    for (i = 0; i < SN_NFN; i++) {
+        struct SnoopFn *d = snoop_fns[i];
+        if (d->installed)
+            continue;                /* left over from a stuck teardown */
+        Disable();
+        d->orig = (APTR)SetFunction(snoop_base(d), d->lvo,
+                                    (ULONG (*)())d->stub);
+        Enable();
+        d->installed = TRUE;
+    }
+}
+
+/* Reverse order, same chain rule as the debug patch: if the vector no
+ * longer points at us, put the interloper back and stay installed. */
+static BOOL snoop_uninstall(void)
+{
+    LONG i;
+    BOOL all = TRUE;
+    for (i = SN_NFN - 1; i >= 0; i--) {
+        struct SnoopFn *d = snoop_fns[i];
+        APTR res;
+        if (!d->installed)
+            continue;
+        Disable();
+        res = (APTR)SetFunction(snoop_base(d), d->lvo, (ULONG (*)())d->orig);
+        if (res == d->stub)
+            d->installed = FALSE;
+        else {
+            SetFunction(snoop_base(d), d->lvo, (ULONG (*)())res);
+            all = FALSE;             /* the stub stays live; its enabled
+                                      * check makes it a cheap no-op */
+        }
+        Enable();
+    }
+    return all;
+}
+
+static BOOL snoop_stuck(void)
+{
+    LONG i;
+    for (i = 0; i < SN_NFN; i++)
+        if (snoop_fns[i]->installed)
+            return TRUE;
+    return FALSE;
+}
+
+/*
+ * Case-insensitive match with the AmigaDOS '#?' and '?' wildcards ('*'
+ * too, since fingers type it). Not full ParsePattern - but this runs on
+ * task names, not paths, and needs no dos.library call.
+ */
+static BOOL pat_match(const char *pat, const char *s)
+{
+    while (*pat) {
+        if ((pat[0] == '#' && pat[1] == '?') || pat[0] == '*') {
+            const char *rest = pat + (pat[0] == '*' ? 1 : 2);
+            for (;; s++) {
+                if (pat_match(rest, s))
+                    return TRUE;
+                if (!*s)
+                    return FALSE;
+            }
+        }
+        if (!*s)
+            return FALSE;
+        if (pat[0] != '?' &&
+            tolower((unsigned char)pat[0]) != tolower((unsigned char)s[0]))
+            return FALSE;
+        pat++; s++;
+    }
+    return *s == '\0';
+}
+
+/* Daemon context from here down. */
+
+static LONG snoop_format(struct SnoopEv *ev, char *out)
+{
+    struct SnoopFn *d = ev->fn;
+    LONG n = sprintf(out, "%-20s %s(", ev->task, d->name);
+
+    if (d->str1 != SN_NONE)
+        n += sprintf(out + n, "\"%s\"", ev->s1);
+    if (ev->has2)
+        n += sprintf(out + n, ", \"%s\"", ev->s2);
+
+    switch (d->nkind) {
+    case NK_OPENMODE:
+        if (ev->num == 1005)      n += sprintf(out + n, ", read");
+        else if (ev->num == 1006) n += sprintf(out + n, ", create");
+        else if (ev->num == 1004) n += sprintf(out + n, ", readwrite");
+        else n += sprintf(out + n, ", mode %ld", (long)ev->num);
+        break;
+    case NK_LOCKMODE:
+        if (ev->num == -2)        n += sprintf(out + n, ", read");
+        else if (ev->num == -1)   n += sprintf(out + n, ", write");
+        else n += sprintf(out + n, ", type %ld", (long)ev->num);
+        break;
+    case NK_VERSION:
+        n += sprintf(out + n, ", v%ld", (long)ev->num);
+        break;
+    case NK_UNIT:
+        n += sprintf(out + n, ", unit %ld", (long)ev->num);
+        break;
+    }
+
+    switch (d->rkind) {
+    case RK_RC:
+        n += sprintf(out + n, ") = rc %ld\n", (long)ev->res);
+        break;
+    case RK_LEN:
+        if (ev->res >= 0)
+            n += sprintf(out + n, ") = %ld byte(s)\n", (long)ev->res);
+        else if (ev->err)
+            n += sprintf(out + n, ") = fail (err %ld)\n", (long)ev->err);
+        else
+            n += sprintf(out + n, ") = fail\n");
+        break;
+    case RK_ZERO:
+        if (ev->res == 0)
+            n += sprintf(out + n, ") = ok\n");
+        else
+            n += sprintf(out + n, ") = error %ld\n", (long)ev->res);
+        break;
+    default:                         /* RK_BOOL */
+        if (ev->res)
+            n += sprintf(out + n, ") = ok\n");
+        else if (ev->err && d->lib == SN_DOS)
+            n += sprintf(out + n, ") = fail (err %ld)\n", (long)ev->err);
+        else
+            n += sprintf(out + n, ") = fail\n");
+        break;
+    }
+    return n;
+}
+
+static BOOL snoop_start(int cl, const char *pat)
+{
+    if (g_snoop_client >= 0)
+        return send_err(g_clients[cl].fd, "the snoop stream is already in use");
+
+    snoop_copystr(g_snoop_pat, sizeof(g_snoop_pat), pat);
+    g_snev_head = g_snev_tail = g_snev_lost = 0;
+    g_snoop_client = cl;
+    g_snoop_seq = 0;
+    g_snoop_self = FindTask(NULL);
+    snoop_install();
+    wasabi_snoop_on = 1;
+    return TRUE;                     /* LOG frames follow from the pump */
+}
+
+static BOOL snoop_pump(void)
+{
+    int fd = g_clients[g_snoop_client].fd;
+    char line[320];
+
+    while (g_snev_tail != g_snev_head) {
+        struct SnoopEv *ev = &g_snev[g_snev_tail];
+        if (!g_snoop_pat[0] || pat_match(g_snoop_pat, ev->task)) {
+            LONG n = snoop_format(ev, line);
+            if (!send_log(fd, 1, ++g_snoop_seq, (UBYTE *)line, n))
+                return FALSE;
+        }
+        g_snev_tail = (g_snev_tail + 1) & (SN_EVMAX - 1);
+    }
+    if (g_snev_lost) {
+        char note[64];
+        LONG ln = sprintf(note, "[wasabi: %lu snoop event(s) lost]\n",
+                          (unsigned long)g_snev_lost);
+        g_snev_lost = 0;
+        if (!send_log(fd, 1, ++g_snoop_seq, (UBYTE *)note, ln))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static void snoop_stop(void)
+{
+    wasabi_snoop_on = 0;
+    snoop_uninstall();               /* best effort; a stuck stub idles */
+    g_snoop_client = -1;
+}
+
 /* --- commands ------------------------------------------------------ */
 
 static BOOL cmd_info(int fd)
@@ -814,13 +1294,12 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_DEBUG:
         return debug_start(cl);
 
-    case T_SNOOP:
-        /*
-         * Still to come: SetFunction() patches on the dos.library entry
-         * points - see PROTOCOL.md. Saying so plainly beats a stream that
-         * silently never emits anything.
-         */
-        return send_err(fd, "snoop is not in this build yet");
+    case T_SNOOP: {
+        char pat[64];
+        if (len < 4 || !get_str(p, len, 4, pat, sizeof(pat)))
+            return send_err(fd, "bad SNOOP header");
+        return snoop_start(cl, pat);
+    }
 
     default:
         return send_err(fd, "unknown command");
@@ -837,6 +1316,8 @@ static void drop(int cl)
     }
     if (g_dbg_client == cl)
         debug_stop();
+    if (g_snoop_client == cl)
+        snoop_stop();
     CloseSocket(g_clients[cl].fd);
     g_clients[cl].fd = -1;
     g_clients[cl].hello = FALSE;
@@ -921,7 +1402,8 @@ int main(int argc, char **argv)
          * newline, so a growing file has no readable-fd to select on -
          * only a short timer catches it. */
         {
-            BOOL busy = (g_run_client >= 0 || g_dbg_client >= 0);
+            BOOL busy = (g_run_client >= 0 || g_dbg_client >= 0 ||
+                         g_snoop_client >= 0);
             tv.tv_secs  = busy ? 0 : 2;
             tv.tv_micro = busy ? 50000 : 0;
         }
@@ -938,6 +1420,10 @@ int main(int argc, char **argv)
         if (g_dbg_client >= 0)
             if (!debug_pump())
                 drop(g_dbg_client);
+
+        if (g_snoop_client >= 0)
+            if (!snoop_pump())
+                drop(g_snoop_client);
 
         if (n <= 0)
             continue;
@@ -981,8 +1467,16 @@ int main(int argc, char **argv)
 
 out:
     debug_stop();                        /* clears client and removes patch */
-    if (g_dbg_patched)                   /* could not: unloading now = Guru */
-        Printf("wasabid: WARNING - RawPutChar patch could not be removed "
+    snoop_stop();
+    /* A task may still be between the snoop stub's use-count bump and its
+     * rts; give stragglers a moment before this code segment goes away. */
+    {
+        int w;
+        for (w = 0; wasabi_snoop_users && w < 50; w++)
+            Delay(2);
+    }
+    if (g_dbg_patched || snoop_stuck())  /* could not: unloading now = Guru */
+        Printf("wasabid: WARNING - a SetFunction patch could not be removed "
                "(someone patched over it). Do NOT let this binary unload.\n");
     for (i = 0; i < MAX_CLIENTS; i++)
         if (g_clients[i].fd >= 0)

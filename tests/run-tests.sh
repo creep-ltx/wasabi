@@ -96,6 +96,9 @@ out=$(timeout -s INT 1.5 $W snoop --task cfile 2>/dev/null | \
 if [ "$out" -ge 2 ]; then ok "snoop honours the task filter"
 else no "snoop honours the task filter (got $out lines)"; fi
 
+out=$(timeout -s INT 1.5 $W snoop --task cfile 2>/dev/null | grep -c "Shell")
+check "snoop filter suppresses other tasks" "0" "$out"
+
 out=$(timeout -s INT 1.2 $W debug 2>/dev/null | grep -c "ReadCacheNode")
 if [ "$out" -ge 1 ]; then ok "debug streams lines"
 else no "debug streams lines"; fi

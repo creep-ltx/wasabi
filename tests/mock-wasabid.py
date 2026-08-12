@@ -45,6 +45,24 @@ def unpack_str(buf, off=0):
     return buf[off:off + n].decode("latin-1"), off + n
 
 
+def amiga_pattern(pat):
+    """AmigaDOS task filter -> anchored regex: '#?' and '*' are any-run,
+    '?' any single char, case-insensitive, whole-name match - the same
+    semantics as the C daemon's pat_match()."""
+    out, i = [], 0
+    while i < len(pat):
+        if pat[i:i + 2] == "#?" or pat[i] == "*":
+            out.append(".*")
+            i += 2 if pat[i] == "#" else 1
+        elif pat[i] == "?":
+            out.append(".")
+            i += 1
+        else:
+            out.append(re.escape(pat[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z", re.I)
+
+
 def amiga_path(p):
     """Map 'DH0:tools/foo' or 'L:x' onto a path under ROOT, safely."""
     p = p.replace(":", "/", 1) if ":" in p else p
@@ -243,21 +261,21 @@ class Handler(socketserver.BaseRequestHandler):
         if tag == SNOOP:
             _flags = struct.unpack_from(">I", payload, 0)
             pattern, _ = unpack_str(payload, 4)
-            rx = re.compile(pattern.replace("#?", ".*"), re.I) if pattern else None
-            samples = [
-                ("cfile", "Open", "S:Startup-Sequence, MODE_OLDFILE", "ok"),
-                ("Shell", "Lock", "DH0:Tools", "ok"),
-                ("cfile", "LoadSeg", "C:List", "ok"),
-                ("wasabid", "GetVar", "wasabi.key", "fail"),
+            rx = amiga_pattern(pattern) if pattern else None
+            samples = [  # shaped like the C daemon's snoop_format() output
+                ("cfile", 'Open("S:Startup-Sequence", read) = ok'),
+                ("Shell", 'Lock("DH0:Tools", read) = ok'),
+                ("cfile", 'LoadSeg("C:List") = ok'),
+                ("wasabid", 'GetVar("wasabi.key") = fail (err 232)'),
             ]
             i = 0
             while True:
-                task, fn, arg, res = samples[i % len(samples)]
+                task, line = samples[i % len(samples)]
                 i += 1
                 if rx and not rx.match(task):
                     time.sleep(0.2)
                     continue
-                self.emit("%-12s %-10s %-40s %s\n" % (task, fn, arg, res))
+                self.emit("%-20s %s\n" % (task, line), stream=1)
                 time.sleep(0.4)
         else:
             i = 0
@@ -266,9 +284,9 @@ class Handler(socketserver.BaseRequestHandler):
                 self.emit("exfat: ReadCacheNode(0x08cc3140, %d)\n" % i)
                 time.sleep(0.4)
 
-    def emit(self, text):
+    def emit(self, text, stream=0):
         self.seq += 1
-        self.send(LOG, struct.pack(">II", 0, self.seq) + pack_str(text))
+        self.send(LOG, struct.pack(">II", stream, self.seq) + pack_str(text))
 
 
 class Server(socketserver.ThreadingTCPServer):
