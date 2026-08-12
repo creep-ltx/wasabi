@@ -39,10 +39,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b29"
+#define VERSION_STR "wasabid 0.1b30"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b29 (12.8.2026)";
+    "$VER: wasabid 0.1b30 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -2414,8 +2414,27 @@ static BOOL cmd_install(int fd, const char *sidecar)
  * not relaunch us. This is how the throwaway instance that `wasabi
  * update` starts on a spare port is shut down once it has proved itself.
  */
+/*
+ * Exiting while a command runs is not a policy question but a memory
+ * one: runner_entry is OUR code, and the shell unloads this segment the
+ * moment the daemon exits - the Guru arrives minutes later, somewhere
+ * that looks nothing like the cause. So quit and restart refuse while a
+ * runner is alive, exactly as a second RUN is refused. Reboot is exempt:
+ * the machine is about to die anyway, and the runner with it.
+ */
+static BOOL run_blocks_exit(int fd)
+{
+    if (!g_job_active)
+        return FALSE;
+    send_perr(fd, "a command is still running - wait for it to finish, "
+                  "or stop it with 'wasabi kill'");
+    return TRUE;
+}
+
 static BOOL cmd_quit(int fd)
 {
+    if (run_blocks_exit(fd))
+        return TRUE;
     if (!send_frame(fd, T_OK, NULL, 0))
         return FALSE;
     g_quit = TRUE;
@@ -2431,6 +2450,8 @@ static BOOL cmd_quit(int fd)
  */
 static BOOL cmd_restart(int fd)
 {
+    if (run_blocks_exit(fd))
+        return TRUE;
     if (!send_frame(fd, T_OK, NULL, 0))
         return FALSE;
     g_restart = TRUE;
@@ -2970,6 +2991,23 @@ int main(int argc, char **argv)
     Printf("wasabid: stopping\n");
 
 out:
+    /*
+     * Break at the console cannot be refused the way quit and restart
+     * are, and the runner executes this segment's code - exiting now
+     * would unload it under a live process. So wait, and say why:
+     * nothing but the command finishing can hurry this.
+     */
+    if (g_job_active && !g_job.done) {
+        Printf("wasabid: a command is still running - waiting for it "
+               "before exiting\n");
+        while (!g_job.done)
+            Delay(10);
+    }
+    if (g_job_active) {                  /* the cleanup pump_run would do */
+        if (g_run_read) { Close(g_run_read); g_run_read = 0; }
+        DeleteFile(g_job.outname);
+        g_job_active = FALSE;
+    }
     refusals_save(TRUE);
     say_goodbye(g_restart ? "restarting" : "stopping");
     debug_stop();                        /* clears client and removes patch */

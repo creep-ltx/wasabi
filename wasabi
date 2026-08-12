@@ -491,8 +491,11 @@ def cmd_quit(conn, args):
     conn.send(QUIT)
     try:
         conn.expect_ok()
-    except WasabiError:
-        pass                                # it exits right after acking
+    except WasabiError as exc:
+        # The daemon exits right after acking, so a dead connection here
+        # is success - but a refusal (a command still running) is not.
+        if "connection closed" not in str(exc):
+            raise
     print("the daemon has stopped", file=sys.stderr)
 
 
@@ -795,8 +798,11 @@ def do_reboot(conn, cold=False):
     conn.send(REBOOT, struct.pack(">I", 1 if cold else 0))
     try:
         conn.expect_ok()
-    except WasabiError:
-        pass  # the machine may go down before the reply lands
+    except WasabiError as exc:
+        # The machine may go down before the reply lands; a real
+        # refusal, though, deserves to be heard.
+        if "connection closed" not in str(exc):
+            raise
 
 
 def cmd_reboot(conn, args):
@@ -808,8 +814,10 @@ def do_restart(conn):
     conn.send(RESTART)
     try:
         conn.expect_ok()
-    except WasabiError:
-        pass  # the daemon exits right after acking
+    except WasabiError as exc:
+        # The daemon exits right after acking; a refusal is different.
+        if "connection closed" not in str(exc):
+            raise
 
 
 def cmd_restart(conn, args):

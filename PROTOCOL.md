@@ -331,6 +331,12 @@ bind the same port — it relaunches itself via `GetProgramName()` (the
 path it was invoked by) on the same port. The client treats a close after
 `OK` as success and reconnects.
 
+Both `RESTART` and `QUIT` answer `ERR` while a command is running: the
+runner executes the daemon's own code segment, which the shell unloads
+the moment the daemon exits — a Guru minutes later, nowhere near the
+cause. Wait for the command or `KILL` it first. `REBOOT` is exempt;
+the machine dies anyway, and the runner with it.
+
 ### QUIT — stop, and stay stopped
 
 Replies `OK`, then exits without relaunching. This is how the throwaway
