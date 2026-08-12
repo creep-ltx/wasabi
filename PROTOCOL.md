@@ -20,7 +20,9 @@ server -> (unicast back)         WASABI!1 <name> <tcpport> <banner>\n
 ```
 
 Fields are space-separated, the line ends with `\n`, and `banner` may
-contain spaces (it runs to the end of the line). `name` may not.
+contain spaces (it runs to the end of the line). `name` may not: the
+daemon sends `ENV:HOSTNAME` with spaces turned to dashes, or `amiga`
+when the variable is not set.
 
 The client broadcasts, waits ~500 ms, and collects every reply. One
 answer and it connects; several and it prints the list and asks which.

@@ -32,8 +32,6 @@ DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
 
-TAGNAMES = {v: k for k, v in list(globals().items()) if isinstance(v, int)}
-
 # Amiga DateStamp epoch.
 AMIGA_EPOCH = 252460800  # 1978-01-01 00:00:00 UTC as a Unix timestamp
 
@@ -112,8 +110,11 @@ class Conn:
 
     @staticmethod
     def _errtext(payload):
-        (code,) = struct.unpack_from(">I", payload, 0)
-        msg, _ = unpack_str(payload, 4)
+        try:
+            (code,) = struct.unpack_from(">I", payload, 0)
+            msg, _ = unpack_str(payload, 4)
+        except struct.error:
+            return "malformed error frame (%d byte(s))" % len(payload)
         return "%s (AmigaDOS error %d)" % (msg, code) if code else msg
 
     def expect_ok(self):
@@ -307,6 +308,13 @@ def cmd_run(conn, args):
 
 
 def do_run(conn, command, merge=False, detach=False, sink=None):
+    # The daemon holds a command in a 512-byte buffer and strncpy would
+    # truncate silently - running half a command is worse than refusing.
+    nbytes = len(command.encode("latin-1", "replace"))
+    if nbytes > 511:
+        raise WasabiError(
+            "that command is %d bytes and wasabid holds 511 - put it in a "
+            "script, upload it, and run that instead" % nbytes)
     flags = (1 if merge else 0) | (2 if detach else 0)
     conn.send(RUN, struct.pack(">I", flags) + pack_str(command))
     # A command may legitimately think for a long time before it says
@@ -426,7 +434,14 @@ def cmd_update(conn, args):
               % (rc, "".join(out).strip()))
     print("  selftest   ok", file=sys.stderr)
 
-    do_run(conn, "Run >NIL: %s %d" % (sidecar, testport))
+    # The trial daemon answers RFC1918 + loopback by default. If this
+    # client reaches the Amiga from outside those ranges (an unmasqueraded
+    # VPN, say), the running daemon was started with an allow for us - the
+    # trial instance needs one too, or the live probe below is refused by
+    # the very binary it is vouching for. Redundant on a plain LAN, and
+    # harmless: /32 admits exactly this client.
+    myip = conn.sock.getsockname()[0]
+    do_run(conn, "Run >NIL: %s %d allow %s/32" % (sidecar, testport, myip))
     time.sleep(2.0)
     try:
         probe = Conn(conn.host, testport, args.key, timeout=5.0)
@@ -782,8 +797,17 @@ def cmd_mkdir(conn, args):
 
 
 DISCOVERY_PROBE = b"WASABI?1\n"
-CACHE = os.path.expanduser("~/.cache/wasabi/last-host")
-SEEN_REFUSED = os.path.expanduser("~/.cache/wasabi/refused-%s")
+
+
+def _xdg(env, fallback):
+    """XDG base dir: the env var if set, else the conventional default.
+    Also what lets the test suite keep its state out of the real one."""
+    return os.environ.get(env) or os.path.expanduser(fallback)
+
+
+CACHE = os.path.join(_xdg("XDG_CACHE_HOME", "~/.cache"), "wasabi/last-host")
+SEEN_REFUSED = os.path.join(_xdg("XDG_CACHE_HOME", "~/.cache"),
+                            "wasabi/refused-%s")
 
 
 def warn_if_refusals_grew(conn, host):
@@ -864,8 +888,14 @@ def _collect(sock, found, deadline):
         parts = line[9:].split(" ", 2)
         if len(parts) < 2:
             continue
-        found[addr[0]] = (parts[0], int(parts[1]),
-                          parts[2] if len(parts) > 2 else "")
+        try:
+            port_ = int(parts[1])
+        except ValueError:
+            continue
+        # Keyed by (ip, port), not ip: two daemons on one host - a trial
+        # instance beside the live one, say - are two answers, not one.
+        found[(addr[0], port_)] = (parts[0],
+                                   parts[2] if len(parts) > 2 else "")
 
 
 def discover(timeout=0.5, port=1234, sweep=True):
@@ -951,10 +981,10 @@ def resolve_target(args):
             "  Is it running? Try: wasabi --host <ip> ping")
     if len(found) > 1:
         lines = ["several Amigas answered - pick one with --host:"]
-        for ip, (name, port, banner) in sorted(found.items()):
-            lines.append("  %-15s %s  %s" % (ip, name, banner))
+        for (ip, port), (name, banner) in sorted(found.items()):
+            lines.append("  %-15s :%-5d %s  %s" % (ip, port, name, banner))
         raise WasabiError("\n".join(lines))
-    ip, (name, port, _banner) = next(iter(found.items()))
+    (ip, port), (_name, _banner) = next(iter(found.items()))
     cache_host(ip, port)
     return ip, port
 
@@ -964,14 +994,14 @@ def cmd_discover(args):
     if not found:
         print("no wasabid found on this network", file=sys.stderr)
         return 1
-    for ip, (name, port, banner) in sorted(found.items()):
+    for (ip, port), (name, banner) in sorted(found.items()):
         print("%-15s :%-5d %-12s %s" % (ip, port, name, banner))
     return 0
 
 
 def load_config():
     cfg = {}
-    path = os.path.expanduser("~/.config/wasabi/config")
+    path = os.path.join(_xdg("XDG_CONFIG_HOME", "~/.config"), "wasabi/config")
     try:
         with open(path) as fh:
             for line in fh:

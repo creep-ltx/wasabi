@@ -6,6 +6,15 @@ exercised end to end with no Amiga in the loop. It is also the reference
 the C daemon is written against: where the two disagree about the wire,
 this file is what the client was tested with.
 
+Known divergences from the C daemon, all because this is Unix underneath:
+
+  - RUN's merge/detach flags are honoured here; the daemon ignores both
+    (reserved wire protocol - see PROTOCOL.md).
+  - stderr arrives separately here; OS 3.x has no SYS_Error, so the
+    daemon merges everything onto STDOUT.
+  - REBOOT and RESTART reply OK and do nothing.
+  - Commands run concurrently here; the daemon serves one RUN at a time.
+
     ./mock-wasabid.py --root /tmp/fakeamiga --port 1234 --key hunter2
 """
 
@@ -441,11 +450,22 @@ class Handler(socketserver.BaseRequestHandler):
     ]
 
     def do_screens(self, payload):
-        """Two screens, front first - enough to exercise the client."""
-        _flags = struct.unpack_from(">I", payload, 0)
-        rows = ["0x00001111 640 256 2 CygnusEd Professional V4.2",
-                "0x00002222 1280 960 24 Workbench Screen"]
-        self.send_data(("\n".join(rows) + "\n").encode("latin-1"))
+        """Two screens, front first - enough to exercise the client.
+
+        Same reply shape as the daemon: the listing always goes out as
+        DATA, then either END or - for a --to-front title nothing
+        matches - an ERR in END's place."""
+        (_flags,) = struct.unpack_from(">I", payload, 0)
+        want, _ = unpack_str(payload, 4)
+        titles = ["CygnusEd Professional V4.2", "Workbench Screen"]
+        rows = ["0x00001111 640 256 2 %s" % titles[0],
+                "0x00002222 1280 960 24 %s" % titles[1]]
+        blob = ("\n".join(rows) + "\n").encode("latin-1")
+        for i in range(0, len(blob), MAX_PAYLOAD):
+            self.send(DATA, blob[i:i + MAX_PAYLOAD])
+        if want and want.lower() not in (t.lower() for t in titles):
+            return self.err("no screen with that title")
+        self.send(END)
 
     def do_grab(self):
         """A tiny synthetic screen: header then raw RGB rows."""

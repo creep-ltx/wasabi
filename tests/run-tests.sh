@@ -8,7 +8,11 @@ cd "$(dirname "$0")/.."
 PORT=${PORT:-14231}
 KEY=hunter2
 ROOT=$(mktemp -d /tmp/wasabi-test.XXXXXX)
-CACHE=$HOME/.cache/wasabi/last-host
+# Keep every cache and config write inside the test root - the suite must
+# never touch the real ~/.cache/wasabi or ~/.config/wasabi.
+export XDG_CACHE_HOME="$ROOT/xdg-cache"
+export XDG_CONFIG_HOME="$ROOT/xdg-config"
+CACHE=$XDG_CACHE_HOME/wasabi/last-host
 PASS=0
 FAIL=0
 
@@ -56,6 +60,12 @@ check "a wrong key is refused" "1" "$out"
 out=$($W ls C: 2>/dev/null | grep -c "greet.txt")
 check "ls shows a file" "1" "$out"
 
+# A DateStamp is the Amiga's wall time and must arrive verbatim - not
+# shifted by this box's UTC offset (it was, before 0.1b26).
+touch -t 202601021030 "$ROOT/C/dated.txt"
+out=$($W ls C: 2>/dev/null | grep "dated.txt" | grep -c "2026-01-02 10:30")
+check "ls dates are wall time, verbatim" "1" "$out"
+
 # --- round trip, multi-frame ---
 head -c 200000 /dev/urandom > "$ROOT/../wasabi-big.$$"
 $W put "$ROOT/../wasabi-big.$$" L:big >/dev/null 2>&1
@@ -80,6 +90,11 @@ check "run propagates the exit code" "7" "$?"
 
 out=$($W run "echo to-stderr >&2" 2>&1 >/dev/null)
 check "run keeps stderr separate" "to-stderr" "$out"
+
+# wasabid holds a command in 512 bytes and strncpy truncates silently;
+# the client must refuse rather than let half a command run.
+out=$($W run "$(python3 -c 'print("echo " + "x" * 600)')" 2>&1 | grep -c "511")
+check "run refuses a command wasabid would truncate" "1" "$out"
 
 # --- mkdir / del ---
 $W mkdir L:newdrawer >/dev/null 2>&1
@@ -194,6 +209,9 @@ check "screen lists what is open" "1" "$out"
 out=$($W screen 2>/dev/null | grep -c "<- front")
 check "and marks the front one" "1" "$out"
 
+out=$($W screen --to-front NoSuchScreen 2>&1 | grep -c "no screen with that title")
+check "screen --to-front of a missing title errors" "1" "$out"
+
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")
 check "ps lists tasks" "1" "$out"
@@ -244,7 +262,7 @@ check "a pre-capability daemon is not second-guessed" "1" "$out"
 kill $PRE_PID 2>/dev/null
 
 # --- refused off-LAN connections, reported to the operator ---
-rm -f "$HOME/.cache/wasabi/refused-127.0.0.1"
+rm -f "$XDG_CACHE_HOME/wasabi/refused-127.0.0.1"
 ./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+9)) --key "$KEY" \
     --refused 673 >>"$ROOT/mock.log" 2>&1 &
 REF_PID=$!
@@ -257,7 +275,7 @@ check "and not repeated when it has not moved" "0" "$out"
 out=$($R info 2>/dev/null | grep -c "^refused: 673")
 check "info always shows the total" "1" "$out"
 kill $REF_PID 2>/dev/null
-rm -f "$HOME/.cache/wasabi/refused-127.0.0.1"
+rm -f "$XDG_CACHE_HOME/wasabi/refused-127.0.0.1"
 
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")

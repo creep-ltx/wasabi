@@ -65,7 +65,9 @@ up — 254 of those in a row turned a 1-second probe into 8.
 
 ## Installing
 
-**Amiga.** Copy `wasabid` to `C:`, set a key, and start it:
+**Amiga.** Build the daemon first — `make` with Bebbo's cross-compiler
+(see *Building and testing*); the binary itself is not kept in git.
+Then copy `wasabid` to `C:`, set a key, and start it:
 
 ```
 Copy wasabid C:
@@ -105,7 +107,8 @@ wasabi run "CMD"             execute, stream output, return its exit code
 wasabi deploy L R [--run C] [--reboot | --restart]
 wasabi del PATH / mkdir PATH
 wasabi reboot [--cold]
-wasabi restart               reload the daemon in place
+wasabi restart               reload the daemon in place (a debug tool -
+                             'update' is the verified path)
 wasabi update LOCAL          replace the daemon itself, verifying first
 wasabi quit --yes            stop the daemon (needs physical access after)
 wasabi debug [--with-snoop] [--log F]   live KPrintF stream
@@ -127,6 +130,9 @@ LAN-only unless told otherwise.
 renames over the target at the very end. An interrupted upload can
 never leave a half-written binary where a working one used to be —
 which matters when the target is `L:` and the machine is about to boot.
+One honest caveat: AmigaDOS `Rename()` will not clobber, so the old file
+is deleted an instant before the rename. Half-written, never; briefly
+absent if the machine dies inside that instant, possible.
 
 **`run` redirects to a temp file opened `MODE_READWRITE`, not
 `MODE_NEWFILE`.** That one flag is the whole trick: `MODE_NEWFILE` takes

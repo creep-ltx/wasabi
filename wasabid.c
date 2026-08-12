@@ -39,10 +39,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b26"
+#define VERSION_STR "wasabid 0.1b27"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b26 (12.8.2026)";
+    "$VER: wasabid 0.1b27 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -63,6 +63,14 @@ static const char *verstag __attribute__((used)) =
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen"
+
+/* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
+ * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
+ * here, not scribble past a stack buffer on a machine with no MMU. */
+typedef char welcome_fits_its_buffer[
+    (2 + 2 + sizeof(VERSION_STR) - 1 +
+     2 + sizeof(CAPS_STR) - 1 + 4 <= 256) ? 1 : -1];
+
 #define DEF_PORT        1234
 #define MAX_PAYLOAD     65536
 #define MAX_CLIENTS     8
@@ -218,6 +226,7 @@ struct Client {
 
 static struct Client g_clients[MAX_CLIENTS];
 static char g_key[128];
+static char g_name[32] = "amiga";    /* discovery name; ENV:HOSTNAME wins */
 static BOOL g_quit;
 static BOOL g_restart;               /* relaunch ourselves on the way out */
 static int  g_port = DEF_PORT;        /* the port we listen on */
@@ -262,7 +271,8 @@ static struct Refusal g_refused[REFUSE_MAX];
 static LONG  g_refused_n;
 static ULONG g_refused_total;
 static BOOL  g_refused_dirty;
-static LONG  g_refused_written;      /* ds_Minute of the last file write */
+static LONG  g_refused_written = -1; /* ds_Minute of the last file write;
+                                      * -1 so minute 0 (midnight) counts */
 
 #define REFUSE_FILE "L:wasabid.refused"
 
@@ -559,16 +569,30 @@ static BOOL recv_frame(int fd, UBYTE *tag, UBYTE *payload, LONG *len)
     return TRUE;
 }
 
-static BOOL send_err(int fd, const char *msg)
+static BOOL send_err_full(int fd, ULONG code, const char *msg)
 {
     UBYTE buf[256];
     LONG mlen = (LONG)strlen(msg);
     if (mlen > 200) mlen = 200;
-    put_be32(buf, (ULONG)IoErr());
+    put_be32(buf, code);
     buf[4] = (UBYTE)(mlen >> 8);
     buf[5] = (UBYTE)mlen;
     memcpy(buf + 6, msg, mlen);
     return send_frame(fd, T_ERR, buf, 6 + mlen);
+}
+
+/* A DOS call just failed: IoErr() is fresh and belongs to this error. */
+static BOOL send_err(int fd, const char *msg)
+{
+    return send_err_full(fd, (ULONG)IoErr(), msg);
+}
+
+/* Our own refusal - bad frame, bad key, busy slot. No DOS call failed,
+ * so a leftover IoErr() would only dress the message in an unrelated
+ * AmigaDOS error number the client then dutifully prints. */
+static BOOL send_perr(int fd, const char *msg)
+{
+    return send_err_full(fd, 0, msg);
 }
 
 /* Pull a wire string (u16 len + bytes) out of a payload, NUL-terminating. */
@@ -792,7 +816,7 @@ static LONG ring_drain(UBYTE *buf, LONG max)
 static BOOL debug_start(int cl)
 {
     if (g_dbg_client >= 0)
-        return send_err(g_clients[cl].fd, "the debug stream is already in use");
+        return send_perr(g_clients[cl].fd, "the debug stream is already in use");
 
     g_ring_head = g_ring_tail = g_ring_lost = 0;
     g_dbg_client = cl;
@@ -1361,7 +1385,7 @@ static BOOL snoop_start(int cl, const char *pat)
     char why[64];
 
     if (g_snoop_client >= 0)
-        return send_err(g_clients[cl].fd, "the snoop stream is already in use");
+        return send_perr(g_clients[cl].fd, "the snoop stream is already in use");
 
     snoop_copystr(g_snoop_pat, sizeof(g_snoop_pat), pat);
     g_snev_head = g_snev_tail = g_snev_lost = 0;
@@ -1375,7 +1399,7 @@ static BOOL snoop_start(int cl, const char *pat)
         snoop_uninstall();
         sprintf(msg, "snoop self-test failed (%.60s) - the patch trampoline "
                      "and this build disagree, so snoop will not run", why);
-        return send_err(g_clients[cl].fd, msg);
+        return send_perr(g_clients[cl].fd, msg);
     }
 
     g_snoop_client = cl;
@@ -1547,12 +1571,12 @@ static BOOL cmd_kill(int fd, ULONG flags, const char *target)
         }
     }
     if (!matches)
-        return send_err(fd, "no task or process by that name");
+        return send_perr(fd, "no task or process by that name");
     if (matches > 1)
         return send_err(fd,
             "ambiguous - several tasks match; use the 0x address from ps");
     if (hit == FindTask(NULL))
-        return send_err(fd, "that is wasabid itself - use restart or reboot");
+        return send_perr(fd, "that is wasabid itself - use restart or reboot");
 
     {
         struct Task *t;
@@ -1572,7 +1596,7 @@ static BOOL cmd_kill(int fd, ULONG flags, const char *target)
         Enable();
     }
     if (!alive)
-        return send_err(fd, "that task is already gone");
+        return send_perr(fd, "that task is already gone");
     return send_frame(fd, T_OK, NULL, 0);
 }
 
@@ -1710,7 +1734,7 @@ static BOOL cmd_ls(int fd, const char *path)
     fib = (struct FileInfoBlock *)AllocDosObject(DOS_FIB, NULL);
     if (!fib) {
         UnLock(lock);
-        return send_err(fd, "out of memory");
+        return send_perr(fd, "out of memory");
     }
     if (!Examine(lock, fib)) {
         FreeDosObject(DOS_FIB, fib);
@@ -1753,7 +1777,7 @@ static BOOL cmd_get(int fd, const char *path)
     buf = AllocMem(MAX_PAYLOAD, MEMF_ANY);
     if (!buf) {
         Close(fh);
-        return send_err(fd, "out of memory");
+        return send_perr(fd, "out of memory");
     }
     while ((n = Read(fh, buf, MAX_PAYLOAD)) > 0) {
         if (!send_frame(fd, T_DATA, buf, n)) {
@@ -1814,7 +1838,7 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
 
     buf = AllocMem(MAX_PAYLOAD, MEMF_ANY);
     if (!buf)
-        return send_err(fd, "out of memory");
+        return send_perr(fd, "out of memory");
 
     if (is_self_file(path)) {
         /* The client is already sending the body; swallow it, or those
@@ -1830,7 +1854,7 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
                 break;
         }
         FreeMem(buf, MAX_PAYLOAD);
-        return send_err(fd, "that is the running daemon - use 'wasabi update', "
+        return send_perr(fd, "that is the running daemon - use 'wasabi update', "
                             "which verifies the binary before it commits");
     }
 
@@ -1919,13 +1943,13 @@ static BOOL screen_send_deep(int fd, struct Screen *sc, ULONG w, ULONG h)
     if (!g_cgfx)
         g_cgfx = OpenLibrary("cybergraphics.library", 40);
     if (!g_cgfx)
-        return send_err(fd, "that screen is deeper than 8 bits but there is "
+        return send_perr(fd, "that screen is deeper than 8 bits but there is "
                             "no cybergraphics.library to read it with");
     band = MAX_PAYLOAD / rowbytes;
     if (band < 1) band = 1;
     buf = AllocMem(band * rowbytes, MEMF_ANY);
     if (!buf)
-        return send_err(fd, "out of memory for the grab buffer");
+        return send_perr(fd, "out of memory for the grab buffer");
 
     for (y = 0; ok && y < (LONG)h; y += band) {
         LONG n = (y + band > (LONG)h) ? ((LONG)h - y) : band;
@@ -1959,7 +1983,7 @@ static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
     temprp.Layer = NULL;
     temprp.BitMap = AllocBitMap(aligned, 1, 8, 0, NULL);
     if (!temprp.BitMap)
-        return send_err(fd, "out of memory for the scratch bitmap");
+        return send_perr(fd, "out of memory for the scratch bitmap");
 
     pens = AllocMem(aligned * band, MEMF_ANY);
     rgb  = AllocMem(rowbytes * band, MEMF_ANY);
@@ -1967,7 +1991,7 @@ static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
         if (pens) FreeMem(pens, aligned * band);
         if (rgb)  FreeMem(rgb, rowbytes * band);
         FreeBitMap(temprp.BitMap);
-        return send_err(fd, "out of memory for the grab buffer");
+        return send_perr(fd, "out of memory for the grab buffer");
     }
 
     /* GetRGB32 hands back 32-bit components; we want the top byte. */
@@ -2039,7 +2063,7 @@ static BOOL cmd_screenctl(int fd, ULONG flags, const char *want)
     else if ((flags & 1) && front)
         ScreenToBack(front);             /* what Amiga+M does */
     else if (want[0])
-        return send_err(fd, "no screen with that title");
+        return send_perr(fd, "no screen with that title");
 
     return send_frame(fd, T_END, NULL, 0);
 }
@@ -2055,7 +2079,7 @@ static BOOL cmd_grab(int fd, const char *scrname)
     if (scrname[0]) {
         sc = LockPubScreen((STRPTR)scrname);
         if (!sc)
-            return send_err(fd, "no public screen by that name");
+            return send_perr(fd, "no public screen by that name");
         haslock = TRUE;
     } else {
         /*
@@ -2073,7 +2097,7 @@ static BOOL cmd_grab(int fd, const char *scrname)
         sc = IntuitionBase->FirstScreen;
         UnlockIBase(ib);
         if (!sc)
-            return send_err(fd, "there are no screens open");
+            return send_perr(fd, "there are no screens open");
     }
 
     w = (ULONG)sc->Width;
@@ -2081,7 +2105,7 @@ static BOOL cmd_grab(int fd, const char *scrname)
     depth = (LONG)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH);
     if (!w || !h || (LONG)w * 3 > MAX_PAYLOAD) {
         if (haslock) UnlockPubScreen(NULL, sc);
-        return send_err(fd, "that screen is too wide to send a row at a time");
+        return send_perr(fd, "that screen is too wide to send a row at a time");
     }
 
     put_be32(hdr, w);
@@ -2175,10 +2199,10 @@ static BOOL cmd_speed(int fd, ULONG flags, ULONG size, const char *target)
     BOOL tofile = target[0] != '\0';
 
     if (!size || size > (256UL << 20))
-        return send_err(fd, "size must be 1 byte to 256 MB");
+        return send_perr(fd, "size must be 1 byte to 256 MB");
     buf = AllocMem(MAX_PAYLOAD, MEMF_ANY);
     if (!buf)
-        return send_err(fd, "out of memory");
+        return send_perr(fd, "out of memory");
 
     if (tofile) {
         char why[100], msg[200];
@@ -2188,7 +2212,7 @@ static BOOL cmd_speed(int fd, ULONG flags, ULONG size, const char *target)
             if (!alive)
                 return FALSE;
             sprintf(msg, "cannot speedtest to %.40s: %.140s", target, why);
-            return send_err(fd, msg);
+            return send_perr(fd, msg);
         }
         speed_path(path, target, sizeof(path));
         fh = Open(path, (flags & 1) ? MODE_OLDFILE : MODE_NEWFILE);
@@ -2216,7 +2240,8 @@ static BOOL cmd_speed(int fd, ULONG flags, ULONG size, const char *target)
                     break;              /* short file; END closes it honestly */
             }
             if (!send_frame(fd, T_DATA, buf, chunk)) {
-                Close(fh); FreeMem(buf, MAX_PAYLOAD);
+                if (fh) Close(fh);
+                FreeMem(buf, MAX_PAYLOAD);
                 return FALSE;
             }
             left -= chunk;
@@ -2320,7 +2345,7 @@ static BOOL cmd_install(int fd, const char *sidecar)
     BPTR l;
 
     if (!GetProgramName(self, sizeof(self)) || !self[0])
-        return send_err(fd, "cannot tell which path I was started from");
+        return send_perr(fd, "cannot tell which path I was started from");
 
     l = Lock((STRPTR)sidecar, ACCESS_READ);
     if (!l)
@@ -2407,7 +2432,7 @@ static void answer_probe(int s, int port)
         note_refusal(ntohl(from.sin_addr.s_addr));
         return;
     }
-    n = sprintf(reply, "WASABI!1 amiga %d %s\n", port, VERSION_STR);
+    n = sprintf(reply, "WASABI!1 %s %d %s\n", g_name, port, VERSION_STR);
     sendto(s, reply, n, 0, (struct sockaddr *)&from, fromlen);
 }
 
@@ -2421,13 +2446,13 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     if (!g_clients[cl].hello) {
         char key[128];
         if (tag != T_HELLO)
-            return send_err(fd, "expected HELLO"), FALSE;
+            return send_perr(fd, "expected HELLO"), FALSE;
         if (len < 2 || get_be16(p) != PROTO_VERSION)
-            return send_err(fd, "protocol version mismatch"), FALSE;
+            return send_perr(fd, "protocol version mismatch"), FALSE;
         if (!get_str(p, len, 2, key, sizeof(key)))
-            return send_err(fd, "malformed HELLO"), FALSE;
+            return send_perr(fd, "malformed HELLO"), FALSE;
         if (strcmp(key, g_key) != 0)
-            return send_err(fd, "bad key"), FALSE;
+            return send_perr(fd, "bad key"), FALSE;
         g_clients[cl].hello = TRUE;
         {
             UBYTE w[256];
@@ -2455,28 +2480,28 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
 
     case T_LS:
         if (!get_str(p, len, 0, path, sizeof(path)))
-            return send_err(fd, "bad path");
+            return send_perr(fd, "bad path");
         return cmd_ls(fd, path);
 
     case T_GET:
         if (!get_str(p, len, 0, path, sizeof(path)))
-            return send_err(fd, "bad path");
+            return send_perr(fd, "bad path");
         return cmd_get(fd, path);
 
     case T_PUT:
         if (len < 8 || !get_str(p, len, 8, path, sizeof(path)))
-            return send_err(fd, "bad PUT header");
+            return send_perr(fd, "bad PUT header");
         return cmd_put(fd, get_be32(p), get_be32(p + 4), path);
 
     case T_DEL:
         if (!get_str(p, len, 0, path, sizeof(path)))
-            return send_err(fd, "bad path");
+            return send_perr(fd, "bad path");
         return DeleteFile(path) ? send_frame(fd, T_OK, NULL, 0)
                                 : send_err(fd, "delete failed");
 
     case T_MKDIR:
         if (!get_str(p, len, 0, path, sizeof(path)))
-            return send_err(fd, "bad path");
+            return send_perr(fd, "bad path");
         {
             BPTR l = CreateDir(path);
             if (!l)
@@ -2488,9 +2513,9 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_RUN: {
         char cmd[512];
         if (len < 4 || !get_str(p, len, 4, cmd, sizeof(cmd)))
-            return send_err(fd, "bad RUN header");
+            return send_perr(fd, "bad RUN header");
         if (g_job_active)
-            return send_err(fd, "another command is already running");
+            return send_perr(fd, "another command is already running");
         if (!start_run(cl, cmd))
             return send_err(fd, "could not start the command");
         return TRUE;                     /* output follows from pump_run */
@@ -2502,7 +2527,7 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_KILL: {
         char target[64];
         if (len < 4 || !get_str(p, len, 4, target, sizeof(target)))
-            return send_err(fd, "bad KILL header");
+            return send_perr(fd, "bad KILL header");
         return cmd_kill(fd, get_be32(p), target);
     }
 
@@ -2523,11 +2548,11 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_SPEED: {
         char target[200];
         if (len < 8)
-            return send_err(fd, "bad SPEED header");
+            return send_perr(fd, "bad SPEED header");
         if (len == 8)
             target[0] = '\0';            /* older client: storage-free mode */
         else if (!get_str(p, len, 8, target, sizeof(target)))
-            return send_err(fd, "bad SPEED target");
+            return send_perr(fd, "bad SPEED target");
         return cmd_speed(fd, get_be32(p), get_be32(p + 4), target);
     }
 
@@ -2542,7 +2567,7 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
 
     case T_INSTALL:
         if (!get_str(p, len, 0, path, sizeof(path)))
-            return send_err(fd, "bad path");
+            return send_perr(fd, "bad path");
         return cmd_install(fd, path);
 
     case T_DEBUG:
@@ -2551,12 +2576,12 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_SNOOP: {
         char pat[64];
         if (len < 4 || !get_str(p, len, 4, pat, sizeof(pat)))
-            return send_err(fd, "bad SNOOP header");
+            return send_perr(fd, "bad SNOOP header");
         return snoop_start(cl, pat);
     }
 
     default:
-        return send_err(fd, "unknown command");
+        return send_perr(fd, "unknown command");
     }
 }
 
@@ -2706,6 +2731,17 @@ int main(int argc, char **argv)
 
     if (GetVar("wasabi.key", g_key, sizeof(g_key), 0) <= 0)
         g_key[0] = '\0';
+
+    /* Name for discovery replies: two Amigas answering as "amiga" are
+     * indistinguishable. Roadshow and rondoval's stack both set
+     * ENV:HOSTNAME; without it the old default stands. The protocol's
+     * name field is space-delimited, so spaces become dashes. */
+    if (GetVar("HOSTNAME", g_name, sizeof(g_name), 0) > 0) {
+        char *p;
+        for (p = g_name; *p; p++)
+            if (*p == ' ') *p = '-';
+    } else
+        strcpy(g_name, "amiga");
 
     SocketBase = OpenLibrary("bsdsocket.library", 4);
     if (!SocketBase) {
@@ -2879,7 +2915,9 @@ out:
     if (g_restart) {
         char self[128], cmd[160];
         if (GetProgramName(self, sizeof(self)) && self[0]) {
-            sprintf(cmd, "Run >NIL: %s %d%s", self, g_port, g_extra_args);
+            /* Quoted: a daemon started from a path with a space in it
+             * must come back from restart too. */
+            sprintf(cmd, "Run >NIL: \"%s\" %d%s", self, g_port, g_extra_args);
             Execute(cmd, 0, 0);
         }
     }
