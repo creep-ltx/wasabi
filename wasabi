@@ -280,6 +280,9 @@ def cmd_deploy(conn, args):
     if args.reboot:
         print("rebooting the Amiga...", file=sys.stderr)
         do_reboot(conn, cold=args.cold)
+    elif args.restart:
+        do_restart(conn)
+        print("the daemon is reloading itself", file=sys.stderr)
     return rc
 
 
@@ -410,12 +413,16 @@ def cmd_reboot(conn, args):
     print("reboot sent", file=sys.stderr)
 
 
-def cmd_restart(conn, args):
+def do_restart(conn):
     conn.send(RESTART)
     try:
         conn.expect_ok()
     except WasabiError:
         pass  # the daemon exits right after acking
+
+
+def cmd_restart(conn, args):
+    do_restart(conn)
     print("restart sent - the daemon is reloading itself", file=sys.stderr)
 
 
@@ -649,11 +656,15 @@ def main(argv=None):
                    help="do not wait for the command to finish")
     s.set_defaults(fn=cmd_run)
 
-    s = sub.add_parser("deploy", help="upload, then optionally run or reboot")
+    s = sub.add_parser("deploy",
+                       help="upload, then optionally run, reboot or restart")
     s.add_argument("local")
     s.add_argument("remote")
     s.add_argument("--run", metavar="CMD")
-    s.add_argument("--reboot", action="store_true")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--reboot", action="store_true")
+    g.add_argument("--restart", action="store_true",
+                   help="reload the daemon in place (self-update)")
     s.add_argument("--cold", action="store_true")
     s.set_defaults(fn=cmd_deploy)
 

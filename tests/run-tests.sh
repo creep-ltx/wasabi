@@ -118,6 +118,13 @@ if [ "${n:-0}" -ge 2 ]; then ok "--log stamps every line"
 else no "--log stamps every line (got ${n:-0})"; fi
 rm -f "$STREAMLOG"
 
+# --- deploy --restart: upload then reload the daemon in one shot ---
+echo restarter > "$ROOT/../wasabi-restart.$$"
+out=$($W deploy "$ROOT/../wasabi-restart.$$" C:wasabid.new --restart 2>&1 | \
+      grep -c "reloading itself")
+check "deploy --restart uploads and reloads" "1" "$out"
+rm -f "$ROOT/../wasabi-restart.$$"
+
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")
 check "ps lists tasks" "1" "$out"

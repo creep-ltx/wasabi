@@ -45,7 +45,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 24 tests, no Amiga required.
+host mock that speaks the same protocol — 25 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -99,7 +99,7 @@ wasabi ls [PATH]             list a drawer; no path lists the volumes
 wasabi put LOCAL REMOTE      upload a file
 wasabi get REMOTE LOCAL      download a file ('-' for stdout)
 wasabi run "CMD"             execute, stream output, return its exit code
-wasabi deploy L R [--run C] [--reboot]
+wasabi deploy L R [--run C] [--reboot | --restart]
 wasabi del PATH / mkdir PATH
 wasabi reboot [--cold]
 wasabi debug [--with-snoop] [--log F]   live KPrintF stream

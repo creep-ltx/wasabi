@@ -29,7 +29,7 @@ HELLO, WELCOME, ERR, OK, PING, PONG = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
-REBOOT, INFO, PS, KILL = 0x40, 0x41, 0x43, 0x44
+REBOOT, INFO, RESTART, PS, KILL = 0x40, 0x41, 0x42, 0x43, 0x44
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -178,6 +178,9 @@ class Handler(socketserver.BaseRequestHandler):
         elif tag == REBOOT:
             self.send(OK)
             print("[mock] REBOOT requested (ignored)", file=sys.stderr)
+        elif tag == RESTART:
+            self.send(OK)
+            print("[mock] RESTART requested (ignored)", file=sys.stderr)
         else:
             self.err("unknown tag 0x%02x" % tag)
 
