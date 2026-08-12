@@ -125,24 +125,44 @@ out=$($W deploy "$ROOT/../wasabi-restart.$$" C:wasabid.new --restart 2>&1 | \
 check "deploy --restart uploads and reloads" "1" "$out"
 rm -f "$ROOT/../wasabi-restart.$$"
 
-# --- deploy --safe: verify before committing a new daemon ---
-printf 'new good daemon\n' > "$ROOT/../wasabi-good.$$"
+# --- update: the daemon may only be replaced through verification ---
+NEWD=$ROOT/../wasabi-newd.$$
+printf 'binary\0$VER: wasabid 9.9test (1.1.2026)\0rest\n' > "$NEWD"
 printf 'old daemon\n' > "$ROOT/C/wasabid"
-$W deploy "$ROOT/../wasabi-good.$$" C:wasabid --safe >/dev/null 2>&1
-check "deploy --safe installs a binary that passes" \
-      "new good daemon" "$(cat "$ROOT/C/wasabid" 2>/dev/null)"
-check "deploy --safe keeps the previous binary" \
-      "old daemon" "$(cat "$ROOT/C/wasabid.bak" 2>/dev/null)"
-[ ! -f "$ROOT/C/wasabid.new" ] && ok "deploy --safe clears the sidecar" \
-                              || no "deploy --safe clears the sidecar"
 
-printf 'FAIL_SELFTEST\n' > "$ROOT/../wasabi-bad.$$"
-out=$($W deploy "$ROOT/../wasabi-bad.$$" C:wasabid --safe 2>&1 | \
-      grep -c "failed its self-test")
-check "a binary that fails is refused" "1" "$out"
-check "the running daemon's binary is untouched" \
-      "new good daemon" "$(cat "$ROOT/C/wasabid" 2>/dev/null)"
-rm -f "$ROOT/../wasabi-good.$$" "$ROOT/../wasabi-bad.$$"
+out=$($W put "$NEWD" C:wasabid 2>&1 | grep -c "wasabi update")
+check "put refuses to overwrite the running daemon" "1" "$out"
+check "and leaves it alone" "old daemon" "$(cat "$ROOT/C/wasabid")"
+
+out=$($W update /etc/hostname 2>&1 | grep -c "not a wasabid binary")
+check "update refuses a file with no \$VER tag" "1" "$out"
+check "still leaves the daemon alone" "old daemon" "$(cat "$ROOT/C/wasabid")"
+
+$W update "$NEWD" --testport $((PORT+1)) >/dev/null 2>&1
+if cmp -s "$NEWD" "$ROOT/C/wasabid"; then
+    ok "update installs a binary that passes every check"
+else
+    no "update installs a binary that passes every check"
+fi
+check "update keeps the previous binary" \
+      "old daemon" "$(cat "$ROOT/C/wasabid.bak" 2>/dev/null)"
+[ ! -f "$ROOT/C/wasabid.new" ] && ok "update clears the sidecar" \
+                              || no "update clears the sidecar"
+
+# A real wasabid that passes its own self-test and still cannot serve:
+# only the live probe can catch this one.
+DEADD=$ROOT/../wasabi-deadd.$$
+printf 'BREAK_SERVE\0$VER: wasabid 9.9dead (1.1.2026)\0x\n' > "$DEADD"
+out=$($W update "$DEADD" --testport $((PORT+2)) 2>&1 | grep -c "did not come up as a daemon")
+check "update catches a binary that cannot serve" "1" "$out"
+if cmp -s "$NEWD" "$ROOT/C/wasabid"; then
+    ok "and the working daemon is still in place"
+else
+    no "and the working daemon is still in place"
+fi
+[ ! -f "$ROOT/C/wasabid.new" ] && ok "and its sidecar is cleared" \
+                              || no "and its sidecar is cleared"
+rm -f "$NEWD" "$DEADD"
 
 # --- speedtest ---
 out=$($W speedtest 1MB --pings 20 2>/dev/null | grep -c "MB/s")

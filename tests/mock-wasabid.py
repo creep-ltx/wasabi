@@ -30,9 +30,34 @@ PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
+QUIT, INSTALL = 0x46, 0x47
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
+PORT = 1234
+# What this instance calls itself in WELCOME. A trial instance spawned by
+# `wasabi update` is standing in for a specific binary, so it is started
+# with that binary's version - the real daemon's banner is its version.
+BANNER = None
+# The path this mock pretends to be running from, so it can refuse a plain
+# PUT over itself exactly as the daemon does.
+SELF = "C:wasabid"
+VER_TAG = b"$VER: wasabid "
+
+
+def ver_of(path):
+    """'wasabid 0.1b14' out of a file's $VER tag, or None."""
+    try:
+        with open(path, "rb") as fh:
+            blob = fh.read()
+    except OSError:
+        return None
+    i = blob.find(VER_TAG)
+    if i < 0:
+        return None
+    end = blob.find(b"\0", i)
+    tag = blob[i + 6:end if end > 0 else i + 120].decode("latin-1", "replace")
+    return " ".join(tag.split()[:2])
 
 
 def pack_str(s):
@@ -129,8 +154,8 @@ class Handler(socketserver.BaseRequestHandler):
                 return self.err("protocol v%d not supported" % ver)
             if key != KEY:
                 return self.err("bad key")
-            self.send(WELCOME, struct.pack(">H", VERSION) +
-                      pack_str("mock-wasabid on %s" % os.uname().nodename))
+            self.send(WELCOME, struct.pack(">H", VERSION) + pack_str(
+                BANNER or "mock-wasabid on %s" % os.uname().nodename))
             # Once a stream is subscribed, alternate between watching for
             # further frames (a second subscription - debug and snoop may
             # share one connection, as on the C daemon) and emitting.
@@ -183,6 +208,13 @@ class Handler(socketserver.BaseRequestHandler):
         elif tag == RESTART:
             self.send(OK)
             print("[mock] RESTART requested (ignored)", file=sys.stderr)
+        elif tag == QUIT:
+            self.send(OK)
+            print("[mock] QUIT - stopping", file=sys.stderr)
+            sys.stderr.flush()
+            os._exit(0)
+        elif tag == INSTALL:
+            self.do_install(payload)
         else:
             self.err("unknown tag 0x%02x" % tag)
 
@@ -204,9 +236,46 @@ class Handler(socketserver.BaseRequestHandler):
         except (OSError, ValueError) as exc:
             self.err(str(exc), 205)
 
+    @staticmethod
+    def safe_path(p):
+        try:
+            return amiga_path(p)
+        except ValueError:
+            return "/nonexistent"
+
+    def do_install(self, payload):
+        """Rename a verified sidecar over the binary we run from."""
+        sidecar, _ = unpack_str(payload)
+        try:
+            src = amiga_path(sidecar)
+            dst = amiga_path(SELF)
+            if not os.path.exists(src):
+                return self.err("there is no such file to install", 205)
+            if os.path.exists(dst):
+                os.replace(dst, dst + ".bak")
+            os.replace(src, dst)
+            self.send(OK)
+        except (OSError, ValueError) as exc:
+            self.err(str(exc), 213)
+
     def do_put(self, payload):
         size, _prot = struct.unpack_from(">II", payload, 0)
         path, _ = unpack_str(payload, 8)
+        # Refuse to overwrite the running daemon, as the C side does -
+        # but drain the body first, or the DATA frames read back as
+        # commands and desync the session.
+        refuse = False
+        try:
+            refuse = os.path.exists(amiga_path(SELF)) and \
+                     amiga_path(path) == amiga_path(SELF)
+        except ValueError:
+            pass
+        if refuse:
+            while True:
+                tag, _data = self.recv()
+                if tag != DATA:
+                    break
+            return self.err("that is the running daemon - use 'wasabi update'")
         got = b""
         while True:
             tag, data = self.recv()
@@ -243,17 +312,47 @@ class Handler(socketserver.BaseRequestHandler):
         command, _ = unpack_str(payload, 4)
         merge = bool(flags & 1)
         detach = bool(flags & 2)
-        # Stand in for an uploaded daemon proving itself. A binary whose
-        # content carries FAIL_SELFTEST plays the part of a bad build.
-        if command.endswith("--selftest"):
+        # The three shapes `wasabi update` runs, standing in for AmigaDOS
+        # and for the uploaded binary itself.
+        word = command.split()
+        if len(word) >= 2 and word[0] == "Version" and word[-1] == "FULL":
+            ver = ver_of(self.safe_path(word[1].strip('"')))
+            if not ver:
+                self.send(STDOUT, b"object not found\n")
+                return self.send(EXIT, struct.pack(">II", 20, 205))
+            self.send(STDOUT, ("%s (2026-08-12)\n" % ver).encode("latin-1"))
+            return self.send(EXIT, struct.pack(">II", 0, 0))
+
+        if len(word) >= 2 and word[1] == "--selftest":
+            ver = ver_of(self.safe_path(word[0]))
+            nonce = word[2] if len(word) > 2 else "-"
+            if not ver:
+                self.send(STDOUT, b"selftest: FAILED\n")
+                return self.send(EXIT, struct.pack(">II", 10, 0))
+            self.send(STDOUT, ("wasabid-selftest-ok %s %s\n"
+                               % (nonce, ver)).encode("latin-1"))
+            return self.send(EXIT, struct.pack(">II", 0, 0))
+
+        if word[:2] == ["Run", ">NIL:"] and len(word) >= 4:
+            # A trial daemon on a spare port: spawn a real second mock,
+            # so the client's live probe talks to something that answers.
+            binary, altport = self.safe_path(word[2]), word[3]
+            ver = ver_of(binary)
+            # A binary carrying BREAK_SERVE plays a daemon that passes its
+            # own self-test and then cannot serve: nothing is spawned, so
+            # the client's live probe finds nobody on the port.
             try:
-                with open(amiga_path(command.split()[0]), "rb") as fh:
-                    body = fh.read()
-            except (OSError, ValueError):
-                body = b""
-            bad = not body or b"FAIL_SELFTEST" in body
-            self.send(STDOUT, b"selftest: FAILED\n" if bad else b"selftest: ok\n")
-            return self.send(EXIT, struct.pack(">II", 10 if bad else 0, 0))
+                with open(binary, "rb") as fh:
+                    dead = b"BREAK_SERVE" in fh.read()
+            except OSError:
+                dead = True
+            if ver and not dead:
+                subprocess.Popen(
+                    [sys.executable, os.path.abspath(__file__),
+                     "--root", ROOT, "--port", altport, "--key", KEY,
+                     "--banner", ver],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return self.send(EXIT, struct.pack(">II", 0, 0))
         try:
             proc = subprocess.Popen(
                 command, shell=True, cwd=ROOT, stdout=subprocess.PIPE,
@@ -396,13 +495,15 @@ def discovery_responder(port, name):
 
 
 def main():
-    global ROOT, KEY
+    global ROOT, KEY, PORT, BANNER
     p = argparse.ArgumentParser()
     p.add_argument("--root", default=ROOT)
     p.add_argument("--port", type=int, default=1234)
     p.add_argument("--key", default="")
+    p.add_argument("--banner", default=None,
+                   help="what to call ourselves in WELCOME")
     args = p.parse_args()
-    ROOT, KEY = args.root, args.key
+    ROOT, KEY, PORT, BANNER = args.root, args.key, args.port, args.banner
     os.makedirs(ROOT, exist_ok=True)
     threading.Thread(
         target=discovery_responder,

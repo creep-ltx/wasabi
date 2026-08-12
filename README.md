@@ -34,7 +34,7 @@ and land it on real silicon without touching an SD card.**
 | `deploy` (upload + run in one shot) | **working on the real A1200** |
 | `reboot` | **working on the real A1200** |
 | `debug` (KPrintF stream) | **working on the real A1200** — standalone, own RawPutChar patch |
-| `restart` (in-place self-update) | **working on the real A1200** — `deploy --safe` verifies before it commits |
+| `restart` / `update` (self-update) | **working on the real A1200** — `update` verifies four ways before it commits |
 | `snoop` (DOS call trace) | **working on the real A1200** — SnoopDOS-style patches on 14 dos/exec calls |
 | `ps` / `kill` | **working on the real A1200** — full task list; Ctrl-C or RemTask |
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
@@ -47,7 +47,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 33 tests, no Amiga required.
+host mock that speaks the same protocol — 38 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -102,10 +102,12 @@ wasabi ls [PATH]             list a drawer; no path lists the volumes
 wasabi put LOCAL REMOTE      upload a file
 wasabi get REMOTE LOCAL      download a file ('-' for stdout)
 wasabi run "CMD"             execute, stream output, return its exit code
-wasabi deploy L R [--run C] [--reboot | --restart | --safe]
+wasabi deploy L R [--run C] [--reboot | --restart]
 wasabi del PATH / mkdir PATH
 wasabi reboot [--cold]
-wasabi restart               reload the daemon in place (self-update)
+wasabi restart               reload the daemon in place
+wasabi update LOCAL          replace the daemon itself, verifying first
+wasabi quit --yes            stop the daemon (needs physical access after)
 wasabi debug [--with-snoop] [--log F]   live KPrintF stream
 wasabi snoop [--task PAT] [--log F]     live DOS call trace
 wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter
@@ -269,49 +271,88 @@ what lets output captured in parallel terminals be lined up afterwards:
 2026-08-12 08:11:53.257 snoop | c:wasabid  Open("T:wasabi-run-2", readwrite) = ok
 ```
 
-## Updating the daemon safely
+## Updating the daemon
 
-`wasabi put wasabid C:wasabid` works while the daemon is running —
-`LoadSeg` copies the binary into memory and does not lock the file — so
-`restart` reloads it without a reboot. The catch is that once the old
-daemon has exited to relaunch, **nothing is left running that could roll
-a bad build back**: a broken binary means walking to the machine, which
-is the one thing wasabi exists to avoid.
+The daemon can replace itself: `LoadSeg` copies the binary into memory at
+launch and holds no lock on the file, so the file can be swapped while it
+runs and `restart` picks up the new one without a reboot. The catch is
+that once the old daemon has exited to relaunch, **nothing is left
+running that could undo a bad install** — a broken binary means walking
+to the machine, which is the one thing wasabi exists to avoid.
 
-So the leverage is in never committing a bad build. `deploy --safe` does
-the verification while the old daemon is still alive and in charge:
-
-```
-$ wasabi deploy wasabid c:wasabid --safe
-wasabid -> c:wasabid.new (31468 bytes)
-verifying c:wasabid.new ...
-wasabid 0.1b13 selftest: ok
-kept the previous binary as c:wasabid.bak
-wasabid -> c:wasabid (31468 bytes)
-verified and installed - the daemon is reloading itself
-```
-
-The new binary is uploaded to a sidecar, run with `--selftest` (open
-`bsdsocket.library`, create and bind a socket, exit 0 — the dependency
-that actually fails in practice), and only a clean pass gets installed
-over the real path. A failure deletes the sidecar and leaves everything
-as it was:
+So `put` refuses that path outright, whatever alias you spell it with:
 
 ```
-$ wasabi deploy corrupt-build c:wasabid --safe
-verifying c:wasabid.new ...
-c:wasabid.new: file is not executable
-wasabi: the new binary failed its self-test (rc 10) - c:wasabid is
-untouched and the running daemon is unharmed
+$ wasabi put wasabid SYS:C/wasabid
+wasabi: that is the running daemon - use 'wasabi update', which verifies
+the binary before it commits
 ```
 
-The previous binary is kept as `C:wasabid.bak` — on the Amiga, not on
-the Linux box, because if what breaks is the network then a human at the
-keyboard is exactly who needs it. What this cannot catch is a binary
-that passes its self-test and then dies under real load; `--selftest`
-deliberately does not exercise the `SetFunction` patches, since a
-process that patches the system and then exits is the very hazard the
-teardown rules exist to prevent.
+(The daemon compares with `SameLock()`, not by name, so `C:wasabid`,
+`SYS:C/wasabid` and any assign that reaches the same file are all
+recognised as itself.)
+
+`wasabi update` is the one way in, and it earns the privilege with four
+checks — cheapest first, each catching what the one before it cannot:
+
+```
+$ wasabi update wasabid
+updating to wasabid 0.1b14
+wasabid -> C:wasabid.new (32440 bytes)
+  identity   wasabid 0.1b14 (2026-08-12)
+  selftest   ok
+  live       wasabid 0.1b14 served a handshake and a ping on port 1235
+installed - the daemon is reloading itself
+```
+
+1. **Does the local file even claim to be wasabid?** It must carry a
+   `$VER: wasabid` tag. A genuine `C:List` is refused here, before a
+   single byte goes over the network.
+2. **Does the uploaded copy identify as that same version?** Read out of
+   the staged file by AmigaDOS's own `Version` command — nothing is
+   executed yet.
+3. **Does it run, and know something only wasabid knows?** It is invoked
+   as `--selftest <nonce>` and must print back a marker carrying that
+   nonce. Exit status alone would prove nothing: `C:Echo --selftest`
+   prints its argument and exits 0, and *that* installed as the daemon
+   is a machine off the network.
+4. **Does it actually work as a daemon?** It is started on a spare port,
+   and the client connects to it for real — handshake, banner check,
+   ping — then tells it to quit.
+
+Only then is it installed, by renaming the verified sidecar into place,
+so the bytes that passed the checks are exactly the bytes that run. The
+previous binary is kept as `C:wasabid.bak` — on the Amiga, not on the
+Linux box, because if what breaks is the network then a human at the
+keyboard is who needs it. Any failure deletes the sidecar and leaves the
+running daemon untouched:
+
+```
+$ wasabi update some-other-build
+updating to wasabid 9.9fake
+  identity   wasabid 9.9fake (2026-01-01)
+wasabi: it did not pass its own self-test (rc 10, said 'C:wasabid.new:
+file is not executable'). The running daemon is untouched
+```
+
+Check 4 is the one that earns its keep, and it was proven on the A1200
+with a wasabid built to bind its port and then exit immediately. It is a
+genuine build: the right `$VER`, and a self-test that really does open
+`bsdsocket.library` and bind a socket. Checks 1, 2 and 3 **all passed
+it** — installing that binary would have taken the machine off the
+network at the next restart. Only connecting to it caught it:
+
+```
+  identity   wasabid 0.1b14 (2026-08-12)
+  selftest   ok
+wasabi: it did not come up as a daemon on port 1235 (Connection refused).
+The running daemon is untouched
+```
+
+What none of this catches is a binary that passes every check and then
+dies under real load. `--selftest` also deliberately does not exercise
+the `SetFunction` patches: a process that patches the system and then
+exits is the very hazard the teardown rules exist to prevent.
 
 ## Speedtest
 

@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b13"
+#define VERSION_STR "wasabid 0.1b14"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b13 (12.8.2026)";
+    "$VER: wasabid 0.1b14 (12.8.2026)";
 
 #define PROTO_VERSION   1
 #define DEF_PORT        1234
@@ -70,6 +70,8 @@ static const char *verstag __attribute__((used)) =
 #define T_PS      0x43
 #define T_KILL    0x44
 #define T_SPEED   0x45
+#define T_QUIT    0x46
+#define T_INSTALL 0x47
 
 struct Library *SocketBase;
 
@@ -1357,9 +1359,41 @@ static BOOL cmd_get(int fd, const char *path)
 }
 
 /*
+ * Is this path the binary we are running from? Compared with SameLock(),
+ * so C:wasabid, DH0:C/wasabid and any assign that leads to the same file
+ * are all recognised as one - a string compare would miss every alias.
+ */
+static BOOL is_self_file(const char *path)
+{
+    char self[128];
+    BPTR a, b;
+    LONG same = LOCK_DIFFERENT;
+
+    if (!GetProgramName(self, sizeof(self)) || !self[0])
+        return FALSE;
+    a = Lock((STRPTR)path, ACCESS_READ);
+    if (!a)
+        return FALSE;                    /* nothing there yet - not us */
+    b = Lock(self, ACCESS_READ);
+    if (b) {
+        same = SameLock(a, b);
+        UnLock(b);
+    }
+    UnLock(a);
+    return same == LOCK_SAME;
+}
+
+/*
  * Write to a sibling temp name and rename over the target at the end, so
  * an interrupted upload never leaves a half-written binary where a
  * working one used to be.
+ *
+ * One path is off limits: the binary this daemon is running from. A
+ * plain put there would let any file at all - a truncated upload, or
+ * simply the wrong one - become the daemon, and the next restart would
+ * take the machine off the network with no way back but physical
+ * access. That path has exactly one route, T_INSTALL, and only through
+ * the verification `wasabi update` does first.
  */
 static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
 {
@@ -1369,16 +1403,33 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
     ULONG got = 0;
     BOOL ok = TRUE;
 
+    buf = AllocMem(MAX_PAYLOAD, MEMF_ANY);
+    if (!buf)
+        return send_err(fd, "out of memory");
+
+    if (is_self_file(path)) {
+        /* The client is already sending the body; swallow it, or those
+         * DATA frames get read back as commands and desync the session. */
+        for (;;) {
+            UBYTE tag;
+            LONG n;
+            if (!recv_frame(fd, &tag, buf, &n)) {
+                FreeMem(buf, MAX_PAYLOAD);
+                return FALSE;
+            }
+            if (tag == T_END || tag != T_DATA)
+                break;
+        }
+        FreeMem(buf, MAX_PAYLOAD);
+        return send_err(fd, "that is the running daemon - use 'wasabi update', "
+                            "which verifies the binary before it commits");
+    }
+
     sprintf(tmp, "%.280s.wasabi-tmp", path);
     fh = Open(tmp, MODE_NEWFILE);
-    if (!fh)
+    if (!fh) {
+        FreeMem(buf, MAX_PAYLOAD);
         return send_err(fd, "cannot create the temporary file");
-
-    buf = AllocMem(MAX_PAYLOAD, MEMF_ANY);
-    if (!buf) {
-        Close(fh);
-        DeleteFile(tmp);
-        return send_err(fd, "out of memory");
     }
 
     for (;;) {
@@ -1479,6 +1530,56 @@ static BOOL cmd_reboot(int fd, ULONG flags)
     CloseSocket(g_clients[0].fd);        /* best effort; we are going down */
     ColdReboot();
     return TRUE;                         /* not reached */
+}
+
+/*
+ * Swap a verified sidecar in for the binary we run from.
+ *
+ * Renames only, no copying: the bytes that passed verification are
+ * exactly the bytes installed - re-uploading could deliver something
+ * else - and the previous binary stays one rename away as .bak, on the
+ * Amiga, where a human at the keyboard can reach it when the network is
+ * what broke. LoadSeg copied us into memory at launch and holds no lock
+ * on the file, which is the same fact that makes self-update possible.
+ *
+ * If the second rename fails the first is undone, so a failed install
+ * leaves a working daemon rather than a machine with no binary at all.
+ */
+static BOOL cmd_install(int fd, const char *sidecar)
+{
+    char self[128], bak[160];
+    BPTR l;
+
+    if (!GetProgramName(self, sizeof(self)) || !self[0])
+        return send_err(fd, "cannot tell which path I was started from");
+
+    l = Lock((STRPTR)sidecar, ACCESS_READ);
+    if (!l)
+        return send_err(fd, "there is no such file to install");
+    UnLock(l);
+
+    sprintf(bak, "%.150s.bak", self);
+    DeleteFile(bak);                     /* Rename will not clobber */
+    if (!Rename(self, bak))
+        return send_err(fd, "cannot move the current binary aside");
+    if (!Rename((STRPTR)sidecar, self)) {
+        Rename(bak, self);               /* undo; stay as we were */
+        return send_err(fd, "cannot move the new binary into place");
+    }
+    return send_frame(fd, T_OK, NULL, 0);
+}
+
+/*
+ * Stop, and stay stopped - g_restart is left clear so the exit path does
+ * not relaunch us. This is how the throwaway instance that `wasabi
+ * update` starts on a spare port is shut down once it has proved itself.
+ */
+static BOOL cmd_quit(int fd)
+{
+    if (!send_frame(fd, T_OK, NULL, 0))
+        return FALSE;
+    g_quit = TRUE;
+    return TRUE;
 }
 
 /*
@@ -1635,6 +1736,14 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_RESTART:
         return cmd_restart(fd);
 
+    case T_QUIT:
+        return cmd_quit(fd);
+
+    case T_INSTALL:
+        if (!get_str(p, len, 0, path, sizeof(path)))
+            return send_err(fd, "bad path");
+        return cmd_install(fd, path);
+
     case T_DEBUG:
         return debug_start(cl);
 
@@ -1683,7 +1792,7 @@ static void drop(int cl)
  * that SetFunction()s and then exits is exactly the "do not let this
  * binary unload" hazard the teardown rules exist to avoid.
  */
-static int selftest(void)
+static int selftest(const char *nonce)
 {
     int s;
     struct sockaddr_in sa;
@@ -1717,7 +1826,15 @@ static int selftest(void)
     CloseSocket(s);
     CloseLibrary(SocketBase);
     SocketBase = NULL;
-    Printf("%s selftest: ok\n", (LONG)VERSION_STR);
+    /*
+     * The marker is the point. Exit status alone proves nothing - plenty
+     * of ordinary commands exit 0 when handed an argument they do not
+     * understand (C:Echo prints it and returns 0), and one of those
+     * installed as the daemon is a machine off the network. Echoing back
+     * the caller's nonce also proves this line came from THIS run and
+     * not from a stale file or a lucky string.
+     */
+    Printf("wasabid-selftest-ok %s %s\n", (LONG)nonce, (LONG)VERSION_STR);
     return RETURN_OK;
 }
 
@@ -1727,7 +1844,7 @@ int main(int argc, char **argv)
     UBYTE *payload;
 
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
-        return selftest();
+        return selftest(argc > 2 ? argv[2] : "-");
 
     /* Optional first argument: a port number. Lets a test instance run
      * on a spare port beside a live one without a bind clash. */

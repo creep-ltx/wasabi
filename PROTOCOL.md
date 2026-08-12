@@ -92,6 +92,8 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x43 | PS       | C→S | — |
 | 0x44 | KILL     | C→S | `u32 flags`, `str target` |
 | 0x45 | SPEED    | C→S | `u32 flags`, `u32 size` |
+| 0x46 | QUIT     | C→S | — |
+| 0x47 | INSTALL  | C→S | `str sidecar` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -245,13 +247,35 @@ bind the same port — it relaunches itself via `GetProgramName()` (the
 path it was invoked by) on the same port. The client treats a close after
 `OK` as success and reconnects.
 
-Nothing survives the exit that could roll a bad binary back, so the
-client verifies before it commits: `deploy --safe` uploads to a sidecar,
-`RUN`s it with `--selftest` — the daemon's own "can I open
-`bsdsocket.library` and bind a socket" mode, exit 0 for yes — and only
-installs over the live path on a pass, keeping the previous binary as
-`.bak`. That flow needs no wire support of its own; it is `PUT`, `RUN`,
-`DEL` and `RESTART` in sequence.
+### QUIT — stop, and stay stopped
+
+Replies `OK`, then exits without relaunching. This is how the throwaway
+instance that `wasabi update` starts on a spare port is shut down once it
+has proved itself. Aimed at the *main* daemon it is a one-way door:
+nothing brings it back but physical access, which is why the client
+demands `--yes`.
+
+### INSTALL — swap a verified sidecar in for the running binary
+
+`PUT` **refuses** the path the daemon is running from — compared with
+`SameLock()`, so aliases like `SYS:C/wasabid` are caught too. Otherwise
+any file at all could become the daemon and the next restart would take
+the machine off the network, with no way back but physical access.
+
+`INSTALL` is the one route to that path. The daemon renames its own
+binary to `<self>.bak` and the named sidecar into its place, and replies
+`OK`. Renames only: the bytes that passed verification are exactly the
+bytes installed, and the previous binary stays one rename away. If the
+second rename fails the first is undone, so a failed install leaves a
+working daemon rather than a machine with no binary at all.
+
+The verification that earns an `INSTALL` is entirely the client's, and
+needs no wire support of its own — `PUT` to a sidecar, `RUN` to check
+identity (`Version <sidecar> FULL`) and then behaviour (`<sidecar>
+--selftest <nonce>`, which must echo a marker carrying that nonce back,
+since exit status alone proves nothing), `RUN` again to start it on a
+spare port for a real handshake, `QUIT` to stop it, then `INSTALL` and
+`RESTART`.
 
 ### PS — list every task on the machine
 

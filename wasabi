@@ -12,6 +12,7 @@ Talks to wasabid on the Amiga side. See PROTOCOL.md for the wire format.
 
 import argparse
 import os
+import random
 import re
 import socket
 import struct
@@ -28,6 +29,7 @@ PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
+QUIT, INSTALL = 0x46, 0x47
 
 TAGNAMES = {v: k for k, v in list(globals().items()) if isinstance(v, int)}
 
@@ -58,6 +60,7 @@ def unpack_str(buf, off=0):
 
 class Conn:
     def __init__(self, host, port, key, timeout=15.0):
+        self.host, self.port = host, port
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.buf = b""
@@ -254,17 +257,23 @@ def cmd_run(conn, args):
     return do_run(conn, args.command, merge=args.merge, detach=args.detach)
 
 
-def do_run(conn, command, merge=False, detach=False):
+def do_run(conn, command, merge=False, detach=False, sink=None):
     flags = (1 if merge else 0) | (2 if detach else 0)
     conn.send(RUN, struct.pack(">I", flags) + pack_str(command))
     while True:
         tag, payload = conn.recv()
         if tag == STDOUT:
-            sys.stdout.write(payload.decode("latin-1"))
-            sys.stdout.flush()
+            if sink is not None:
+                sink(payload.decode("latin-1"))
+            else:
+                sys.stdout.write(payload.decode("latin-1"))
+                sys.stdout.flush()
         elif tag == STDERR:
-            sys.stderr.write(payload.decode("latin-1"))
-            sys.stderr.flush()
+            if sink is not None:
+                sink(payload.decode("latin-1"))
+            else:
+                sys.stderr.write(payload.decode("latin-1"))
+                sys.stderr.flush()
         elif tag == EXIT:
             rc, secondary = struct.unpack(">II", payload)
             if rc and secondary:
@@ -276,70 +285,131 @@ def do_run(conn, command, merge=False, detach=False):
             raise WasabiError("unexpected tag 0x%02x during RUN" % tag)
 
 
-def copy_remote(conn, src, dst):
-    """Duplicate a file on the Amiga using only wasabi's own primitives.
+VER_TAG = b"$VER: wasabid "
 
-    A GET/PUT round trip rather than 'Copy', so it behaves identically
-    against the mock and needs no C: command to exist. Returns False if
-    the source is not there yet - a first install, not a failure.
+
+def local_wasabid_version(path):
+    """Read the '$VER: wasabid ...' tag out of a binary without running it.
+
+    Returns 'wasabid 0.1b14' - name and version only. The full tag
+    carries a date that AmigaDOS's Version command reformats when it
+    prints it, so only the first two words can be compared.
     """
-    conn.send(GET, pack_str(src))
-    blob = []
-    try:
-        drain_to_end(conn, blob.append)
-    except WasabiError:
-        return False
-    put_bytes(conn, b"".join(blob), dst)
-    return True
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    i = blob.find(VER_TAG)
+    if i < 0:
+        return None
+    end = blob.find(b"\0", i)
+    tag = blob[i + 6:end if end > 0 else i + 120].decode("latin-1", "replace")
+    return " ".join(tag.split()[:2])
 
 
-def do_safe_deploy(conn, args):
-    """Install a new daemon binary only after it proves it can run.
+def cmd_update(conn, args):
+    """Replace the running daemon, but only after proving the new one works.
 
-    Once the old daemon exits to relaunch, nothing is left running that
-    could roll a bad build back - so the verification happens while the
-    old daemon is still alive and in charge: upload to a sidecar, have
-    it executed with --selftest, and only commit over the real path if
-    that comes back clean.
+    Once the old daemon exits to relaunch there is nothing left running
+    that could undo a bad install, so every check happens while the old
+    one is still alive and in charge. Four of them, cheapest first, each
+    catching what the one before it cannot:
+
+      1. the local file carries a '$VER: wasabid' tag at all;
+      2. the uploaded copy identifies as that same version, read out of
+         the file by AmigaDOS - nothing is executed yet;
+      3. it runs, and echoes back a nonce only wasabid knows to print -
+         exit status alone proves nothing, since C:Echo exits 0 too;
+      4. it comes up as a real daemon on a spare port and serves a
+         handshake and a ping, which is the actual job.
+
+    Only then is it installed - by renaming the verified sidecar into
+    place, so the bytes that passed are the bytes that run.
     """
-    sidecar = args.remote + ".new"
-    backup = args.remote + ".bak"
+    ident = local_wasabid_version(args.local)
+    if not ident:
+        raise WasabiError(
+            "%s carries no '$VER: wasabid' tag, so it is not a wasabid "
+            "binary - refusing to install it as the daemon" % args.local)
 
+    sidecar = args.sidecar
+    testport = args.testport or (args.port + 1)
+    print("updating to %s" % ident, file=sys.stderr)
     do_put(conn, args.local, sidecar)
-    print("verifying %s ..." % sidecar, file=sys.stderr)
-    rc = do_run(conn, "%s --selftest" % sidecar)
-    if rc != 0:
+
+    def abort(why, stop_probe=False):
+        if stop_probe:
+            why += ("; a test instance may still be on port %d - "
+                    "find it with 'wasabi ps' and stop it with 'wasabi kill'"
+                    % testport)
         try:
             conn.send(DEL, pack_str(sidecar))
             conn.expect_ok()
         except WasabiError:
             pass
-        raise WasabiError(
-            "the new binary failed its self-test (rc %d) - %s is untouched "
-            "and the running daemon is unharmed" % (rc, args.remote))
+        raise WasabiError("%s. The running daemon is untouched" % why)
 
-    # Keep a known-good copy ON THE AMIGA: if what breaks is the network,
-    # a human at the keyboard still has something to restore.
-    if copy_remote(conn, args.remote, backup):
-        print("kept the previous binary as %s" % backup, file=sys.stderr)
+    out = []
+    rc = do_run(conn, 'Version "%s" FULL' % sidecar, sink=out.append)
+    seen = "".join(out).strip().splitlines()[0] if out else ""
+    if rc != 0 or ident not in seen:
+        abort("the uploaded file does not identify as %s (Version said %r)"
+              % (ident, seen))
+    print("  identity   %s" % seen, file=sys.stderr)
 
-    do_put(conn, args.local, args.remote)   # atomic tmp + rename, as always
+    nonce = "%08x" % random.getrandbits(32)
+    out = []
+    rc = do_run(conn, "%s --selftest %s" % (sidecar, nonce), sink=out.append)
+    if rc != 0 or ("wasabid-selftest-ok %s" % nonce) not in "".join(out):
+        abort("it did not pass its own self-test (rc %d, said %r)"
+              % (rc, "".join(out).strip()))
+    print("  selftest   ok", file=sys.stderr)
+
+    do_run(conn, "Run >NIL: %s %d" % (sidecar, testport))
+    time.sleep(2.0)
     try:
-        conn.send(DEL, pack_str(sidecar))
+        probe = Conn(conn.host, testport, args.key, timeout=5.0)
+    except (OSError, WasabiError) as exc:
+        abort("it did not come up as a daemon on port %d (%s)"
+              % (testport, exc), stop_probe=True)
+    try:
+        banner = probe.banner
+        if ident not in banner:
+            abort("the instance on port %d called itself %r, not %s"
+                  % (testport, banner, ident), stop_probe=True)
+        probe.send(PING)
+        if probe.recv()[0] != PONG:
+            abort("the instance on port %d did not answer a ping" % testport,
+                  stop_probe=True)
+        print("  live       %s served a handshake and a ping on port %d"
+              % (banner, testport), file=sys.stderr)
+    finally:
+        try:
+            probe.send(QUIT)
+            probe.expect_ok()
+        except (OSError, WasabiError):
+            pass
+        probe.close()
+
+    conn.send(INSTALL, pack_str(sidecar))
+    conn.expect_ok()
+    do_restart(conn)
+    print("installed - the daemon is reloading itself", file=sys.stderr)
+    return 0
+
+
+def cmd_quit(conn, args):
+    if not args.yes:
+        raise WasabiError(
+            "this stops the daemon and nothing restarts it - you would need "
+            "physical access to the Amiga. Pass --yes if you mean it")
+    conn.send(QUIT)
+    try:
         conn.expect_ok()
     except WasabiError:
-        pass                                # cosmetic; the install is done
-
-    rc = do_run(conn, args.run) if args.run else 0
-    do_restart(conn)
-    print("verified and installed - the daemon is reloading itself",
-          file=sys.stderr)
-    return rc
+        pass                                # it exits right after acking
+    print("the daemon has stopped", file=sys.stderr)
 
 
 def cmd_deploy(conn, args):
-    if args.safe:
-        return do_safe_deploy(conn, args)
     do_put(conn, args.local, args.remote, quiet=False)
     rc = 0
     if args.run:
@@ -789,12 +859,23 @@ def main(argv=None):
     g = s.add_mutually_exclusive_group()
     g.add_argument("--reboot", action="store_true")
     g.add_argument("--restart", action="store_true",
-                   help="reload the daemon in place (self-update)")
-    g.add_argument("--safe", action="store_true",
-                   help="verify the binary with --selftest before it "
-                        "replaces the running daemon, then restart")
+                   help="reload the daemon afterwards")
     s.add_argument("--cold", action="store_true")
     s.set_defaults(fn=cmd_deploy)
+
+    s = sub.add_parser("update",
+                       help="replace the daemon itself, verifying first")
+    s.add_argument("local", help="the new wasabid binary")
+    s.add_argument("--sidecar", default="C:wasabid.new",
+                   help="where to stage it on the Amiga")
+    s.add_argument("--testport", type=int, default=0,
+                   help="port for the trial instance (default: --port + 1)")
+    s.set_defaults(fn=cmd_update)
+
+    s = sub.add_parser("quit", help="stop the daemon (needs --yes)")
+    s.add_argument("--yes", action="store_true",
+                   help="confirm: nothing restarts it but physical access")
+    s.set_defaults(fn=cmd_quit)
 
     s = sub.add_parser("debug", help="live KPrintF stream")
     s.add_argument("--with-snoop", action="store_true",
