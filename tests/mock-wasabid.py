@@ -51,7 +51,7 @@ BANNER = None
 # What this mock claims to support, appended to WELCOME. --caps lets a
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
-        "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen")
+        "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,hb")
 # Off-LAN connections the daemon has turned away, reported in WELCOME.
 REFUSED = 0
 # The path this mock pretends to be running from, so it can refuse a plain
@@ -512,7 +512,11 @@ class Handler(socketserver.BaseRequestHandler):
             self.subs[0] = {"i": 0}
 
     def emit_streams(self):
-        """One synthetic line per subscribed stream per idle tick."""
+        """One synthetic line per subscribed stream per idle tick, plus
+        the empty heartbeat LOG the real daemon sends - it must render
+        as nothing at all on the client."""
+        for stream in self.subs:
+            self.emit("", stream=stream)
         if 0 in self.subs:
             st = self.subs[0]
             st["i"] += 1

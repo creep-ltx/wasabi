@@ -128,7 +128,7 @@ speak v1 to a v2 client.
 
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
-`speed,speedfile,quit,install,grab,screen` for a current build. Self-update makes version skew
+`speed,speedfile,quit,install,grab,screen,hb` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -245,6 +245,30 @@ If the ring overflows because nobody drained it fast enough, the daemon
 emits a `LOG` line saying how many bytes were lost rather than silently
 dropping them.
 
+**Heartbeat** (`hb` in caps). While any stream is subscribed the daemon
+sends an empty `LOG` — zero-length text, sequence numbered as usual —
+on it every ~5 seconds. The client renders nothing; the point is that
+silence becomes information. A reset or frozen machine sends no FIN, so
+without this a stream client would block in `recv()` forever, unable to
+tell a quiet machine from a dead one. A client that misses heartbeats
+should *warn*, not exit: the daemon is single-threaded, and a large
+transfer on another connection legitimately starves heartbeats for as
+long as it runs. A failed heartbeat send also frees the stream slot of
+a client that vanished without closing.
+
+**Farewell.** A daemon going down on purpose — `REBOOT`, `RESTART`,
+`QUIT`, or Break at its console — writes one last visible line on each
+open stream, in the same voice as its connect notices:
+
+```
+[wasabi: rebooting - closing this stream]
+```
+
+(or `restarting` / `stopping`), then closes every client socket
+properly. A deliberate exit is therefore always distinguishable from a
+crash: the goodbye names the reason, the FIN ends the stream cleanly,
+and a stream that just stops with neither is a machine in trouble.
+
 ### SNOOP — the DOS call trace
 
 The SnoopDOS trick: `SetFunction()` patches on `dos.library` and
@@ -285,10 +309,12 @@ when the caller is low on stack. Covered LVOs, verified against the NDK
 
 ### REBOOT
 
-The daemon replies `OK`, asks every mounted volume's handler to write out
-its dirty buffers (`ACTION_FLUSH`), waits a moment for the socket to
-drain, then calls `ColdReboot()`. The connection dies with the machine;
-the client treats a close after `OK` as success.
+The daemon replies `OK`, says goodbye on any open stream (see *Farewell*
+under DEBUG), closes **every** client socket — a reset machine sends no
+FIN, so a connection left open here would wait forever on a peer that no
+longer exists — asks every mounted volume's handler to write out its
+dirty buffers (`ACTION_FLUSH`), gives it all a moment to drain, then
+calls `ColdReboot()`. The client treats a close after `OK` as success.
 
 `flags` bit 0 (cold) is accepted and ignored: `ColdReboot()` is the only
 reset exec sanctions a program to make, so every reboot is cold. The bit

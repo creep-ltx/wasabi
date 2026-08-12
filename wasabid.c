@@ -39,10 +39,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b28"
+#define VERSION_STR "wasabid 0.1b29"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b28 (12.8.2026)";
+    "$VER: wasabid 0.1b29 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -62,7 +62,8 @@ static const char *verstag __attribute__((used)) =
  * PROTO_VERSION stays the hard gate, and only for framing changes.
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
-                 "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen"
+                 "reboot,restart,ps,kill,speed,speedfile,quit,install," \
+                 "grab,screen,hb"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -175,8 +176,11 @@ static volatile ULONG g_ring_head;   /* producer (patch) advances */
 static volatile ULONG g_ring_tail;   /* consumer (daemon) advances */
 static volatile ULONG g_ring_lost;   /* bytes dropped on a full ring */
 
+#define HB_SECS 5                    /* empty-LOG heartbeat cadence */
+
 static int   g_dbg_client = -1;
 static ULONG g_dbg_seq;
+static ULONG g_hb_last;              /* now_secs() of the last heartbeat */
 static BOOL  g_dbg_patched;          /* our RawPutChar patch is installed */
 static APTR  g_orig_rawput;          /* the vector we replaced */
 
@@ -1443,6 +1447,34 @@ static void snoop_stop(void)
     g_snoop_client = -1;
 }
 
+/* Seconds since the Amiga epoch, for pacing the stream heartbeat. */
+static ULONG now_secs(void)
+{
+    struct DateStamp d;
+    DateStamp(&d);
+    return (ULONG)d.ds_Days * 86400UL + (ULONG)d.ds_Minute * 60UL +
+           (ULONG)d.ds_Tick / 50UL;
+}
+
+/*
+ * The daemon is going down on purpose - reboot, restart, quit, Break.
+ * Say so on any open stream first: to the operator watching `wasabi
+ * debug`, a machine that stops streaming and one that froze look
+ * identical, and only the daemon knows which this is. One visible line,
+ * in the same voice as the connect/refusal notices.
+ */
+static void say_goodbye(const char *why)
+{
+    char line[80];
+    LONG n = sprintf(line, "[wasabi: %s - closing this stream]\n", why);
+    if (g_dbg_client >= 0)
+        send_log(g_clients[g_dbg_client].fd, 0, ++g_dbg_seq,
+                 (UBYTE *)line, n);
+    if (g_snoop_client >= 0)
+        send_log(g_clients[g_snoop_client].fd, 1, ++g_snoop_seq,
+                 (UBYTE *)line, n);
+}
+
 /* --- ps and kill --------------------------------------------------- */
 
 /*
@@ -2316,16 +2348,26 @@ static void flush_volumes(void)
 
 static BOOL cmd_reboot(int fd, ULONG flags)
 {
+    LONG i;
     (void)flags;                         /* bit 0 (cold) is accepted and
                                           * ignored: ColdReboot() is the only
                                           * reset exec sanctions a program to
                                           * make, so every reboot is cold */
     if (!send_frame(fd, T_OK, NULL, 0))
         return FALSE;
+    say_goodbye("rebooting");
+    /*
+     * Close every client socket properly, not just the requester's: a
+     * reset machine sends no FIN, so any connection left open here - a
+     * debug stream in another terminal, say - would sit in recv()
+     * staring at a peer that no longer exists.
+     */
+    for (i = 0; i < MAX_CLIENTS; i++)
+        if (g_clients[i].fd >= 0)
+            CloseSocket(g_clients[i].fd);
     flush_volumes();
-    /* Give the ack a moment to leave the wire, then go. */
+    /* Give the closes a moment to leave the wire, then go. */
     Delay(25);
-    CloseSocket(fd);                     /* best effort; we are going down */
     ColdReboot();
     return TRUE;                         /* not reached */
 }
@@ -2850,6 +2892,30 @@ int main(int argc, char **argv)
             if (!snoop_pump())
                 drop(g_snoop_client);
 
+        /*
+         * Heartbeat: an empty LOG on each subscribed stream every few
+         * seconds. The client renders nothing - there is nothing to
+         * render - but its silence timer resets, so a machine that
+         * Gurus or reboots behind a stream's back is noticed in
+         * seconds instead of holding the terminal open forever. A
+         * failed send also reclaims the slot of a client that vanished
+         * without a FIN.
+         */
+        if (g_dbg_client >= 0 || g_snoop_client >= 0) {
+            ULONG hbnow = now_secs();
+            if (hbnow - g_hb_last >= HB_SECS) {
+                g_hb_last = hbnow;
+                if (g_dbg_client >= 0 &&
+                    !send_log(g_clients[g_dbg_client].fd, 0, ++g_dbg_seq,
+                              (const UBYTE *)"", 0))
+                    drop(g_dbg_client);
+                if (g_snoop_client >= 0 &&
+                    !send_log(g_clients[g_snoop_client].fd, 1,
+                              ++g_snoop_seq, (const UBYTE *)"", 0))
+                    drop(g_snoop_client);
+            }
+        }
+
         refusals_save(FALSE);            /* rate-limited to once a minute */
 
         if (n <= 0)
@@ -2905,6 +2971,7 @@ int main(int argc, char **argv)
 
 out:
     refusals_save(TRUE);
+    say_goodbye(g_restart ? "restarting" : "stopping");
     debug_stop();                        /* clears client and removes patch */
     snoop_stop();
     /* A task may still be between the snoop stub's use-count bump and its

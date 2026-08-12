@@ -131,6 +131,13 @@ n=$(grep -cE \
     "$STREAMLOG" 2>/dev/null)
 if [ "${n:-0}" -ge 2 ]; then ok "--log stamps every line"
 else no "--log stamps every line (got ${n:-0})"; fi
+
+# The mock sends the daemon's empty heartbeat LOGs; neither the view
+# nor the log file may show them as blank lines.
+h=$(printf '%s\n' "$out" | grep -cE '^(debug|snoop) \| $')
+check "heartbeats are invisible in the stream view" "0" "$h"
+h=$(grep -cE ' (debug|snoop) \| $' "$STREAMLOG" 2>/dev/null)
+check "and invisible in the log file" "0" "${h:-0}"
 rm -f "$STREAMLOG"
 
 # --- deploy --restart: upload then reload the daemon in one shot ---

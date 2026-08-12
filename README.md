@@ -364,6 +364,24 @@ Proven on the real A1200 (12 Aug 2026): a test program emitting via
 `RawPutChar` streams through live, the patch installs and removes cleanly
 across repeated sessions, and the machine stays healthy afterward.
 
+**A stream can now tell a quiet machine from a dead one.** A reset or
+frozen Amiga sends no FIN, so a `wasabi debug` left open across a reboot
+used to sit forever looking connected. Two additions close that: the
+daemon sends an invisible heartbeat — an empty `LOG` frame, rendering as
+nothing — on every subscribed stream every ~5 seconds, and a deliberate
+exit (reboot, restart, quit) says goodbye out loud first:
+
+```
+[wasabi: rebooting - closing this stream]
+```
+
+Twenty silent seconds and the client warns that the machine is frozen,
+rebooted, or busy with something long — a warning rather than an exit,
+because a big `put` in another terminal starves the single-threaded
+daemon's heartbeats for exactly as long as it runs, and the stream picks
+back up when it finishes. TCP keepalive on every connection is what
+finally declares a truly dead machine dead, about half a minute in.
+
 ## The snoop stream
 
 `wasabi snoop` is the SnoopDOS trick delivered over the wire: the daemon
