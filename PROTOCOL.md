@@ -39,7 +39,7 @@ unicast sweep covers the bridge that eats broadcasts. A `BEACON=<secs>`
 option remains a possible future addition for a network where even the
 sweep cannot reach the machine.
 
-Full mDNS is the obvious future upgrade — the Emu68 driver stack already
+Full mDNS is the obvious future upgrade — rondoval's driver stack already
 ships an `mdns` tool, so `amiga.local` may resolve on this network
 without Wasabi's help. Wasabi does not depend on it.
 

@@ -40,7 +40,8 @@ and land it on real silicon without touching an SD card.**
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
-Emu68 with the lwIP `bsdsocket.library`. Kickstart 47.115, 3.4 ms
+Emu68 with [rondoval's driver stack](https://github.com/rondoval/emu68-driver-stack)
+(lwIP `bsdsocket.library` over `genet.device`). Kickstart 47.115, 3.4 ms
 round trip, a 19372-byte binary round-tripped byte-identical, `List
 SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
@@ -76,8 +77,9 @@ Put those last two lines in `S:User-Startup` to have it up after every
 boot. Stop it with `Break <n> C`.
 
 It needs a working `bsdsocket.library` — on a PiStorm32/CM4 that means
-the Emu68 driver stack's lwIP stack over `genet.device`, or Roadshow, or
-AmiTCP. Anything that provides the standard API.
+[rondoval's emu68-driver-stack](https://github.com/rondoval/emu68-driver-stack)
+(lwIP over `genet.device`), or Roadshow, or AmiTCP. Anything that
+provides the standard API.
 
 **Linux.** Drop the client somewhere on `$PATH`:
 
@@ -282,7 +284,10 @@ measure through a real volume; it must first check `info`'s free-memory
 numbers and refuse a size that does not fit with a healthy margin.)
 
 On this network the ceiling turns out to be the wire itself — a 256 MB
-test runs the A1200's Emu68 lwIP stack at gigabit line rate both ways:
+test runs the A1200 at gigabit line rate both ways. The stack is
+[rondoval's emu68-driver-stack](https://github.com/rondoval/emu68-driver-stack)
+on his rangeops build of Emu68 1.1alpha2, and the rangeops part is what
+buys the line rate — the stock build tops out around 104 Mb/s:
 
 ```
 ping    2.33 ms     min 2.14 / max 3.99 / jitter 0.31  (200 pings)
