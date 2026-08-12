@@ -261,9 +261,11 @@ what lets output captured in parallel terminals be lined up afterwards:
   throughput each way, so the effect of a driver stack or MTU change is
   one command to measure. Uses the existing `PUT`/`GET` path against a
   `RAM:` target; no new wire tags needed.
-- **CLI output as a third stream** — `LOG` carries a `stream` field so a
-  monitor can show serial debug (stream 0), the snoop trace (stream 1)
-  and CLI/console output (a future stream 2) side by side and keep them
-  apart. Streams 0 and 1 exist today.
+There is deliberately no "console stream": output of anything started
+through wasabi already arrives live in the terminal that started it,
+next to the command that produced it — a machine-wide console tap would
+mean wedging into every Shell window's console handler for text that is
+almost always already on your screen. (`LOG`'s `stream` field still has
+room if a genuinely new stream ever earns its place.)
 
 `PROTOCOL.md` is the wire format, and the contract between the two halves.
