@@ -107,10 +107,10 @@ wasabi run "CMD"             execute, stream output, return its exit code
 wasabi deploy L R [--run C] [--reboot | --restart]
 wasabi del PATH / mkdir PATH
 wasabi reboot [--cold]
-wasabi restart               reload the daemon in place (a debug tool -
+wasabi restart [--force]     reload the daemon in place (a debug tool -
                              'update' is the verified path)
 wasabi update LOCAL          replace the daemon itself, verifying first
-wasabi quit --yes            stop the daemon (needs physical access after)
+wasabi quit --yes [--force]  stop the daemon (needs physical access after)
 wasabi debug [--with-snoop] [--log F]   live KPrintF stream
 wasabi snoop [--task PAT] [--log F]     live DOS call trace
 wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter

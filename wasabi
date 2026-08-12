@@ -488,7 +488,7 @@ def cmd_quit(conn, args):
         raise WasabiError(
             "this stops the daemon and nothing restarts it - you would need "
             "physical access to the Amiga. Pass --yes if you mean it")
-    conn.send(QUIT)
+    conn.send(QUIT, struct.pack(">I", 1 if args.force else 0))
     try:
         conn.expect_ok()
     except WasabiError as exc:
@@ -810,8 +810,8 @@ def cmd_reboot(conn, args):
     print("reboot sent", file=sys.stderr)
 
 
-def do_restart(conn):
-    conn.send(RESTART)
+def do_restart(conn, force=False):
+    conn.send(RESTART, struct.pack(">I", 1 if force else 0))
     try:
         conn.expect_ok()
     except WasabiError as exc:
@@ -821,7 +821,7 @@ def do_restart(conn):
 
 
 def cmd_restart(conn, args):
-    do_restart(conn)
+    do_restart(conn, force=args.force)
     print("restart sent - the daemon is reloading itself", file=sys.stderr)
 
 
@@ -1125,6 +1125,9 @@ def main(argv=None):
     s = sub.add_parser("quit", help="stop the daemon (needs --yes)")
     s.add_argument("--yes", action="store_true",
                    help="confirm: nothing restarts it but physical access")
+    s.add_argument("--force", action="store_true",
+                   help="Ctrl-C a running command first; one that ignores "
+                        "the signal still blocks the quit")
     s.set_defaults(fn=cmd_quit)
 
     s = sub.add_parser("debug", help="live KPrintF stream")
@@ -1185,8 +1188,11 @@ def main(argv=None):
                         "currently cold (ColdReboot is all exec offers)")
     s.set_defaults(fn=cmd_reboot)
 
-    sub.add_parser("restart", help="reload the daemon in place (self-update)"
-                   ).set_defaults(fn=cmd_restart)
+    s = sub.add_parser("restart", help="reload the daemon in place (self-update)")
+    s.add_argument("--force", action="store_true",
+                   help="Ctrl-C a running command first; one that ignores "
+                        "the signal still blocks the restart")
+    s.set_defaults(fn=cmd_restart)
 
     s = sub.add_parser("del", help="delete a file")
     s.add_argument("path")

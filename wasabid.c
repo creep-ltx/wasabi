@@ -39,10 +39,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b30"
+#define VERSION_STR "wasabid 0.1b31"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b30 (12.8.2026)";
+    "$VER: wasabid 0.1b31 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -2427,13 +2427,100 @@ static BOOL run_blocks_exit(int fd)
     if (!g_job_active)
         return FALSE;
     send_perr(fd, "a command is still running - wait for it to finish, "
-                  "or stop it with 'wasabi kill'");
+                  "stop it with 'wasabi kill', or pass --force");
     return TRUE;
 }
 
-static BOOL cmd_quit(int fd)
+/* Everything before the last ':' or '/' is a path; the command name is
+ * what remains. "C:Wait" and "Wait" are the same command. */
+static const char *base_of(const char *s)
 {
-    if (run_blocks_exit(fd))
+    const char *b = s, *p;
+    for (p = s; *p; p++)
+        if (*p == ':' || *p == '/')
+            b = p + 1;
+    return b;
+}
+
+/*
+ * The --force half: Ctrl-C the process the runner's command is running
+ * in. SystemTagList() hands back no child, and signalling the waiting
+ * runner reaches nothing - so the child is found the way an operator
+ * at the keyboard would find it, by the command name its CLI is
+ * executing, matched against the first word of the RUN we started.
+ * Best effort by construction; a second CLI coincidentally running the
+ * same command also hears the Ctrl-C, which is what Break-by-name has
+ * always risked on this machine.
+ */
+static void force_stop_run(void)
+{
+    char word[64];
+    LONG n, i, w = 0;
+
+    if (g_job.cmd[0] == '"') {           /* a quoted command path */
+        i = 1;
+        while (g_job.cmd[i] && g_job.cmd[i] != '"' && w < 63)
+            word[w++] = g_job.cmd[i++];
+    } else {
+        while (g_job.cmd[w] && g_job.cmd[w] != ' ' && w < 63) {
+            word[w] = g_job.cmd[w];
+            w++;
+        }
+    }
+    word[w] = '\0';
+    if (!word[0])
+        return;
+
+    n = ps_collect();
+    for (i = 0; i < n; i++) {
+        struct PsEnt *e = &g_ps[i];
+        struct Task *t;
+        BOOL alive = FALSE;
+        if (!e->cmd[0] || !str_ieq(base_of(e->cmd), base_of(word)))
+            continue;
+        /* Re-find under Disable, same discipline as cmd_kill: the
+         * snapshot pointer must be proven live before it is signalled. */
+        Disable();
+        for (t = (struct Task *)SysBase->TaskReady.lh_Head;
+             t->tc_Node.ln_Succ; t = (struct Task *)t->tc_Node.ln_Succ)
+            if (t == (struct Task *)e->addr) alive = TRUE;
+        for (t = (struct Task *)SysBase->TaskWait.lh_Head;
+             t->tc_Node.ln_Succ; t = (struct Task *)t->tc_Node.ln_Succ)
+            if (t == (struct Task *)e->addr) alive = TRUE;
+        if (alive)
+            Signal((struct Task *)e->addr, SIGBREAKF_CTRL_C);
+        Enable();
+    }
+}
+
+/* Ctrl-C the running command and give it a grace period to die. TRUE
+ * when the run slot is free (or already was). */
+static BOOL force_run_down(void)
+{
+    LONG i;
+    if (!g_job_active)
+        return TRUE;
+    force_stop_run();
+    for (i = 0; i < 100 && !g_job.done; i++)
+        Delay(5);                        /* up to ten seconds of grace */
+    if (!g_job.done)
+        return FALSE;
+    pump_run();                          /* flush + EXIT to the run client */
+    return !g_job_active;
+}
+
+static BOOL exit_refused(int fd, ULONG flags)
+{
+    if ((flags & 1) && !force_run_down())
+        return send_perr(fd, "the running command ignored Ctrl-C and is "
+                             "still going - 'wasabi kill --force' can "
+                             "remove it, with the usual caveats"), TRUE;
+    return run_blocks_exit(fd);
+}
+
+static BOOL cmd_quit(int fd, ULONG flags)
+{
+    if (exit_refused(fd, flags))
         return TRUE;
     if (!send_frame(fd, T_OK, NULL, 0))
         return FALSE;
@@ -2448,9 +2535,9 @@ static BOOL cmd_quit(int fd)
  * listen socket is closed, so the fresh daemon can bind the same port
  * without racing us for it.
  */
-static BOOL cmd_restart(int fd)
+static BOOL cmd_restart(int fd, ULONG flags)
 {
-    if (run_blocks_exit(fd))
+    if (exit_refused(fd, flags))
         return TRUE;
     if (!send_frame(fd, T_OK, NULL, 0))
         return FALSE;
@@ -2627,10 +2714,10 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         return cmd_reboot(fd, len >= 4 ? get_be32(p) : 0);
 
     case T_RESTART:
-        return cmd_restart(fd);
+        return cmd_restart(fd, len >= 4 ? get_be32(p) : 0);
 
     case T_QUIT:
-        return cmd_quit(fd);
+        return cmd_quit(fd, len >= 4 ? get_be32(p) : 0);
 
     case T_INSTALL:
         if (!get_str(p, len, 0, path, sizeof(path)))

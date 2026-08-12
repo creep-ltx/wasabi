@@ -100,11 +100,11 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x32 | LOG      | S→C | `u32 stream`, `u32 seq`, `str text` |
 | 0x40 | REBOOT   | C→S | `u32 flags` |
 | 0x41 | INFO     | C→S | — |
-| 0x42 | RESTART  | C→S | — |
+| 0x42 | RESTART  | C→S | `[u32 flags]` (may be absent) |
 | 0x43 | PS       | C→S | — |
 | 0x44 | KILL     | C→S | `u32 flags`, `str target` |
 | 0x45 | SPEED    | C→S | `u32 flags`, `u32 size`, `str target` |
-| 0x46 | QUIT     | C→S | — |
+| 0x46 | QUIT     | C→S | `[u32 flags]` (may be absent) |
 | 0x47 | INSTALL  | C→S | `str sidecar` |
 | 0x48 | GRAB     | C→S | `str screenname` |
 | 0x49 | SCREEN   | C→S | `u32 flags`, `str title` |
@@ -336,6 +336,16 @@ runner executes the daemon's own code segment, which the shell unloads
 the moment the daemon exits — a Guru minutes later, nowhere near the
 cause. Wait for the command or `KILL` it first. `REBOOT` is exempt;
 the machine dies anyway, and the runner with it.
+
+Both take an optional `u32 flags`; bit 0 (`--force`) asks the daemon to
+Ctrl-C the running command's process first and wait up to ten seconds
+for it to die — `SystemTagList()` hands back no child, so the process
+is found by the command name its CLI is executing, the way an operator
+would find it. A command that ignores the signal still gets `ERR`: the
+force is polite on purpose, because `RemTask()` on the child would
+leave the runner waiting forever on a death packet that never comes. A
+daemon from before this paragraph ignores the payload — and has no
+guard to override.
 
 ### QUIT — stop, and stay stopped
 
