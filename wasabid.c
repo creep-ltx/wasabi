@@ -39,10 +39,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b31"
+#define VERSION_STR "wasabid 0.1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b31 (12.8.2026)";
+    "$VER: wasabid 0.1 (12.8.2026)";
 
 #define PROTO_VERSION   1
 

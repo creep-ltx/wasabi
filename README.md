@@ -13,7 +13,7 @@ Two halves:
 
 ```
 $ wasabi discover
-192.168.1.42    :1234  amiga        wasabid 0.1b17
+192.168.68.109  :1234  a1200        wasabid 0.1
 
 $ wasabi deploy ccon-handler L:ccon-handler --reboot
 ccon-handler -> L:ccon-handler (106912 bytes)
@@ -40,6 +40,10 @@ and land it on real silicon without touching an SD card.**
 | `snoop` (DOS call trace) | **working on the real A1200** — SnoopDOS-style patches on 14 dos/exec calls |
 | `ps` / `kill` | **working on the real A1200** — full task list; Ctrl-C or RemTask |
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
+| `grab` / `screen` | **working on the real A1200** — front screen to PNG in 0.1 s; RTG and native paths both |
+| `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
+| stream heartbeat + farewell | **working on the real A1200** — a dead machine is noticed; a deliberate exit says goodbye first |
+| exit guards + `--force` | **working on the real A1200** — no exit with a runner alive; `--force` Ctrl-Cs it and delivers its real exit code |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
 Emu68 with [rondoval's driver stack](https://github.com/rondoval/emu68-driver-stack)
@@ -308,7 +312,7 @@ where you will actually see it:
 $ wasabi ping
 wasabi: 673 connection(s) refused as off-LAN since you last looked
 (673 in total) - 'wasabi debug' shows them as they happen
-wasabid 0.1b18 - 3.2 ms
+wasabid 0.1 - 3.2 ms
 ```
 
 Accepted connections are announced on the `debug` stream too, so "who
@@ -484,11 +488,11 @@ checks — cheapest first, each catching what the one before it cannot:
 
 ```
 $ wasabi update wasabid
-updating to wasabid 0.1b16
-wasabid -> C:wasabid.new (32856 bytes)
-  identity   wasabid 0.1b16 (2026-08-12)
+updating to wasabid 0.1
+wasabid -> C:wasabid.new (44244 bytes)
+  identity   wasabid 0.1 (2026-08-12)
   selftest   ok
-  live       wasabid 0.1b16 served a handshake and a ping on port 1235
+  live       wasabid 0.1 served a handshake and a ping on port 1235
 installed - the daemon is reloading itself
 ```
 
@@ -553,16 +557,17 @@ the daemon lists what it can do in its `WELCOME`, and `info` shows it:
 
 ```
 $ wasabi info
-wasabid 0.1b19, protocol v1
+wasabid 0.1, protocol v1
 exec.library 47.13
-chip free 1948 KB, fast free 1872842 KB
+chip free 2020 KB, fast free 1883101 KB
 volumes:
-  Dump:           32892 MB total  31326 MB free    4% used
-  Crap:           20471 MB total  15863 MB free   22% used
+  RAM Disk:        1840 MB total   1840 MB free    0% used
+  Dump:           32892 MB total  31289 MB free    4% used
+  Crap:           20471 MB total  20471 MB free    0% used
   Work:            2860 MB total   2775 MB free    2% used
   AmigaOS:         1901 MB total   1877 MB free    1% used
-can: debug del get info install kill ls mkdir ping ps put quit reboot
-     restart run snoop speed
+can: debug del get grab hb info install kill ls mkdir ping ps put quit
+     reboot restart run screen snoop speed speedfile
 
 $ wasabi speedtest 10MB      # against a build made without 'speed'
 wasabi: this daemon (wasabid 0.1b16-nospeed) has no 'speed' - update it
@@ -723,6 +728,15 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 ```
 
 ## What's next
+
+**0.1 is the first non-beta build.** Thirty-one betas led here, and the
+last stretch was a full audit — `audit.md`, 12 August 2026 — that read
+every line of both halves and the tests. Everything it called a bug is
+fixed and verified on the machine: the out-of-bounds client-table
+write, the orphaned-runner race, reboot honouring its own
+documentation, timezone-straight `ls` dates, and the exit-with-a-live-
+runner Guru it found on the way out. What remains in it is choices,
+written down as such.
 
 The hardening list is done — snoop self-tests its own trampoline, the
 daemon can only be replaced through `update`, and no blocking read or

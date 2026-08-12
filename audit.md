@@ -243,3 +243,13 @@ socket, and the protocol doc now says plainly that every reboot is cold;
 real local-wall DateStamps to match the iron. The `ColdReboot()` flush
 behavior still needs a pass on the real A1200; everything else is covered
 by the suite (50/50) and a manual timezone check.*
+
+*Second postscript, at 0.1: the rest of the ledger closed over b27–b31,
+and the flush-before-reboot path ran live on the machine. The cleanup
+pass (b27) took the whole Meh tier — MIT license, binary out of git,
+error-code honesty, hostname discovery, XDG paths, test isolation, the
+update-over-VPN and WELCOME-guard finds — and the exit-with-a-live-
+runner hazard flagged under "what's left" became the b30 guard and the
+b31 `--force`. The client also grew macOS and BSD portability. Still
+open, and only these: CI when the repo has a remote, and the
+documented-by-design choices above.*
