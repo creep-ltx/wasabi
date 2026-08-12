@@ -176,11 +176,11 @@ check "speedtest refuses an absurd size" "1" "$out"
 
 # --- screen grab: raw over the wire, PNG written here ---
 SHOT=$ROOT/../wasabi-shot.$$
-$W screen "$SHOT" >/dev/null 2>&1
+$W grab "$SHOT" >/dev/null 2>&1
 if [ -s "$SHOT" ] && head -c8 "$SHOT" | grep -q PNG; then
-    ok "screen writes a real PNG"
+    ok "grab writes a real PNG"
 else
-    no "screen writes a real PNG"
+    no "grab writes a real PNG"
 fi
 out=$(python3 -c "
 import struct,sys
@@ -189,9 +189,9 @@ print('%dx%d' % struct.unpack('>II', d[16:24]))" 2>/dev/null)
 check "and its dimensions match what was sent" "8x4" "$out"
 rm -f "$SHOT"
 
-out=$($W screens 2>/dev/null | grep -c "CygnusEd Professional V4.2")
-check "screens lists what is open" "1" "$out"
-out=$($W screens 2>/dev/null | grep -c "<- front")
+out=$($W screen 2>/dev/null | grep -c "CygnusEd Professional V4.2")
+check "screen lists what is open" "1" "$out"
+out=$($W screen 2>/dev/null | grep -c "<- front")
 check "and marks the front one" "1" "$out"
 
 # --- ps / kill ---

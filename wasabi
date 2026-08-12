@@ -30,7 +30,7 @@ PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
-QUIT, INSTALL, SCREEN, SCREENS = 0x46, 0x47, 0x48, 0x49
+QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
 
 TAGNAMES = {v: k for k, v in list(globals().items()) if isinstance(v, int)}
 
@@ -645,13 +645,13 @@ def write_png(path, w, h, rgb):
     return len(blob)
 
 
-def cmd_screen(conn, args):
-    if conn.caps and "screen" not in conn.caps:
+def cmd_grab(conn, args):
+    if conn.caps and "grab" not in conn.caps:
         raise WasabiError(
             "this daemon (%s) cannot grab the screen - update it with "
             "'wasabi update wasabid'" % conn.banner)
     t0 = time.time()
-    conn.send(SCREEN, pack_str(args.screen or ""))
+    conn.send(GRAB, pack_str(args.screen or ""))
     blob = []
     drain_to_end(conn, blob.append)
     data = b"".join(blob)
@@ -670,18 +670,18 @@ def cmd_screen(conn, args):
           file=sys.stderr)
 
 
-def cmd_screens(conn, args):
+def cmd_screen(conn, args):
     """List the open screens, and optionally reorder them.
 
     Cycling is ScreenToBack() on the frontmost - exactly what Amiga+M
     does - so flipping screens from here needs no synthesised keystrokes.
     """
-    if conn.caps and "screens" not in conn.caps:
+    if conn.caps and "screen" not in conn.caps:
         raise WasabiError(
             "this daemon (%s) cannot list screens - update it with "
             "'wasabi update wasabid'" % conn.banner)
     flags = 1 if args.cycle else 0
-    conn.send(SCREENS, struct.pack(">I", flags) + pack_str(args.to_front or ""))
+    conn.send(SCREEN, struct.pack(">I", flags) + pack_str(args.to_front or ""))
     text = []
     drain_to_end(conn, text.append)
     rows = []
@@ -1077,18 +1077,20 @@ def main(argv=None):
                         "discarding - measures the filesystem, not the wire")
     s.set_defaults(fn=cmd_speedtest)
 
-    s = sub.add_parser("screen", help="grab the screen as a PNG")
+    s = sub.add_parser("grab", help="grab the front screen as a PNG")
     s.add_argument("file", nargs="?", default="screen.png")
     s.add_argument("--screen", metavar="NAME",
                    help="public screen to grab (default: the front one)")
-    s.set_defaults(fn=cmd_screen)
+    s.set_defaults(fn=cmd_grab)
 
-    s = sub.add_parser("screens", help="list screens; flip between them")
+    s = sub.add_parser("screen", help="list screens; flip between them")
+    s.add_argument("--list", action="store_true",
+                   help="list the open screens (the default)")
     s.add_argument("--cycle", action="store_true",
                    help="send the front screen to the back (what Amiga+M does)")
     s.add_argument("--to-front", metavar="TITLE",
                    help="bring the screen with this title to the front")
-    s.set_defaults(fn=cmd_screens)
+    s.set_defaults(fn=cmd_screen)
 
     s = sub.add_parser("ps", help="list tasks and processes")
     s.add_argument("pattern", nargs="?", default="",
@@ -1127,7 +1129,8 @@ def main(argv=None):
     # been in wasabid since the first working build.
     needs = {"ps": "ps", "kill": "kill", "speedtest": "speed",
              "snoop": "snoop", "debug": "debug", "restart": "restart",
-             "quit": "quit", "update": "install"}.get(args.cmd)
+             "quit": "quit", "update": "install",
+             "grab": "grab", "screen": "screen"}.get(args.cmd)
 
     try:
         host, port = resolve_target(args)

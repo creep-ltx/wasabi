@@ -113,8 +113,8 @@ wasabi snoop [--task PAT] [--log F]     live DOS call trace
 wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter
 wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
 wasabi speedtest [SIZE] [--target PATH]  latency and throughput both ways
-wasabi screen [FILE]         grab the front screen as a PNG
-wasabi screens [--cycle]     list screens; flip between them
+wasabi grab [FILE]           grab the front screen as a PNG
+wasabi screen [--cycle|--to-front T]    list screens, flip between them
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
@@ -546,12 +546,14 @@ it.
 
 ## Seeing the screen
 
-`wasabi screen shot.png` grabs the front public screen and writes a PNG
+`grab` is the verb, `screen` is the thing you operate on.
+
+`wasabi grab shot.png` grabs the frontmost screen and writes a PNG
 locally. 1280x960 in **0.1 seconds**, which is a design decision rather
 than luck:
 
 ```
-$ wasabi screen shot.png
+$ wasabi grab shot.png
 1280x960 -> shot.png (1362 KB, 3.7 MB raw in 0.1 s)
 ```
 
@@ -587,13 +589,13 @@ slow part — but a PAL screen is a fifth the size, so it still lands in
 about two seconds.
 
 ```
-$ wasabi screens
+$ wasabi screen
 ADDR       SIZE        DEPTH  TITLE
 0x09265ee8 640x256         2  CygnusEd Professional V4.2   <- front
 0x0829b3e0 1280x960       24  Workbench Screen
 
-$ wasabi screens --cycle                 # exactly what Amiga+M does
-$ wasabi screens --to-front "Workbench Screen"
+$ wasabi screen --cycle                 # exactly what Amiga+M does
+$ wasabi screen --to-front "Workbench Screen"
 ```
 
 Flipping screens is `ScreenToBack()`/`ScreenToFront()`, not synthesised

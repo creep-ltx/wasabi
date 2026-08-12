@@ -30,7 +30,7 @@ PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
-QUIT, INSTALL, SCREEN, SCREENS = 0x46, 0x47, 0x48, 0x49
+QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -42,7 +42,7 @@ BANNER = None
 # What this mock claims to support, appended to WELCOME. --caps lets a
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
-        "reboot,restart,ps,kill,speed,speedfile,quit,install,screen,screens")
+        "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen")
 # Off-LAN connections the daemon has turned away, reported in WELCOME.
 REFUSED = 0
 # The path this mock pretends to be running from, so it can refuse a plain
@@ -213,9 +213,9 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_simple(payload, os.mkdir)
         elif tag == SPEED:
             self.do_speed(payload)
+        elif tag == GRAB:
+            self.do_grab()
         elif tag == SCREEN:
-            self.do_screen()
-        elif tag == SCREENS:
             self.do_screens(payload)
         elif tag == PS:
             self.do_ps()
@@ -443,7 +443,7 @@ class Handler(socketserver.BaseRequestHandler):
                 "0x00002222 1280 960 24 Workbench Screen"]
         self.send_data(("\n".join(rows) + "\n").encode("latin-1"))
 
-    def do_screen(self):
+    def do_grab(self):
         """A tiny synthetic screen: header then raw RGB rows."""
         w, h = 8, 4
         px = bytearray()

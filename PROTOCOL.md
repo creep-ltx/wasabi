@@ -103,8 +103,8 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x45 | SPEED    | C→S | `u32 flags`, `u32 size`, `str target` |
 | 0x46 | QUIT     | C→S | — |
 | 0x47 | INSTALL  | C→S | `str sidecar` |
-| 0x48 | SCREEN   | C→S | `str screenname` |
-| 0x49 | SCREENS  | C→S | `u32 flags`, `str title` |
+| 0x48 | GRAB     | C→S | `str screenname` |
+| 0x49 | SCREEN   | C→S | `u32 flags`, `str title` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -125,7 +125,7 @@ speak v1 to a v2 client.
 
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
-`speed,speedfile,quit,install,screen,screens` for a current build. Self-update makes version skew
+`speed,speedfile,quit,install,grab,screen` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -383,7 +383,7 @@ target and report network speed as though it were disk speed. `size` must
 be 1 byte to 256 MB; anything else is an `ERR`. Timing is entirely the
 client's business.
 
-### SCREEN — grab a screen as raw pixels
+### GRAB — a screen as raw pixels
 
 Server replies with `DATA` frames then `END`. The first twelve bytes are
 `u32 width`, `u32 height`, `u32 bytes-per-pixel` (3, meaning RGB), and
@@ -405,7 +405,7 @@ The frontmost screen is read via `LockIBase()`, which makes the pointer
 safe to take but does not hold the screen open; closing it during the
 read is a genuine race. A named public screen is locked properly.
 
-### SCREENS — list them, and reorder
+### SCREEN — list them, and reorder
 
 `DATA` frames of `<addr> <width> <height> <depth> <title>`, front first,
 then `END`. `flags` bit 0 sends the frontmost screen to the back — the

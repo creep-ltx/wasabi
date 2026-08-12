@@ -39,10 +39,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b24"
+#define VERSION_STR "wasabid 0.1b25"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b24 (12.8.2026)";
+    "$VER: wasabid 0.1b25 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -62,7 +62,7 @@ static const char *verstag __attribute__((used)) =
  * PROTO_VERSION stays the hard gate, and only for framing changes.
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
-                 "reboot,restart,ps,kill,speed,speedfile,quit,install,screen,screens"
+                 "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen"
 #define DEF_PORT        1234
 #define MAX_PAYLOAD     65536
 #define MAX_CLIENTS     8
@@ -98,8 +98,8 @@ static const char *verstag __attribute__((used)) =
 #define T_SPEED   0x45
 #define T_QUIT    0x46
 #define T_INSTALL 0x47
-#define T_SCREEN  0x48
-#define T_SCREENS 0x49
+#define T_GRAB    0x48
+#define T_SCREEN  0x49
 
 struct Library *SocketBase;
 /*
@@ -1990,7 +1990,7 @@ static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
  * The whole walk runs under LockIBase() because the screen list is
  * Intuition's own and may change under a reader.
  */
-static BOOL cmd_screens(int fd, ULONG flags, const char *want)
+static BOOL cmd_screenctl(int fd, ULONG flags, const char *want)
 {
     struct Screen *sc, *bring = NULL, *front = NULL;
     char line[220];
@@ -2025,7 +2025,7 @@ static BOOL cmd_screens(int fd, ULONG flags, const char *want)
     return send_frame(fd, T_END, NULL, 0);
 }
 
-static BOOL cmd_screen(int fd, const char *scrname)
+static BOOL cmd_grab(int fd, const char *scrname)
 {
     struct Screen *sc;
     BOOL haslock = FALSE, ok;
@@ -2461,18 +2461,18 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         return cmd_kill(fd, get_be32(p), target);
     }
 
-    case T_SCREENS: {
+    case T_SCREEN: {
         char want[100];
         if (len < 4 || !get_str(p, len, 4, want, sizeof(want)))
             want[0] = '\0';
-        return cmd_screens(fd, len >= 4 ? get_be32(p) : 0, want);
+        return cmd_screenctl(fd, len >= 4 ? get_be32(p) : 0, want);
     }
 
-    case T_SCREEN: {
+    case T_GRAB: {
         char scr[64];
         if (len < 2 || !get_str(p, len, 0, scr, sizeof(scr)))
             scr[0] = '\0';
-        return cmd_screen(fd, scr);
+        return cmd_grab(fd, scr);
     }
 
     case T_SPEED: {
