@@ -379,6 +379,23 @@ def cmd_speedtest(conn, args):
     mb = size / float(1 << 20)
     pattern = bytes(range(256)) * (MAX_PAYLOAD // 256)
 
+    # Latency first: PING/PONG round trips back to back, each one timed,
+    # so the line reports the spread and not just a flattering average.
+    if args.pings:
+        times = []
+        for _ in range(args.pings):
+            t0 = time.time()
+            conn.send(PING)
+            tag, _ = conn.recv()
+            if tag != PONG:
+                raise WasabiError("no PONG during the latency test")
+            times.append((time.time() - t0) * 1000.0)
+        avg = sum(times) / len(times)
+        jitter = (sum((t - avg) ** 2 for t in times) / len(times)) ** 0.5
+        print("ping  %6.2f ms     min %.2f / max %.2f / jitter %.2f"
+              "  (%d pings)"
+              % (avg, min(times), max(times), jitter, len(times)))
+
     t0 = time.time()
     conn.send(SPEED, struct.pack(">II", 0, size))
     sent = 0
@@ -724,9 +741,12 @@ def main(argv=None):
                    help="append timestamped lines to FILE")
     s.set_defaults(fn=cmd_stream, mode="snoop")
 
-    s = sub.add_parser("speedtest", help="measure throughput both ways")
+    s = sub.add_parser("speedtest",
+                       help="measure latency and throughput both ways")
     s.add_argument("size", nargs="?", default="10MB",
                    help="payload size, e.g. 5MB (default 10MB)")
+    s.add_argument("--pings", type=int, default=200, metavar="N",
+                   help="round trips in the latency phase (0 skips it)")
     s.set_defaults(fn=cmd_speedtest)
 
     s = sub.add_parser("ps", help="list tasks and processes")

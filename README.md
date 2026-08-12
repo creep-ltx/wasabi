@@ -46,7 +46,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 27 tests, no Amiga required.
+host mock that speaks the same protocol — 28 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -108,7 +108,7 @@ wasabi debug [--with-snoop] [--log F]   live KPrintF stream
 wasabi snoop [--task PAT] [--log F]     live DOS call trace
 wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter
 wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
-wasabi speedtest [SIZE]      throughput both ways (5MB, 512KB... max 256MB)
+wasabi speedtest [SIZE]      latency, then throughput both ways (max 256MB)
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
@@ -258,9 +258,23 @@ what lets output captured in parallel terminals be lined up afterwards:
 
 ## Speedtest
 
-`wasabi speedtest 25MB` pushes, then pulls, that many bytes and reports
-MB/s each way — so the effect of a driver stack or MTU change is one
-command to measure. The daemon counts-and-discards on receive and
+`wasabi speedtest 25MB` measures latency first — 200 `PING`/`PONG` round
+trips back to back (`--pings N` adjusts, 0 skips), each one timed, so
+the line shows min/max/jitter and not just a flattering average:
+
+```
+ping    4.14 ms     min 2.14 / max 55.41 / jitter 8.11  (200 pings)
+up     81.53 MB/s   10.0 MB in 0.12 s
+down   63.92 MB/s   10.0 MB in 0.16 s
+```
+
+(That 55 ms outlier against a 2 ms floor is the Wi-Fi hop on the client
+side of this network, caught in the act — the reason the spread is
+worth printing.)
+
+Then it pushes, and pulls, the given number of bytes and reports MB/s
+each way — so the effect of a driver stack or MTU change is one command
+to measure. The daemon counts-and-discards on receive and
 generates on send: nothing is stored anywhere, a stock 2 MB machine runs
 the same test a PiStorm does, and the figure isolates the network path
 instead of blending in a filesystem. (A future `--via PATH` mode could
