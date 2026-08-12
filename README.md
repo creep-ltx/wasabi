@@ -32,8 +32,8 @@ and land it on real silicon without touching an SD card.**
 | `put` / `get` / `ls` / `del` / `mkdir` | **working on the real A1200** |
 | `run` with live output and real exit code | **working on the real A1200** |
 | `deploy` (upload + run in one shot) | **working on the real A1200** |
-| `reboot` | built, **never fired in anger** |
-| `debug` (KPrintF stream) | **not implemented** — returns a clear error |
+| `reboot` | **working on the real A1200** |
+| `debug` (KPrintF stream) | **working on the real A1200** — standalone, own RawPutChar patch |
 | `snoop` (DOS call trace) | **not implemented** — returns a clear error |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
@@ -165,23 +165,40 @@ The cross-compiler is Bebbo's `m68k-amigaos-gcc`, at
 `$(HOME)/opt/amiga/bin` on this box. Override `CC` if yours lives
 elsewhere.
 
+## The debug stream
+
+`wasabi debug` streams every `KPrintF`/serial-debug byte the machine
+produces, live over the network — the thing Sashimi captures, but built
+in, no third-party tool. The daemon `SetFunction()`s exec's `RawPutChar`
+(LVO -516) with its own patch, which runs in whatever context the caller
+was in — task, interrupt, or Supervisor. So the patch allocates nothing,
+holds only a short `Disable()`, does no I/O, and (like Sashimi) does not
+chain to the original: it copies the byte into a 32K ring and returns.
+The main loop drains the ring to `LOG` frames; dropped bytes on a full
+ring are counted and reported, never silently lost.
+
+Teardown removes the patch only if the vector still points at ours —
+if another tool `SetFunction`'d on top, restoring the old pointer would
+unlink *their* patch and crash the machine minutes later, so wasabid puts
+its own patch back and stays installed rather than corrupt the chain.
+
+Proven on the real A1200 (12 Aug 2026): a test program emitting via
+`RawPutChar` streams through live, the patch installs and removes cleanly
+across repeated sessions, and the machine stays healthy afterward.
+
 ## What's next
 
-`debug` and `snoop` are the reason this is a daemon and not an FTP
-server, and they are the half that is not written yet. Both work the
-same way: `SetFunction()` patches on library vectors, output into a ring
-buffer, drained to the socket.
-
-- **`debug`** patches exec's `RawPutChar` — one vector, the Sashimi
-  trick. The patch runs in interrupt and Supervisor context, so it must
-  allocate nothing, take no locks, and do no I/O: copy bytes into a
-  preallocated ring, `Signal()` the daemon, done.
-- **`snoop`** patches a dozen `dos.library` entry points — the SnoopDOS
-  trick. These run in ordinary task context and may format text, but
-  must never call a function they have themselves patched.
-
-Both must unpatch in exact reverse order and only after checking the
-vector still points at theirs. If anything has patched over the daemon,
-it must refuse to quit and say so — see PROTOCOL.md.
+- **`snoop`** — the DOS call trace, the other half that makes this a
+  daemon and not an FTP server. It patches a dozen `dos.library` entry
+  points (the SnoopDOS trick); these run in ordinary task context and may
+  format text, but must never call a function they have themselves
+  patched. Not written yet — returns a clear error.
+- **CLI output as a second stream** — `LOG` carries a `stream` field so a
+  monitor can show serial debug (stream 0) and CLI/console output
+  (stream 1) side by side and keep them apart. Only stream 0 exists today.
+- **Self-update** — `wasabi put wasabid C:wasabid` works even while the
+  daemon is running (`LoadSeg` copies the binary into memory and does not
+  lock the file, confirmed on hardware), so all that is missing is a
+  `restart` command to reload it without a full reboot.
 
 `PROTOCOL.md` is the wire format, and the contract between the two halves.

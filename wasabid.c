@@ -27,12 +27,13 @@
 #include <proto/bsdsocket.h>
 
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 
-#define VERSION_STR "wasabid 0.1"
+#define VERSION_STR "wasabid 0.1b6"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1 (12.8.2026)";
+    "$VER: wasabid 0.1b6 (12.8.2026)";
 
 #define PROTO_VERSION   1
 #define DEF_PORT        1234
@@ -91,6 +92,70 @@ static struct RunJob *g_handoff;     /* parent -> runner, one at a time */
 static int            g_run_client = -1;
 static BPTR           g_run_read;    /* our read end of the temp file */
 static LONG           g_run_sent;    /* bytes already forwarded */
+
+/*
+ * The debug stream, standalone: wasabid patches exec's RawPutChar (LVO
+ * -516) itself and captures every KPrintF/serial-debug byte into a ring,
+ * which the main loop drains to LOG frames. No Sashimi, no third-party
+ * tool - the approach is modelled on Sashimi's public-domain source
+ * (Olaf Barthel), which does the same SetFunction trick.
+ *
+ * The patch runs in ANY context - task, interrupt, Supervisor - because
+ * that is where RawPutChar is called from. So the producer allocates
+ * nothing, takes no locks beyond a short Disable(), does no I/O, and
+ * (like Sashimi) does NOT chain to the original: serial output is
+ * intercepted, not duplicated. Globals are absolute-addressed (no
+ * -fbaserel), so the handler needs no a4 setup to reach the ring.
+ */
+#define DBG_RING  32768              /* power of two, for the & mask */
+
+static volatile UBYTE g_ring[DBG_RING];
+static volatile ULONG g_ring_head;   /* producer (patch) advances */
+static volatile ULONG g_ring_tail;   /* consumer (daemon) advances */
+static volatile ULONG g_ring_lost;   /* bytes dropped on a full ring */
+
+static int   g_dbg_client = -1;
+static ULONG g_dbg_seq;
+static BOOL  g_dbg_patched;          /* our RawPutChar patch is installed */
+static APTR  g_orig_rawput;          /* the vector we replaced */
+
+/*
+ * The SetFunction trampoline, in a top-level asm block so it is a real
+ * linkable symbol. Entry: D0.b = char, A6 = ExecBase. Save the exec
+ * scratch registers, hand the char to the C store on the stack, restore,
+ * return. We do not call the original - matching Sashimi.
+ */
+extern void wasabi_rawput_patch(void);
+void wasabi_store(UBYTE c);          /* forward decl; defined below */
+
+asm(
+    "    .text                       \n"
+    "    .globl _wasabi_rawput_patch \n"
+    "_wasabi_rawput_patch:           \n"
+    "    movem.l %d0-%d1/%a0-%a1,-(%sp) \n"
+    "    move.l  %d0,-(%sp)          \n"   /* char as an int arg */
+    "    jsr     _wasabi_store       \n"
+    "    addq.l  #4,%sp              \n"
+    "    movem.l (%sp)+,%d0-%d1/%a0-%a1 \n"
+    "    rts                         \n"
+);
+
+/* Producer. Runs in arbitrary context - keep it tiny and lock-light. */
+void wasabi_store(UBYTE c)
+{
+    ULONG next;
+    if (c == '\0')
+        return;                      /* KPrintF pads with NULs; skip them */
+    Disable();
+    next = (g_ring_head + 1) & (DBG_RING - 1);
+    if (next == g_ring_tail)
+        g_ring_lost++;               /* full: drop, count it */
+    else {
+        g_ring[g_ring_head] = c;
+        g_ring_head = next;
+    }
+    Enable();
+}
 
 struct Client {
     int   fd;
@@ -313,6 +378,116 @@ static BOOL pump_run(void)
         return send_frame(fd, T_EXIT, ex, 8);
     }
     return TRUE;
+}
+
+/* --- the debug stream ---------------------------------------------- */
+
+static BOOL send_log(int fd, ULONG stream, ULONG seq,
+                     const UBYTE *text, LONG len)
+{
+    UBYTE pl[10 + RUNBUF];
+    if (len > RUNBUF)
+        len = RUNBUF;
+    put_be32(pl, stream);
+    put_be32(pl + 4, seq);
+    pl[8] = (UBYTE)(len >> 8);
+    pl[9] = (UBYTE)len;
+    memcpy(pl + 10, text, len);
+    return send_frame(fd, T_LOG, pl, 10 + len);
+}
+
+static void debug_install(void)
+{
+    if (g_dbg_patched)
+        return;
+    /* Disable across SetFunction: RawPutChar can fire from interrupts. */
+    Disable();
+    g_orig_rawput = SetFunction((struct Library *)SysBase, -516,
+                                (ULONG (*)())wasabi_rawput_patch);
+    Enable();
+    g_dbg_patched = TRUE;
+}
+
+/*
+ * Remove the patch, but only if the vector still points at ours. If
+ * someone SetFunction'd on top of us, restoring the old pointer would
+ * unlink THEIR patch and crash the machine later - so we put ours back
+ * and stay installed rather than corrupt the chain. (Same rule Sashimi
+ * uses; the honest failure is a patch that will not leave, not a Guru
+ * with no traceable cause.)
+ */
+static BOOL debug_uninstall(void)
+{
+    APTR res;
+    BOOL removed;
+    if (!g_dbg_patched)
+        return TRUE;
+    Disable();
+    res = SetFunction((struct Library *)SysBase, -516,
+                      (ULONG (*)())g_orig_rawput);
+    if (res == (APTR)wasabi_rawput_patch) {
+        removed = TRUE;
+    } else {
+        /* Someone is on top of us - undo our restore, leave the stack. */
+        SetFunction((struct Library *)SysBase, -516, (ULONG (*)())res);
+        removed = FALSE;
+    }
+    Enable();
+    if (removed)
+        g_dbg_patched = FALSE;
+    return removed;
+}
+
+/* Consumer side: pull bytes the patch has queued. Single consumer, so no
+ * Disable needed - we only read head and advance tail. */
+static LONG ring_drain(UBYTE *buf, LONG max)
+{
+    ULONG head = g_ring_head;            /* one atomic snapshot */
+    LONG n = 0;
+    while (n < max && g_ring_tail != head) {
+        buf[n++] = g_ring[g_ring_tail];
+        g_ring_tail = (g_ring_tail + 1) & (DBG_RING - 1);
+    }
+    return n;
+}
+
+static BOOL debug_start(int cl)
+{
+    if (g_dbg_client >= 0)
+        return send_err(g_clients[cl].fd, "the debug stream is already in use");
+
+    g_ring_head = g_ring_tail = g_ring_lost = 0;
+    g_dbg_client = cl;
+    g_dbg_seq = 0;
+    debug_install();
+    return TRUE;                          /* LOG frames follow from the pump */
+}
+
+static BOOL debug_pump(void)
+{
+    UBYTE buf[RUNBUF];
+    int fd = g_clients[g_dbg_client].fd;
+    LONG n;
+
+    while ((n = ring_drain(buf, sizeof(buf))) > 0)
+        if (!send_log(fd, 0, ++g_dbg_seq, buf, n))
+            return FALSE;
+
+    if (g_ring_lost) {
+        char note[64];
+        LONG ln = sprintf(note, "\n[wasabi: %lu debug byte(s) lost]\n",
+                          (unsigned long)g_ring_lost);
+        g_ring_lost = 0;
+        if (!send_log(fd, 0, ++g_dbg_seq, (UBYTE *)note, ln))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static void debug_stop(void)
+{
+    debug_uninstall();
+    g_dbg_client = -1;
 }
 
 /* --- commands ------------------------------------------------------ */
@@ -615,13 +790,15 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         return cmd_reboot(fd, len >= 4 ? get_be32(p) : 0);
 
     case T_DEBUG:
+        return debug_start(cl);
+
     case T_SNOOP:
         /*
-         * Phase 2. These need SetFunction() patches on RawPutChar and on
-         * the dos.library entry points - see PROTOCOL.md. Saying so
-         * plainly beats a stream that silently never emits anything.
+         * Still to come: SetFunction() patches on the dos.library entry
+         * points - see PROTOCOL.md. Saying so plainly beats a stream that
+         * silently never emits anything.
          */
-        return send_err(fd, "debug/snoop are not in this build yet");
+        return send_err(fd, "snoop is not in this build yet");
 
     default:
         return send_err(fd, "unknown command");
@@ -636,6 +813,8 @@ static void drop(int cl)
         if (g_run_read) { Close(g_run_read); g_run_read = 0; }
         g_run_client = -1;
     }
+    if (g_dbg_client == cl)
+        debug_stop();
     CloseSocket(g_clients[cl].fd);
     g_clients[cl].fd = -1;
     g_clients[cl].hello = FALSE;
@@ -646,7 +825,13 @@ int main(int argc, char **argv)
     int listen_fd = -1, disco_fd = -1, port = DEF_PORT, i;
     UBYTE *payload;
 
-    (void)argc; (void)argv;
+    /* Optional first argument: a port number. Lets a test instance run
+     * on a spare port beside a live one without a bind clash. */
+    if (argc > 1) {
+        LONG p = atol(argv[1]);
+        if (p > 0 && p < 65536)
+            port = (int)p;
+    }
 
     for (i = 0; i < MAX_CLIENTS; i++)
         g_clients[i].fd = -1;
@@ -708,9 +893,15 @@ int main(int argc, char **argv)
             }
         }
 
-        /* Poll briskly while a command is producing output. */
-        tv.tv_secs  = g_run_client >= 0 ? 0 : 2;
-        tv.tv_micro = g_run_client >= 0 ? 50000 : 0;
+        /* Poll briskly while a command or the debug stream is producing
+         * output; idle otherwise. Sashimi writes to its temp file on each
+         * newline, so a growing file has no readable-fd to select on -
+         * only a short timer catches it. */
+        {
+            BOOL busy = (g_run_client >= 0 || g_dbg_client >= 0);
+            tv.tv_secs  = busy ? 0 : 2;
+            tv.tv_micro = busy ? 50000 : 0;
+        }
 
         n = WaitSelect(nfds + 1, &rd, NULL, NULL, &tv, &sigs);
 
@@ -720,6 +911,10 @@ int main(int argc, char **argv)
         if (g_run_client >= 0)
             if (!pump_run())
                 drop(g_run_client);
+
+        if (g_dbg_client >= 0)
+            if (!debug_pump())
+                drop(g_dbg_client);
 
         if (n <= 0)
             continue;
@@ -762,6 +957,10 @@ int main(int argc, char **argv)
     Printf("wasabid: stopping\n");
 
 out:
+    debug_stop();                        /* clears client and removes patch */
+    if (g_dbg_patched)                   /* could not: unloading now = Guru */
+        Printf("wasabid: WARNING - RawPutChar patch could not be removed "
+               "(someone patched over it). Do NOT let this binary unload.\n");
     for (i = 0; i < MAX_CLIENTS; i++)
         if (g_clients[i].fd >= 0)
             CloseSocket(g_clients[i].fd);
