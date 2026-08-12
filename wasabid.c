@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b17"
+#define VERSION_STR "wasabid 0.1b18"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b17 (12.8.2026)";
+    "$VER: wasabid 0.1b18 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -292,6 +292,24 @@ static void dbg_say(const char *s)
 {
     while (*s)
         wasabi_store((UBYTE)*s++);
+}
+
+/*
+ * Say who connected, on the debug stream.
+ *
+ * Counting refusals answers "is anything knocking"; it does not answer
+ * "who is actually talking to my Amiga", which is the more useful
+ * question once a VPN subnet router is in the picture - traffic from a
+ * whole tailnet arrives wearing the router's LAN address, and only the
+ * accept path ever sees it.
+ */
+static void note_accept(ULONG a)
+{
+    char line[64];
+    sprintf(line, "[wasabi: %lu.%lu.%lu.%lu connected]\n",
+            (unsigned long)((a >> 24) & 255), (unsigned long)((a >> 16) & 255),
+            (unsigned long)((a >> 8) & 255), (unsigned long)(a & 255));
+    dbg_say(line);
 }
 
 static void note_refusal(ULONG a)
@@ -2283,10 +2301,14 @@ int main(int argc, char **argv)
             struct sockaddr_in peer;
             socklen_t peerlen = sizeof(peer);
             int fd = accept(listen_fd, (struct sockaddr *)&peer, &peerlen);
-            if (fd >= 0 && !addr_allowed(ntohl(peer.sin_addr.s_addr))) {
-                note_refusal(ntohl(peer.sin_addr.s_addr));
-                CloseSocket(fd);     /* before HELLO: it never gets a turn */
-                fd = -1;
+            if (fd >= 0) {
+                ULONG a = ntohl(peer.sin_addr.s_addr);
+                if (!addr_allowed(a)) {
+                    note_refusal(a);
+                    CloseSocket(fd); /* before HELLO: it never gets a turn */
+                    fd = -1;
+                } else
+                    note_accept(a);
             }
             if (fd >= 0) {
                 int slot = -1;

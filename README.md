@@ -206,6 +206,26 @@ Loopback is allowed deliberately: a connection arriving through an SSH
 tunnel that terminates on the Amiga comes from `127.0.0.1`, so tunnels
 and this check compose rather than fight.
 
+**A VPN subnet router keeps working, and you should know why.** Tested
+on this network: a laptop on a phone hotspot, reaching the Amiga over
+Tailscale via a NAS advertising the LAN as a subnet route, connected
+with nothing configured and nothing refused. Tailscale masquerades
+subnet-route traffic by default, so the Amiga sees the *router's* LAN
+address rather than the `100.64.0.0/10` one the laptop holds — and
+`192.168/16` already covers that.
+
+The consequence is worth saying out loud: with a subnet router in the
+path, **everything on your tailnet reaches wasabid as though it were on
+the LAN**, and the daemon cannot tell the difference. That is not a hole
+— a tailnet is authenticated and you choose who is in it — but your
+tailnet membership is now part of wasabi's trust boundary. Worth
+remembering before sharing a node, rather than after. (`allow` is still
+there for a VPN that does *not* masquerade, where the Amiga would see
+the real `100.x` source.)
+
+Which of those is happening is observable rather than guesswork:
+`wasabi debug` names every connection as it arrives.
+
 A mesh VPN is a legitimate way to reach a machine and is not RFC1918
 (Tailscale uses `100.64.0.0/10`), so ranges can be added:
 
@@ -224,7 +244,16 @@ where you will actually see it:
 $ wasabi ping
 wasabi: 673 connection(s) refused as off-LAN since you last looked
 (673 in total) - 'wasabi debug' shows them as they happen
-wasabid 0.1b17 - 3.2 ms
+wasabid 0.1b18 - 3.2 ms
+```
+
+Accepted connections are announced on the `debug` stream too, so "who
+is actually talking to my Amiga" is answerable by watching rather than
+inferring:
+
+```
+[wasabi: 192.168.68.117 connected]
+[wasabi: refused 203.0.113.44 - not on the LAN]
 ```
 
 That warning appears only when the number has *risen* since you last
