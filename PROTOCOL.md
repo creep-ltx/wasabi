@@ -245,6 +245,14 @@ bind the same port — it relaunches itself via `GetProgramName()` (the
 path it was invoked by) on the same port. The client treats a close after
 `OK` as success and reconnects.
 
+Nothing survives the exit that could roll a bad binary back, so the
+client verifies before it commits: `deploy --safe` uploads to a sidecar,
+`RUN`s it with `--selftest` — the daemon's own "can I open
+`bsdsocket.library` and bind a socket" mode, exit 0 for yes — and only
+installs over the live path on a pass, keeping the previous binary as
+`.bak`. That flow needs no wire support of its own; it is `PUT`, `RUN`,
+`DEL` and `RESTART` in sequence.
+
 ### PS — list every task on the machine
 
 A snapshot of exec's scheduler state: `ThisTask` plus the `TaskReady` and

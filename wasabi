@@ -212,9 +212,7 @@ def cmd_put(conn, args):
     do_put(conn, args.local, args.remote, quiet=args.quiet)
 
 
-def do_put(conn, local, remote, quiet=False):
-    with open(local, "rb") as fh:
-        data = fh.read()
+def put_bytes(conn, data, remote):
     conn.send(PUT, struct.pack(">II", len(data), PROT_DEFAULT) + pack_str(remote))
     sent = 0
     while sent < len(data):
@@ -223,6 +221,12 @@ def do_put(conn, local, remote, quiet=False):
         sent += len(chunk)
     conn.send(END)
     conn.expect_ok()
+
+
+def do_put(conn, local, remote, quiet=False):
+    with open(local, "rb") as fh:
+        data = fh.read()
+    put_bytes(conn, data, remote)
     if not quiet:
         print("%s -> %s (%d bytes)" % (local, remote, len(data)), file=sys.stderr)
 
@@ -272,7 +276,70 @@ def do_run(conn, command, merge=False, detach=False):
             raise WasabiError("unexpected tag 0x%02x during RUN" % tag)
 
 
+def copy_remote(conn, src, dst):
+    """Duplicate a file on the Amiga using only wasabi's own primitives.
+
+    A GET/PUT round trip rather than 'Copy', so it behaves identically
+    against the mock and needs no C: command to exist. Returns False if
+    the source is not there yet - a first install, not a failure.
+    """
+    conn.send(GET, pack_str(src))
+    blob = []
+    try:
+        drain_to_end(conn, blob.append)
+    except WasabiError:
+        return False
+    put_bytes(conn, b"".join(blob), dst)
+    return True
+
+
+def do_safe_deploy(conn, args):
+    """Install a new daemon binary only after it proves it can run.
+
+    Once the old daemon exits to relaunch, nothing is left running that
+    could roll a bad build back - so the verification happens while the
+    old daemon is still alive and in charge: upload to a sidecar, have
+    it executed with --selftest, and only commit over the real path if
+    that comes back clean.
+    """
+    sidecar = args.remote + ".new"
+    backup = args.remote + ".bak"
+
+    do_put(conn, args.local, sidecar)
+    print("verifying %s ..." % sidecar, file=sys.stderr)
+    rc = do_run(conn, "%s --selftest" % sidecar)
+    if rc != 0:
+        try:
+            conn.send(DEL, pack_str(sidecar))
+            conn.expect_ok()
+        except WasabiError:
+            pass
+        raise WasabiError(
+            "the new binary failed its self-test (rc %d) - %s is untouched "
+            "and the running daemon is unharmed" % (rc, args.remote))
+
+    # Keep a known-good copy ON THE AMIGA: if what breaks is the network,
+    # a human at the keyboard still has something to restore.
+    if copy_remote(conn, args.remote, backup):
+        print("kept the previous binary as %s" % backup, file=sys.stderr)
+
+    do_put(conn, args.local, args.remote)   # atomic tmp + rename, as always
+    try:
+        conn.send(DEL, pack_str(sidecar))
+        conn.expect_ok()
+    except WasabiError:
+        pass                                # cosmetic; the install is done
+
+    rc = do_run(conn, args.run) if args.run else 0
+    do_restart(conn)
+    print("verified and installed - the daemon is reloading itself",
+          file=sys.stderr)
+    return rc
+
+
 def cmd_deploy(conn, args):
+    if args.safe:
+        return do_safe_deploy(conn, args)
     do_put(conn, args.local, args.remote, quiet=False)
     rc = 0
     if args.run:
@@ -723,6 +790,9 @@ def main(argv=None):
     g.add_argument("--reboot", action="store_true")
     g.add_argument("--restart", action="store_true",
                    help="reload the daemon in place (self-update)")
+    g.add_argument("--safe", action="store_true",
+                   help="verify the binary with --selftest before it "
+                        "replaces the running daemon, then restart")
     s.add_argument("--cold", action="store_true")
     s.set_defaults(fn=cmd_deploy)
 

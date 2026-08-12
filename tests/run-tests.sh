@@ -125,6 +125,25 @@ out=$($W deploy "$ROOT/../wasabi-restart.$$" C:wasabid.new --restart 2>&1 | \
 check "deploy --restart uploads and reloads" "1" "$out"
 rm -f "$ROOT/../wasabi-restart.$$"
 
+# --- deploy --safe: verify before committing a new daemon ---
+printf 'new good daemon\n' > "$ROOT/../wasabi-good.$$"
+printf 'old daemon\n' > "$ROOT/C/wasabid"
+$W deploy "$ROOT/../wasabi-good.$$" C:wasabid --safe >/dev/null 2>&1
+check "deploy --safe installs a binary that passes" \
+      "new good daemon" "$(cat "$ROOT/C/wasabid" 2>/dev/null)"
+check "deploy --safe keeps the previous binary" \
+      "old daemon" "$(cat "$ROOT/C/wasabid.bak" 2>/dev/null)"
+[ ! -f "$ROOT/C/wasabid.new" ] && ok "deploy --safe clears the sidecar" \
+                              || no "deploy --safe clears the sidecar"
+
+printf 'FAIL_SELFTEST\n' > "$ROOT/../wasabi-bad.$$"
+out=$($W deploy "$ROOT/../wasabi-bad.$$" C:wasabid --safe 2>&1 | \
+      grep -c "failed its self-test")
+check "a binary that fails is refused" "1" "$out"
+check "the running daemon's binary is untouched" \
+      "new good daemon" "$(cat "$ROOT/C/wasabid" 2>/dev/null)"
+rm -f "$ROOT/../wasabi-good.$$" "$ROOT/../wasabi-bad.$$"
+
 # --- speedtest ---
 out=$($W speedtest 1MB --pings 20 2>/dev/null | grep -c "MB/s")
 check "speedtest reports both directions" "2" "$out"

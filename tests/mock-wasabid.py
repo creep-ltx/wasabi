@@ -243,6 +243,17 @@ class Handler(socketserver.BaseRequestHandler):
         command, _ = unpack_str(payload, 4)
         merge = bool(flags & 1)
         detach = bool(flags & 2)
+        # Stand in for an uploaded daemon proving itself. A binary whose
+        # content carries FAIL_SELFTEST plays the part of a bad build.
+        if command.endswith("--selftest"):
+            try:
+                with open(amiga_path(command.split()[0]), "rb") as fh:
+                    body = fh.read()
+            except (OSError, ValueError):
+                body = b""
+            bad = not body or b"FAIL_SELFTEST" in body
+            self.send(STDOUT, b"selftest: FAILED\n" if bad else b"selftest: ok\n")
+            return self.send(EXIT, struct.pack(">II", 10 if bad else 0, 0))
         try:
             proc = subprocess.Popen(
                 command, shell=True, cwd=ROOT, stdout=subprocess.PIPE,

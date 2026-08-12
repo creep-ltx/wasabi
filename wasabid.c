@@ -1667,10 +1667,67 @@ static void drop(int cl)
     g_clients[cl].hello = FALSE;
 }
 
+/*
+ * Prove a freshly uploaded binary can actually run, before it is allowed
+ * to replace a working one. Once the old daemon has exited to relaunch,
+ * nothing is left running that could roll a bad build back - so the
+ * check has to happen while the old daemon is still alive and in charge,
+ * which means the new binary has to be able to check itself.
+ *
+ * What is worth checking is the dependency that actually fails in
+ * practice: the TCP/IP stack. Open bsdsocket.library, prove a socket can
+ * be created and bound, say so, exit 0. A binary that cannot do this
+ * would come up dead and take the machine off the network with it.
+ *
+ * Deliberately NOT checked: anything that patches the system. A process
+ * that SetFunction()s and then exits is exactly the "do not let this
+ * binary unload" hazard the teardown rules exist to avoid.
+ */
+static int selftest(void)
+{
+    int s;
+    struct sockaddr_in sa;
+
+    SocketBase = OpenLibrary("bsdsocket.library", 4);
+    if (!SocketBase) {
+        Printf("%s selftest: FAILED - no bsdsocket.library\n",
+               (LONG)VERSION_STR);
+        return RETURN_FAIL;
+    }
+    s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) {
+        CloseLibrary(SocketBase);
+        Printf("%s selftest: FAILED - cannot create a socket\n",
+               (LONG)VERSION_STR);
+        return RETURN_FAIL;
+    }
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = 0;                     /* any free port; only the bind
+                                          * matters, and this cannot clash
+                                          * with the daemon still running */
+    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(s, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        CloseSocket(s);
+        CloseLibrary(SocketBase);
+        Printf("%s selftest: FAILED - cannot bind a socket\n",
+               (LONG)VERSION_STR);
+        return RETURN_FAIL;
+    }
+    CloseSocket(s);
+    CloseLibrary(SocketBase);
+    SocketBase = NULL;
+    Printf("%s selftest: ok\n", (LONG)VERSION_STR);
+    return RETURN_OK;
+}
+
 int main(int argc, char **argv)
 {
     int listen_fd = -1, disco_fd = -1, port = DEF_PORT, i;
     UBYTE *payload;
+
+    if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
+        return selftest();
 
     /* Optional first argument: a port number. Lets a test instance run
      * on a spare port beside a live one without a bind clash. */

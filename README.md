@@ -34,7 +34,7 @@ and land it on real silicon without touching an SD card.**
 | `deploy` (upload + run in one shot) | **working on the real A1200** |
 | `reboot` | **working on the real A1200** |
 | `debug` (KPrintF stream) | **working on the real A1200** — standalone, own RawPutChar patch |
-| `restart` (in-place self-update) | **working on the real A1200** — `put C:wasabid` + `restart`, no reboot |
+| `restart` (in-place self-update) | **working on the real A1200** — `deploy --safe` verifies before it commits |
 | `snoop` (DOS call trace) | **working on the real A1200** — SnoopDOS-style patches on 14 dos/exec calls |
 | `ps` / `kill` | **working on the real A1200** — full task list; Ctrl-C or RemTask |
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
@@ -47,7 +47,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 28 tests, no Amiga required.
+host mock that speaks the same protocol — 33 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -102,7 +102,7 @@ wasabi ls [PATH]             list a drawer; no path lists the volumes
 wasabi put LOCAL REMOTE      upload a file
 wasabi get REMOTE LOCAL      download a file ('-' for stdout)
 wasabi run "CMD"             execute, stream output, return its exit code
-wasabi deploy L R [--run C] [--reboot | --restart]
+wasabi deploy L R [--run C] [--reboot | --restart | --safe]
 wasabi del PATH / mkdir PATH
 wasabi reboot [--cold]
 wasabi restart               reload the daemon in place (self-update)
@@ -269,6 +269,50 @@ what lets output captured in parallel terminals be lined up afterwards:
 2026-08-12 08:11:53.257 snoop | c:wasabid  Open("T:wasabi-run-2", readwrite) = ok
 ```
 
+## Updating the daemon safely
+
+`wasabi put wasabid C:wasabid` works while the daemon is running —
+`LoadSeg` copies the binary into memory and does not lock the file — so
+`restart` reloads it without a reboot. The catch is that once the old
+daemon has exited to relaunch, **nothing is left running that could roll
+a bad build back**: a broken binary means walking to the machine, which
+is the one thing wasabi exists to avoid.
+
+So the leverage is in never committing a bad build. `deploy --safe` does
+the verification while the old daemon is still alive and in charge:
+
+```
+$ wasabi deploy wasabid c:wasabid --safe
+wasabid -> c:wasabid.new (31468 bytes)
+verifying c:wasabid.new ...
+wasabid 0.1b13 selftest: ok
+kept the previous binary as c:wasabid.bak
+wasabid -> c:wasabid (31468 bytes)
+verified and installed - the daemon is reloading itself
+```
+
+The new binary is uploaded to a sidecar, run with `--selftest` (open
+`bsdsocket.library`, create and bind a socket, exit 0 — the dependency
+that actually fails in practice), and only a clean pass gets installed
+over the real path. A failure deletes the sidecar and leaves everything
+as it was:
+
+```
+$ wasabi deploy corrupt-build c:wasabid --safe
+verifying c:wasabid.new ...
+c:wasabid.new: file is not executable
+wasabi: the new binary failed its self-test (rc 10) - c:wasabid is
+untouched and the running daemon is unharmed
+```
+
+The previous binary is kept as `C:wasabid.bak` — on the Amiga, not on
+the Linux box, because if what breaks is the network then a human at the
+keyboard is exactly who needs it. What this cannot catch is a binary
+that passes its self-test and then dies under real load; `--selftest`
+deliberately does not exercise the `SetFunction` patches, since a
+process that patches the system and then exits is the very hazard the
+teardown rules exist to prevent.
+
 ## Speedtest
 
 `wasabi speedtest 25MB` measures latency first — 200 `PING`/`PONG` round
@@ -311,12 +355,6 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 In priority order — each one shrinks a real "machine goes down or
 corrupts silently" risk, none needs a protocol version bump:
 
-- **Safe self-update** — once the old daemon has exited there is nothing
-  left running to roll back a broken replacement, so the leverage is in
-  never committing one: `deploy --safe` uploads to `C:wasabid.new`, the
-  running daemon executes it with `--selftest` (open bsdsocket, bind a
-  scratch port, exit 0), and only a pass renames it into place (keeping
-  `C:wasabid.bak`) and restarts.
 - **Receive timeouts** — `recv_frame()` blocks, so a client that sends
   half a frame and stalls hangs the daemon for everyone, forever. A
   `WaitSelect()` with a few-seconds timeout before each blocking read
