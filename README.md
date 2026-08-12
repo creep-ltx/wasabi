@@ -1,5 +1,7 @@
 # Wasabi
 
+[![test](https://github.com/creep-ltx/wasabi/actions/workflows/test.yml/badge.svg)](https://github.com/creep-ltx/wasabi/actions/workflows/test.yml)
+
 Drive a real Amiga from a Linux box — and watch it think. The serial
 debug stream and a SnoopDOS-style call trace arrive live over the
 network, and the same connection uploads a binary anywhere on the
