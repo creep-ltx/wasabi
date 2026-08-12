@@ -271,6 +271,20 @@ def cmd_run(conn, args):
 def do_run(conn, command, merge=False, detach=False, sink=None):
     flags = (1 if merge else 0) | (2 if detach else 0)
     conn.send(RUN, struct.pack(">I", flags) + pack_str(command))
+    # A command may legitimately think for a long time before it says
+    # anything - a compile, or just loading a 760 KB binary off disk -
+    # so the connect timeout must not apply to waiting on its output.
+    # A daemon that dies mid-run closes the socket, which reads as EOF
+    # rather than a hang, so there is nothing left for a timer to save.
+    old_timeout = conn.sock.gettimeout()
+    conn.sock.settimeout(None)
+    try:
+        return _run_loop(conn, sink)
+    finally:
+        conn.sock.settimeout(old_timeout)
+
+
+def _run_loop(conn, sink):
     while True:
         tag, payload = conn.recv()
         if tag == STDOUT:
@@ -976,6 +990,9 @@ def main(argv=None):
         return 1
     except BrokenPipeError:
         return 1
+    except OSError as exc:
+        print("wasabi: the connection failed - %s" % exc, file=sys.stderr)
+        return 2
     finally:
         conn.close()
 
