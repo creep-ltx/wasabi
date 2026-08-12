@@ -74,7 +74,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | Tag  | Name     | Direction | Payload |
 |------|----------|-----------|---------|
 | 0x01 | HELLO    | C→S | `u16 version`, `str key` |
-| 0x02 | WELCOME  | S→C | `u16 version`, `str banner` |
+| 0x02 | WELCOME  | S→C | `u16 version`, `str banner`, `str caps` |
 | 0x03 | ERR      | S→C | `u32 code`, `str message` |
 | 0x04 | OK       | S→C | — |
 | 0x05 | PING     | C→S | — |
@@ -118,6 +118,26 @@ trusted network only.
 
 Version mismatch is fatal in both directions: the daemon will not try to
 speak v1 to a v2 client.
+
+`caps` is a comma-separated list of what the daemon can actually do —
+`ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
+`speed,quit,install` for a current build. Self-update makes version skew
+an everyday event: the client is usually a `git pull` ahead of the daemon
+until the next `wasabi update`, and "unknown command" is a poor way to
+find that out. With the list, the client can name the build that is too
+old and say what to do about it.
+
+**Adding it broke nothing in either direction, by construction.** Frame
+lengths are explicit and a client reads the banner as a counted string,
+so one that predates `caps` stops before it and never notices. A client
+that expects `caps` and finds the payload ended treats that as *unknown*,
+never as *supports nothing*, and falls back to sending the command and
+reporting whatever comes back. Both paths were checked against the real
+A1200: a current client against a daemon with no list, and a client from
+before the list against a daemon that sends one.
+
+`PROTO_VERSION` remains the hard gate, and only for framing changes.
+Features negotiate through `caps`.
 
 ## Commands
 

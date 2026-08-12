@@ -31,12 +31,30 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b15"
+#define VERSION_STR "wasabid 0.1b16"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b15 (12.8.2026)";
+    "$VER: wasabid 0.1b16 (12.8.2026)";
 
 #define PROTO_VERSION   1
+
+/*
+ * What this build can actually do, sent in WELCOME after the banner.
+ *
+ * Self-update made version skew an everyday event - the client is a
+ * git pull ahead of the daemon until the next `wasabi update` - and
+ * "unknown command" is a poor way to learn that. With this the client
+ * can say which build is too old and what to do about it.
+ *
+ * Appending is compatible in both directions: frame lengths are
+ * explicit and older clients stop reading after the banner, while a
+ * newer client talking to a daemon that sends no list falls back to
+ * trying the command and reporting whatever comes back.
+ *
+ * PROTO_VERSION stays the hard gate, and only for framing changes.
+ */
+#define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
+                 "reboot,restart,ps,kill,speed,quit,install"
 #define DEF_PORT        1234
 #define MAX_PAYLOAD     65536
 #define MAX_CLIENTS     8
@@ -1708,12 +1726,16 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
             return send_err(fd, "bad key"), FALSE;
         g_clients[cl].hello = TRUE;
         {
-            UBYTE w[128];
+            UBYTE w[256];
             LONG bl = (LONG)strlen(VERSION_STR);
-            w[0] = 0; w[1] = PROTO_VERSION;
-            w[2] = (UBYTE)(bl >> 8); w[3] = (UBYTE)bl;
-            memcpy(w + 4, VERSION_STR, bl);
-            return send_frame(fd, T_WELCOME, w, 4 + bl);
+            LONG kl = (LONG)strlen(CAPS_STR);
+            LONG n = 0;
+            w[n++] = 0; w[n++] = PROTO_VERSION;
+            w[n++] = (UBYTE)(bl >> 8); w[n++] = (UBYTE)bl;
+            memcpy(w + n, VERSION_STR, bl); n += bl;
+            w[n++] = (UBYTE)(kl >> 8); w[n++] = (UBYTE)kl;
+            memcpy(w + n, CAPS_STR, kl); n += kl;
+            return send_frame(fd, T_WELCOME, w, n);
         }
     }
 

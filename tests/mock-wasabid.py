@@ -39,6 +39,10 @@ PORT = 1234
 # `wasabi update` is standing in for a specific binary, so it is started
 # with that binary's version - the real daemon's banner is its version.
 BANNER = None
+# What this mock claims to support, appended to WELCOME. --caps lets a
+# test play an older daemon; --caps '' plays one from before the list.
+CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
+        "reboot,restart,ps,kill,speed,quit,install")
 # The path this mock pretends to be running from, so it can refuse a plain
 # PUT over itself exactly as the daemon does.
 SELF = "C:wasabid"
@@ -154,8 +158,11 @@ class Handler(socketserver.BaseRequestHandler):
                 return self.err("protocol v%d not supported" % ver)
             if key != KEY:
                 return self.err("bad key")
-            self.send(WELCOME, struct.pack(">H", VERSION) + pack_str(
-                BANNER or "mock-wasabid on %s" % os.uname().nodename))
+            welcome = struct.pack(">H", VERSION) + pack_str(
+                BANNER or "mock-wasabid on %s" % os.uname().nodename)
+            if CAPS:
+                welcome += pack_str(CAPS)
+            self.send(WELCOME, welcome)
             # Once a stream is subscribed, alternate between watching for
             # further frames (a second subscription - debug and snoop may
             # share one connection, as on the C daemon) and emitting.
@@ -495,15 +502,18 @@ def discovery_responder(port, name):
 
 
 def main():
-    global ROOT, KEY, PORT, BANNER
+    global ROOT, KEY, PORT, BANNER, CAPS
     p = argparse.ArgumentParser()
     p.add_argument("--root", default=ROOT)
     p.add_argument("--port", type=int, default=1234)
     p.add_argument("--key", default="")
     p.add_argument("--banner", default=None,
                    help="what to call ourselves in WELCOME")
+    p.add_argument("--caps", default=CAPS,
+                   help="capability list; empty plays a pre-caps daemon")
     args = p.parse_args()
     ROOT, KEY, PORT, BANNER = args.root, args.key, args.port, args.banner
+    CAPS = args.caps
     os.makedirs(ROOT, exist_ok=True)
     threading.Thread(
         target=discovery_responder,

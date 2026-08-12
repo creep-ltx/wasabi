@@ -47,7 +47,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 38 tests, no Amiga required.
+host mock that speaks the same protocol — 42 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -97,7 +97,7 @@ broadcast and caches the answer.
 ```
 wasabi discover              find Amigas on this network
 wasabi ping                  round-trip time and daemon banner
-wasabi info                  Kickstart version, free chip/fast RAM
+wasabi info                  Kickstart version, RAM, and what it can do
 wasabi ls [PATH]             list a drawer; no path lists the volumes
 wasabi put LOCAL REMOTE      upload a file
 wasabi get REMOTE LOCAL      download a file ('-' for stdout)
@@ -367,6 +367,32 @@ dies under real load. `--selftest` also deliberately does not exercise
 the `SetFunction` patches: a process that patches the system and then
 exits is the very hazard the teardown rules exist to prevent.
 
+### Telling the client and daemon apart
+
+Because updating is this easy, the client is usually a `git pull` ahead
+of the daemon, and "unknown command" is a poor way to discover it. So
+the daemon lists what it can do in its `WELCOME`, and `info` shows it:
+
+```
+$ wasabi info
+wasabid 0.1b16, protocol v1
+can: debug del get info install kill ls mkdir ping ps put quit reboot
+     restart run snoop speed
+
+$ wasabi ps                       # against an older one
+wasabi: this daemon (wasabid 0.1b11) has no 'speed' - update it with
+'wasabi update wasabid'
+```
+
+Adding that list broke nothing in either direction, by construction:
+frame lengths are explicit and the banner is a counted string, so an
+older client stops before the list and never sees it, while a newer
+client that finds no list treats it as *unknown* rather than *supports
+nothing* and just sends the command. Both directions were checked
+against the A1200 — a current client against a daemon with no list, and
+a client checked out of git from before the list against one that sends
+it.
+
 ## Speedtest
 
 `wasabi speedtest 25MB` measures latency first — 200 `PING`/`PONG` round
@@ -406,16 +432,9 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 
 ## What's next
 
-In priority order — each one shrinks a real "machine goes down or
-corrupts silently" risk, none needs a protocol version bump:
-
-- **Capabilities in `WELCOME`** — self-update makes version skew an
-  everyday event, and a new client asking an old daemon for `ps` gets a
-  confusing "unknown command". A capability list appended to the
-  `WELCOME` banner (old clients ignore trailing bytes, so it is
-  compatible both directions) lets the client say "your wasabid predates
-  `ps` — deploy a newer one". `PROTO_VERSION` stays the hard gate for
-  framing changes only.
+The hardening list is done — snoop self-tests its own trampoline, the
+daemon can only be replaced through `update`, and no blocking read or
+write is unbounded.
 
 Deliberately on hold: **challenge-response auth**. HMAC over a server
 nonce would keep the key off the wire, but the session stays plaintext

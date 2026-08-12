@@ -193,6 +193,33 @@ check "kill of an ambiguous name errors" "1" "$out"
 out=$($W kill wasabid 2>&1 | grep -c "restart or reboot")
 check "kill refuses the daemon itself" "1" "$out"
 
+# --- capabilities in WELCOME ---
+out=$($W info 2>/dev/null | grep -c "^can: .*speed")
+check "info reports what the daemon can do" "1" "$out"
+
+# A daemon too old for ps: the client should name it, not send blindly.
+./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+7)) --key "$KEY" \
+    --caps "ping,info,ls,put,get,run" >>"$ROOT/mock.log" 2>&1 &
+OLD_PID=$!
+sleep 1
+out=$(./wasabi --host 127.0.0.1 --port $((PORT+7)) --key "$KEY" ps 2>&1 | \
+      grep -c "has no 'ps'")
+check "a daemon without a capability is named, not guessed at" "1" "$out"
+out=$(./wasabi --host 127.0.0.1 --port $((PORT+7)) --key "$KEY" ping 2>&1 | \
+      grep -c "mock-wasabid")
+check "commands it does have still work" "1" "$out"
+kill $OLD_PID 2>/dev/null
+
+# A daemon from before capabilities existed: never refuse, just try.
+./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+8)) --key "$KEY" \
+    --caps "" >>"$ROOT/mock.log" 2>&1 &
+PRE_PID=$!
+sleep 1
+out=$(./wasabi --host 127.0.0.1 --port $((PORT+8)) --key "$KEY" ps 2>&1 | \
+      grep -c "input.device")
+check "a pre-capability daemon is not second-guessed" "1" "$out"
+kill $PRE_PID 2>/dev/null
+
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")
 if [ "$out" -ge 1 ]; then ok "a missing file reports an error"

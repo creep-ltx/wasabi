@@ -75,7 +75,14 @@ class Conn:
             raise WasabiError(
                 "protocol mismatch: wasabid speaks v%d, this client speaks v%d"
                 % (remote_version, VERSION))
-        self.banner, _ = unpack_str(payload, 2)
+        self.banner, off = unpack_str(payload, 2)
+        # Capabilities are appended after the banner. A daemon that
+        # predates them sends nothing more, and an empty set means
+        # "cannot tell" - never "supports nothing".
+        self.caps = set()
+        if off < len(payload):
+            caps, _ = unpack_str(payload, off)
+            self.caps = {c.strip() for c in caps.split(",") if c.strip()}
 
     def send(self, tag, payload=b""):
         if len(payload) > MAX_PAYLOAD:
@@ -184,6 +191,10 @@ def cmd_ping(conn, args):
 def cmd_info(conn, args):
     conn.send(INFO)
     drain_to_end(conn, lambda b: sys.stdout.write(b.decode("latin-1")))
+    if conn.caps:
+        print("can: %s" % " ".join(sorted(conn.caps)))
+    else:
+        print("can: (this wasabid predates the capability list)")
 
 
 def cmd_ls(conn, args):
@@ -932,6 +943,13 @@ def main(argv=None):
     if getattr(args, "no_conn", False):
         return args.fn(args) or 0
 
+    # Which wire capability each subcommand needs, where a daemon might
+    # plausibly be too old to have it. Everything not listed here has
+    # been in wasabid since the first working build.
+    needs = {"ps": "ps", "kill": "kill", "speedtest": "speed",
+             "snoop": "snoop", "debug": "debug", "restart": "restart",
+             "quit": "quit", "update": "install"}.get(args.cmd)
+
     try:
         host, port = resolve_target(args)
     except WasabiError as exc:
@@ -942,6 +960,14 @@ def main(argv=None):
     except (OSError, WasabiError) as exc:
         print("wasabi: cannot reach %s:%d - %s" % (host, port, exc),
               file=sys.stderr)
+        return 2
+    # Only refuse when the daemon actually told us what it can do; an
+    # empty set means it predates the list, so try and report the result.
+    if needs and conn.caps and needs not in conn.caps:
+        print("wasabi: this daemon (%s) has no '%s' - update it with "
+              "'wasabi update wasabid'" % (conn.banner, needs),
+              file=sys.stderr)
+        conn.close()
         return 2
     try:
         return args.fn(conn, args) or 0
