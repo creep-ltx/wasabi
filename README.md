@@ -295,4 +295,42 @@ up    109.12 MB/s   256.0 MB in 2.35 s
 down  105.02 MB/s   256.0 MB in 2.44 s
 ```
 
+## What's next
+
+In priority order — each one shrinks a real "machine goes down or
+corrupts silently" risk, none needs a protocol version bump:
+
+- **Snoop self-test on start** — before any patch goes live, `Lock()` a
+  unique bogus path and assert the captured event carries exactly that
+  string through the trampoline's register file. If it does not match,
+  the asm and the C disagree on this build — refuse to snoop with a
+  clear error instead of installing patches that will corrupt memory
+  three minutes later. The one place where a mistake fails silent today.
+- **Safe self-update** — once the old daemon has exited there is nothing
+  left running to roll back a broken replacement, so the leverage is in
+  never committing one: `deploy --safe` uploads to `C:wasabid.new`, the
+  running daemon executes it with `--selftest` (open bsdsocket, bind a
+  scratch port, exit 0), and only a pass renames it into place (keeping
+  `C:wasabid.bak`) and restarts.
+- **Receive timeouts** — `recv_frame()` blocks, so a client that sends
+  half a frame and stalls hangs the daemon for everyone, forever. A
+  `WaitSelect()` with a few-seconds timeout before each blocking read
+  turns that into "the stalled client gets dropped". The full
+  per-client-buffer state machine is only warranted if wasabi ever
+  becomes multi-user.
+- **Capabilities in `WELCOME`** — self-update makes version skew an
+  everyday event, and a new client asking an old daemon for `ps` gets a
+  confusing "unknown command". A capability list appended to the
+  `WELCOME` banner (old clients ignore trailing bytes, so it is
+  compatible both directions) lets the client say "your wasabid predates
+  `ps` — deploy a newer one". `PROTO_VERSION` stays the hard gate for
+  framing changes only.
+
+Deliberately on hold: **challenge-response auth**. HMAC over a server
+nonce would keep the key off the wire, but the session stays plaintext
+anyway — auth without confidentiality, the most code of the five, against
+a threat the trusted-LAN scope already declares out of bounds. The
+current key is accident prevention and says so; that is a choice, not an
+oversight.
+
 `PROTOCOL.md` is the wire format, and the contract between the two halves.
