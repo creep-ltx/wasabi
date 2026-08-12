@@ -103,6 +103,21 @@ out=$(timeout -s INT 1.2 $W debug 2>/dev/null | grep -c "ReadCacheNode")
 if [ "$out" -ge 1 ]; then ok "debug streams lines"
 else no "debug streams lines"; fi
 
+# --- combined view and --log ---
+STREAMLOG=$ROOT/../wasabi-streamlog.$$
+out=$(timeout -s INT 1.6 $W debug --with-snoop --log "$STREAMLOG" 2>/dev/null)
+d=$(printf '%s\n' "$out" | grep -c "^debug | ")
+s=$(printf '%s\n' "$out" | grep -c "^snoop | ")
+if [ "$d" -ge 1 ] && [ "$s" -ge 1 ]; then ok "combined view carries both streams"
+else no "combined view carries both streams (debug $d, snoop $s)"; fi
+
+n=$(grep -cE \
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} (debug|snoop) \| ' \
+    "$STREAMLOG" 2>/dev/null)
+if [ "${n:-0}" -ge 2 ]; then ok "--log stamps every line"
+else no "--log stamps every line (got ${n:-0})"; fi
+rm -f "$STREAMLOG"
+
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")
 if [ "$out" -ge 1 ]; then ok "a missing file reports an error"

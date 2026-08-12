@@ -1,7 +1,9 @@
 # Wasabi wire protocol
 
 Version 1. One TCP connection carries one command. Streams (`DEBUG`,
-`SNOOP`) hold the connection open until the client hangs up.
+`SNOOP`) hold the connection open until the client hangs up; one
+connection may subscribe to both at once — every `LOG` frame names its
+stream, and each stream numbers its frames independently.
 
 All integers are **big-endian** — the m68k's natural order, so the Amiga
 side needs no byte swapping anywhere.

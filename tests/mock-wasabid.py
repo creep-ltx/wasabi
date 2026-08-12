@@ -12,6 +12,7 @@ this file is what the client was tested with.
 import argparse
 import os
 import re
+import select
 import socket
 import socketserver
 import struct
@@ -78,7 +79,8 @@ class Handler(socketserver.BaseRequestHandler):
     # --- framing ---
     def setup(self):
         self.buf = b""
-        self.seq = 0
+        self.seqs = {0: 0, 1: 0}     # per stream, like the C daemon
+        self.subs = {}               # stream subscriptions on this conn
         self.sendlock = threading.Lock()
 
     def send(self, tag, payload=b""):
@@ -129,7 +131,15 @@ class Handler(socketserver.BaseRequestHandler):
                 return self.err("bad key")
             self.send(WELCOME, struct.pack(">H", VERSION) +
                       pack_str("mock-wasabid on %s" % os.uname().nodename))
+            # Once a stream is subscribed, alternate between watching for
+            # further frames (a second subscription - debug and snoop may
+            # share one connection, as on the C daemon) and emitting.
             while True:
+                if self.subs and not self.buf:
+                    r, _, _ = select.select([self.request], [], [], 0.35)
+                    if not r:
+                        self.emit_streams()
+                        continue
                 tag, payload = self.recv()
                 self.dispatch(tag, payload)
         except (EOFError, ConnectionResetError, BrokenPipeError):
@@ -256,37 +266,42 @@ class Handler(socketserver.BaseRequestHandler):
         except (OSError, ValueError) as exc:
             self.err(str(exc), 205)
 
+    SNOOP_SAMPLES = [  # shaped like the C daemon's snoop_format() output
+        ("cfile", 'Open("S:Startup-Sequence", read) = ok'),
+        ("Shell", 'Lock("DH0:Tools", read) = ok'),
+        ("cfile", 'LoadSeg("C:List") = ok'),
+        ("wasabid", 'GetVar("wasabi.key") = fail (err 232)'),
+    ]
+
     def do_stream(self, tag, payload):
-        """Emit synthetic traffic so the client's stream path is testable."""
+        """Register a subscription; the handler loop does the emitting."""
         if tag == SNOOP:
-            _flags = struct.unpack_from(">I", payload, 0)
             pattern, _ = unpack_str(payload, 4)
-            rx = amiga_pattern(pattern) if pattern else None
-            samples = [  # shaped like the C daemon's snoop_format() output
-                ("cfile", 'Open("S:Startup-Sequence", read) = ok'),
-                ("Shell", 'Lock("DH0:Tools", read) = ok'),
-                ("cfile", 'LoadSeg("C:List") = ok'),
-                ("wasabid", 'GetVar("wasabi.key") = fail (err 232)'),
-            ]
-            i = 0
-            while True:
-                task, line = samples[i % len(samples)]
-                i += 1
-                if rx and not rx.match(task):
-                    time.sleep(0.2)
+            self.subs[1] = {"rx": amiga_pattern(pattern) if pattern else None,
+                            "i": 0}
+        else:
+            self.subs[0] = {"i": 0}
+
+    def emit_streams(self):
+        """One synthetic line per subscribed stream per idle tick."""
+        if 0 in self.subs:
+            st = self.subs[0]
+            st["i"] += 1
+            self.emit("exfat: ReadCacheNode(0x08cc3140, %d)\n" % st["i"])
+        if 1 in self.subs:
+            st = self.subs[1]
+            for _ in range(len(self.SNOOP_SAMPLES)):
+                task, line = self.SNOOP_SAMPLES[st["i"] % len(self.SNOOP_SAMPLES)]
+                st["i"] += 1
+                if st["rx"] and not st["rx"].match(task):
                     continue
                 self.emit("%-20s %s\n" % (task, line), stream=1)
-                time.sleep(0.4)
-        else:
-            i = 0
-            while True:
-                i += 1
-                self.emit("exfat: ReadCacheNode(0x08cc3140, %d)\n" % i)
-                time.sleep(0.4)
+                break
 
     def emit(self, text, stream=0):
-        self.seq += 1
-        self.send(LOG, struct.pack(">II", stream, self.seq) + pack_str(text))
+        self.seqs[stream] += 1
+        self.send(LOG,
+                  struct.pack(">II", stream, self.seqs[stream]) + pack_str(text))
 
 
 class Server(socketserver.ThreadingTCPServer):

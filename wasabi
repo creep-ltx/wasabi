@@ -266,31 +266,78 @@ def cmd_deploy(conn, args):
 
 
 def cmd_stream(conn, args):
-    if args.__dict__.get("task") is not None:
-        conn.send(SNOOP, struct.pack(">I", 0) + pack_str(args.task or ""))
-        label = "snoop"
-    else:
+    """Follow the daemon's debug and/or snoop stream.
+
+    Both subscriptions ride one connection - the daemon tags every LOG
+    frame with its stream and numbers each stream independently. In the
+    combined view every line is prefixed with its stream name; --log
+    appends each line to a file stamped with the client's receive time,
+    so logs from parallel terminals line up.
+    """
+    want_debug = args.mode == "debug"
+    want_snoop = args.mode == "snoop" or getattr(args, "with_snoop", False)
+    combined = want_debug and want_snoop
+    if want_debug:
         conn.send(DEBUG, struct.pack(">I", 0))
-        label = "debug"
+    if want_snoop:
+        conn.send(SNOOP, struct.pack(">I", 0) + pack_str(args.task or ""))
+    label = "+".join(n for n, w in (("debug", want_debug),
+                                    ("snoop", want_snoop)) if w)
+
+    logf = open(args.log, "a") if args.log else None
+    names = {0: "debug", 1: "snoop"}
+    last_seq = {}
+    partial = {}
+
+    def stamp():
+        now = time.time()
+        return (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) +
+                ".%03d" % int(now % 1 * 1000))
+
+    def emit(stream, text):
+        # The debug stream is raw bytes and can break mid-line, so both
+        # the prefixed view and the log assemble whole lines per stream;
+        # the plain single-stream view passes bytes straight through.
+        name = names.get(stream, "stream%d" % stream)
+        if not combined:
+            sys.stdout.write(text)
+        buf = partial.get(stream, "") + text
+        lines = buf.split("\n")
+        partial[stream] = lines.pop()
+        for ln in lines:
+            if combined:
+                sys.stdout.write("%s | %s\n" % (name, ln))
+            if logf:
+                logf.write("%s %s | %s\n" % (stamp(), name, ln))
+        sys.stdout.flush()
+        if logf:
+            logf.flush()
+
     print("[%s stream open - Ctrl-C to stop]" % label, file=sys.stderr)
     conn.sock.settimeout(None)
-    last_seq = None
     try:
         while True:
             tag, payload = conn.recv()
             if tag == LOG:
                 stream, seq = struct.unpack_from(">II", payload, 0)
                 text, _ = unpack_str(payload, 8)
-                if last_seq is not None and seq != last_seq + 1:
-                    print("[%d frames lost]" % (seq - last_seq - 1),
+                prev = last_seq.get(stream)
+                if prev is not None and seq != prev + 1:
+                    print("[%s: %d frame(s) lost]"
+                          % (names.get(stream, stream), seq - prev - 1),
                           file=sys.stderr)
-                last_seq = seq
-                sys.stdout.write(text)
-                sys.stdout.flush()
+                last_seq[stream] = seq
+                emit(stream, text)
             elif tag == ERR:
                 raise WasabiError(conn._errtext(payload))
     except KeyboardInterrupt:
+        for stream in sorted(partial):
+            if partial[stream]:
+                emit(stream, "\n")       # complete the dangling line
         print("\n[%s stream closed]" % label, file=sys.stderr)
+    finally:
+        if logf:
+            logf.close()
     return 0
 
 
@@ -554,12 +601,20 @@ def main(argv=None):
     s.add_argument("--cold", action="store_true")
     s.set_defaults(fn=cmd_deploy)
 
-    sub.add_parser("debug", help="live KPrintF stream").set_defaults(
-        fn=cmd_stream)
+    s = sub.add_parser("debug", help="live KPrintF stream")
+    s.add_argument("--with-snoop", action="store_true",
+                   help="merge the DOS call trace into the same view")
+    s.add_argument("--task", default="",
+                   help="task filter for --with-snoop")
+    s.add_argument("--log", metavar="FILE",
+                   help="append timestamped lines to FILE")
+    s.set_defaults(fn=cmd_stream, mode="debug")
 
     s = sub.add_parser("snoop", help="live DOS call trace")
     s.add_argument("--task", default="", help="AmigaDOS pattern to filter on")
-    s.set_defaults(fn=cmd_stream)
+    s.add_argument("--log", metavar="FILE",
+                   help="append timestamped lines to FILE")
+    s.set_defaults(fn=cmd_stream, mode="snoop")
 
     s = sub.add_parser("reboot", help="reboot the Amiga")
     s.add_argument("--cold", action="store_true")

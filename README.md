@@ -44,7 +44,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 16 tests, no Amiga required.
+host mock that speaks the same protocol — 18 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -101,8 +101,8 @@ wasabi run "CMD"             execute, stream output, return its exit code
 wasabi deploy L R [--run C] [--reboot]
 wasabi del PATH / mkdir PATH
 wasabi reboot [--cold]
-wasabi debug                 live KPrintF stream
-wasabi snoop [--task PAT]    live DOS call trace
+wasabi debug [--with-snoop] [--log F]   live KPrintF stream
+wasabi snoop [--task PAT] [--log F]     live DOS call trace
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
@@ -238,6 +238,17 @@ holds 512 entries (~107 KB) because a PiStorm-fast CPU can fire more than
 150 patched calls between two 50 ms drains — the first cut held 64 and
 `List SYS:C` alone overflowed it. A burst that still overflows is dropped
 and counted, never silently lost.
+
+For the full picture, `wasabi debug --with-snoop` merges both streams
+into one terminal over a single connection — the daemon tags every `LOG`
+frame with its stream, so each line arrives prefixed `debug |` or
+`snoop |`. And `--log FILE` on either command appends every line to a
+file stamped with the client's receive time to the millisecond, which is
+what lets output captured in parallel terminals be lined up afterwards:
+
+```
+2026-08-12 08:11:53.257 snoop | c:wasabid  Open("T:wasabi-run-2", readwrite) = ok
+```
 
 ## What's next
 
