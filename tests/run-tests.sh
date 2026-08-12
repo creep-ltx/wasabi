@@ -204,11 +204,20 @@ if [ -s "$SHOT" ] && head -c8 "$SHOT" | grep -q PNG; then
 else
     no "grab writes a real PNG"
 fi
+# The mock's 8x4 screen is 2:1 - the shape of a native non-interlaced
+# grab - so the client doubles its rows into 4:3-ish proportions.
 out=$(python3 -c "
 import struct,sys
 d=open('$SHOT','rb').read()
 print('%dx%d' % struct.unpack('>II', d[16:24]))" 2>/dev/null)
-check "and its dimensions match what was sent" "8x4" "$out"
+check "a squished native screen gets its rows doubled" "8x8" "$out"
+
+$W grab --raw "$SHOT" >/dev/null 2>&1
+out=$(python3 -c "
+import struct,sys
+d=open('$SHOT','rb').read()
+print('%dx%d' % struct.unpack('>II', d[16:24]))" 2>/dev/null)
+check "--raw keeps the pixels exactly as sent" "8x4" "$out"
 rm -f "$SHOT"
 
 out=$($W screen 2>/dev/null | grep -c "CygnusEd Professional V4.2")

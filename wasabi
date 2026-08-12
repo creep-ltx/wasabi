@@ -720,15 +720,36 @@ def cmd_grab(conn, args):
     if len(data) < 12:
         raise WasabiError("the daemon sent no image data")
     w, h, bpp = struct.unpack_from(">III", data, 0)
+    if bpp != 3:
+        raise WasabiError("the daemon sent %d bytes per pixel; this client "
+                          "understands 3 (RGB)" % bpp)
     pixels = data[12:]
     want = w * h * bpp
     if len(pixels) != want:
         raise WasabiError("short grab: %d of %d bytes for %dx%d"
                           % (len(pixels), want, w, h))
     grabbed = time.time() - t0
-    size = write_png(args.file, w, h, pixels)
-    print("%dx%d -> %s (%d KB, %.1f MB raw in %.1f s)"
-          % (w, h, args.file, size // 1024, want / 1e6, grabbed),
+
+    # A native non-interlaced screen has pixels twice as wide as they
+    # are tall - 640x256 fills a whole 4:3 monitor - so a straight dump
+    # looks squished to half height. Double the rows until the shape is
+    # plausible again: 640x256 becomes 640x512, superhires 1280x256
+    # doubles twice. Safe by construction - no square-pixel mode is
+    # ever 2:1 or wider, so an RTG screen is never touched. --raw keeps
+    # the pixels exactly as the daemon read them.
+    out_h = h
+    if not args.raw:
+        rowbytes = w * 3
+        while out_h and w >= 2 * out_h:
+            pixels = b"".join(
+                pixels[y * rowbytes:(y + 1) * rowbytes] * 2
+                for y in range(out_h))
+            out_h *= 2
+
+    size = write_png(args.file, w, out_h, pixels)
+    scaled = " (rows doubled to %dx%d)" % (w, out_h) if out_h != h else ""
+    print("%dx%d%s -> %s (%d KB, %.1f MB raw in %.1f s)"
+          % (w, h, scaled, args.file, size // 1024, want / 1e6, grabbed),
           file=sys.stderr)
 
 
@@ -1185,6 +1206,9 @@ def main(argv=None):
     s.add_argument("file", nargs="?", default="screen.png")
     s.add_argument("--screen", metavar="NAME",
                    help="public screen to grab (default: the front one)")
+    s.add_argument("--raw", action="store_true",
+                   help="no aspect correction - keep the pixels exactly "
+                        "as read (a 640x256 screen stays 640x256)")
     s.set_defaults(fn=cmd_grab)
 
     s = sub.add_parser("screen", help="list screens; flip between them")

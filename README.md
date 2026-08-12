@@ -627,6 +627,26 @@ planar-to-chunky conversion on the CPU, and the CPU is this machine's
 slow part — but a PAL screen is a fifth the size, so it still lands in
 about two seconds.
 
+**Native screens come out in 4:3, not squished.** A non-interlaced
+640x256 fills a whole monitor, so its pixels are twice as wide as they
+are tall — dumped one-to-one it looks squashed to half height. The
+client doubles the rows until the shape is plausible again (640x256
+becomes 640x512; superhires 1280x256 doubles twice to 1280x1024),
+which is safe by construction: no square-pixel mode is 2:1 or wider,
+so an RTG screen is never touched. The wire always carries the pixels
+exactly as read — the doubling happens where the PNG is made — and
+`--raw` turns it off:
+
+```
+$ wasabi grab shot.png
+640x256 (rows doubled to 640x512) -> shot.png (14 KB, 0.5 MB raw in 2.0 s)
+```
+
+(Lores-interlace — 320x512, pixels twice as *tall* as wide — would want
+the columns doubled instead. The client leaves it alone: it cannot see
+the screen's mode, only its shape, and a portrait RTG screen deserves
+not to be mangled for resembling one.)
+
 ```
 $ wasabi screen
 ADDR       SIZE        DEPTH  TITLE
