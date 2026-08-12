@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b12"
+#define VERSION_STR "wasabid 0.1b13"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b12 (12.8.2026)";
+    "$VER: wasabid 0.1b13 (12.8.2026)";
 
 #define PROTO_VERSION   1
 #define DEF_PORT        1234
@@ -596,6 +596,18 @@ volatile UWORD wasabi_snoop_users;   /* callers currently inside a stub */
 void snoop_record(struct SnoopFn *d, ULONG *regs, LONG res);
 
 /*
+ * HERE BE DRAGONS. This trampoline and the RF_* indices in the
+ * descriptors above are one definition split in two: the movem below
+ * decides what the 60-byte register file looks like, and the indices
+ * decide where an argument is read from inside it. No compiler checks
+ * that they agree. Get it wrong and snoop_copystr() dereferences
+ * whatever was in the wrong register, in another task's context, on a
+ * machine with no memory protection.
+ *
+ * Change nothing here without running snoop_selftest() on real
+ * hardware - it exists precisely to catch this, and `wasabi snoop`
+ * runs it before every session.
+ *
  * The common trampoline. Entered from a per-function stub that has just
  * pushed its descriptor, so the stack is [desc][caller RA] and every
  * argument register still holds the caller's value.
@@ -929,17 +941,114 @@ static LONG snoop_format(struct SnoopEv *ev, char *out)
     return n;
 }
 
+/*
+ * Prove the trampoline before trusting it.
+ *
+ * The asm hands snoop_record() a 60-byte register file; the RF_* indices
+ * in each descriptor say where in it an argument lives. Those are two
+ * definitions that must agree exactly, and nothing at compile time
+ * checks that they do. The failure mode is not a wrong log line - it is
+ * a wild pointer copied out of the wrong register and dereferenced by
+ * snoop_copystr(), on a machine with no MMU, in the context of whatever
+ * task happened to call Lock().
+ *
+ * So before any of that can happen: un-exclude our own calls, Lock() a
+ * bogus path, and insist the captured event carries back that exact
+ * string (d1), the mode we passed (d2) and the result the caller
+ * actually got (d0). A mismatch means the asm and the C disagree on
+ * THIS build, and snoop refuses to run rather than corrupt memory three
+ * minutes later somewhere that looks nothing like the cause.
+ *
+ * The path is relative - no device lookup, so a missing object cannot
+ * raise a "please insert volume" requester - and pr_WindowPtr is -1 for
+ * the duration in case anything else would try.
+ */
+static BOOL snoop_selftest(char *why, LONG whysz)
+{
+    static LONG serial;
+    char path[64];
+    struct Task *self = FindTask(NULL);
+    struct Process *me = (struct Process *)self;
+    BOOL isproc = self->tc_Node.ln_Type == NT_PROCESS;
+    APTR oldwin = NULL;
+    BPTR lock;
+    ULONG i;
+    BOOL found = FALSE;
+
+    /* Unique per attempt, so a stale ring entry can never be mistaken
+     * for this run's event. */
+    sprintf(path, "wasabi-selftest-%ld-%lx", (long)++serial,
+            (unsigned long)self);
+
+    g_snev_head = g_snev_tail = g_snev_lost = 0;
+    g_snoop_self = NULL;             /* record our own call, just this once */
+    wasabi_snoop_on = 1;
+
+    if (isproc) {
+        oldwin = me->pr_WindowPtr;
+        me->pr_WindowPtr = (APTR)-1;
+    }
+    lock = Lock(path, ACCESS_READ);  /* must fail; nothing to unlock */
+    if (isproc)
+        me->pr_WindowPtr = oldwin;
+
+    wasabi_snoop_on = 0;
+    g_snoop_self = self;
+
+    if (lock)                        /* absurd, but do not leak it */
+        UnLock(lock);
+
+    for (i = g_snev_tail; i != g_snev_head; i = (i + 1) & (SN_EVMAX - 1)) {
+        struct SnoopEv *ev = &g_snev[i];
+        if (ev->fn != &snoop_desc_Lock)
+            continue;                /* another task's call, in the window */
+        if (strcmp(ev->s1, path) != 0) {
+            snoop_copystr(why, whysz, "the path argument came back wrong");
+            goto done;
+        }
+        if (ev->num != ACCESS_READ) {
+            snoop_copystr(why, whysz, "the mode argument came back wrong");
+            goto done;
+        }
+        if (ev->res != (LONG)lock) {
+            snoop_copystr(why, whysz, "the result came back wrong");
+            goto done;
+        }
+        found = TRUE;
+        snoop_copystr(why, whysz, "ok");
+        break;
+    }
+    if (!found)
+        snoop_copystr(why, whysz, g_snev_lost ? "the ring overflowed"
+                                              : "the patch captured nothing");
+done:
+    g_snev_head = g_snev_tail = g_snev_lost = 0;
+    return found;
+}
+
 static BOOL snoop_start(int cl, const char *pat)
 {
+    char why[64];
+
     if (g_snoop_client >= 0)
         return send_err(g_clients[cl].fd, "the snoop stream is already in use");
 
     snoop_copystr(g_snoop_pat, sizeof(g_snoop_pat), pat);
     g_snev_head = g_snev_tail = g_snev_lost = 0;
-    g_snoop_client = cl;
     g_snoop_seq = 0;
     g_snoop_self = FindTask(NULL);
     snoop_install();
+
+    /* Patches are live from here; nothing records until the flag is set. */
+    if (!snoop_selftest(why, sizeof(why))) {
+        char msg[200];
+        snoop_uninstall();
+        sprintf(msg, "snoop self-test failed (%.60s) - the patch trampoline "
+                     "and this build disagree, so snoop will not run", why);
+        return send_err(g_clients[cl].fd, msg);
+    }
+
+    g_snoop_client = cl;
     wasabi_snoop_on = 1;
     return TRUE;                     /* LOG frames follow from the pump */
 }

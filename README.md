@@ -231,6 +231,17 @@ overflowing. Unlike SnoopDOS, the log line is emitted **after** the
 original returns, so every line carries the true result and `IoErr()`
 rather than "pending".
 
+**Every session self-tests before it patches anything.** The asm hands
+the C a 60-byte register file and the descriptors say where in it each
+argument lives — two definitions that must agree exactly, with no
+compiler checking them. So `snoop` first `Lock()`s a bogus path of its
+own and insists the captured event carries back that exact string, the
+mode it passed and the result it got. If they disagree, snoop refuses to
+run and says so, rather than dereference whatever was in the wrong
+register — in another task's context, on a machine with no memory
+protection. Verified by deliberately wiring one descriptor to the wrong
+register: the daemon refused, stayed up, and the patches came back out.
+
 Teardown follows the same chain rule as the debug patch — a stub whose
 vector was chained over stays installed and idle rather than corrupt the
 chain — and the exit path waits briefly for any task still inside a stub
@@ -300,12 +311,6 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 In priority order — each one shrinks a real "machine goes down or
 corrupts silently" risk, none needs a protocol version bump:
 
-- **Snoop self-test on start** — before any patch goes live, `Lock()` a
-  unique bogus path and assert the captured event carries exactly that
-  string through the trampoline's register file. If it does not match,
-  the asm and the C disagree on this build — refuse to snoop with a
-  clear error instead of installing patches that will corrupt memory
-  three minutes later. The one place where a mistake fails silent today.
 - **Safe self-update** — once the old daemon has exited there is nothing
   left running to roll back a broken replacement, so the leverage is in
   never committing one: `deploy --safe` uploads to `C:wasabid.new`, the

@@ -206,6 +206,13 @@ Snoop output rides `LOG` frames with `stream` set to **1**, distinct from
 the debug stream's **0**, so a client subscribed to both can keep them
 apart. Each line reads `<task> <Call>(<args>) = <result>`.
 
+`SNOOP` self-tests before it installs anything: the daemon `Lock()`s a
+bogus path of its own and checks the captured event carries back that
+exact string, mode and result through the trampoline's register file. A
+mismatch means the asm and that build disagree, and the daemon answers
+`ERR` instead of snooping — see the teardown note below for why a patch
+that misreads its arguments is worse than no patch at all.
+
 Unlike the `RawPutChar` patch these run in ordinary task context, so they
 may format text — but the trampoline still runs in the *caller's* context
 and must never call a function it has itself patched, on pain of unbounded
