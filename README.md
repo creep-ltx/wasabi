@@ -112,7 +112,7 @@ wasabi debug [--with-snoop] [--log F]   live KPrintF stream
 wasabi snoop [--task PAT] [--log F]     live DOS call trace
 wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter
 wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
-wasabi speedtest [SIZE]      latency, then throughput both ways (max 256MB)
+wasabi speedtest [SIZE] [--target PATH]  latency and throughput both ways
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
@@ -566,6 +566,35 @@ the same test a PiStorm does, and the figure isolates the network path
 instead of blending in a filesystem. (A future `--via PATH` mode could
 measure through a real volume; it must first check `info`'s free-memory
 numbers and refuse a size that does not fit with a healthy margin.)
+
+`--target PATH` writes through a real volume instead of discarding, so
+the same command measures the filesystem rather than the network. It
+asks the daemon for the volume's free space first and refuses rather
+than filling it — the obvious mistake, `speedtest 256MB --target RAM:`
+on a machine with 66 MB, would otherwise consume memory until something
+important failed to allocate:
+
+```
+$ wasabi speedtest 100MB --target Dump:
+wasabi: cannot speedtest to Dump:: needs 101 MB plus 8 MB spare, and
+only 63 MB is free
+```
+
+Measured on the A1200, 50 MB each way, three runs:
+
+| Target | up MB/s | down MB/s |
+|---|---|---|
+| wire only (discard) | 97.9 | 77.1 |
+| `RAM:` | 42 | 42–55 |
+| `Dump:` (PFS3) | 13.3 | 20.0 |
+| `Crap:` (SFS\2) | 12.6–13.5 | 20.0 |
+
+PFS3 and SFS\2 are indistinguishable here. `RAM:` is about three times
+faster than either — but still less than half the wire, so more than
+half of a RAM disk's theoretical speed goes on `ram-handler` and the DOS
+write path rather than on memory. The read figures line up with the
+4.5 GiB download measured separately at 20.8 MB/s, across a hundredfold
+change in file size.
 
 On this network the ceiling turns out to be the wire itself — a 256 MB
 test runs the A1200 at gigabit line rate both ways. The stack is

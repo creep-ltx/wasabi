@@ -31,10 +31,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b20"
+#define VERSION_STR "wasabid 0.1b21"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b20 (12.8.2026)";
+    "$VER: wasabid 0.1b21 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -54,7 +54,7 @@ static const char *verstag __attribute__((used)) =
  * PROTO_VERSION stays the hard gate, and only for framing changes.
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
-                 "reboot,restart,ps,kill,speed,quit,install"
+                 "reboot,restart,ps,kill,speed,speedfile,quit,install"
 #define DEF_PORT        1234
 #define MAX_PAYLOAD     65536
 #define MAX_CLIENTS     8
@@ -1839,10 +1839,80 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
  * the same 50 MB test a PiStorm does, and the number isolates the
  * network path instead of blending in a filesystem.
  */
-static BOOL cmd_speed(int fd, ULONG flags, ULONG size)
+/* Join a target drawer and a name the way AmigaDOS wants it. */
+static void speed_path(char *out, const char *target, LONG outsz)
+{
+    LONG n = (LONG)strlen(target);
+    if (n > outsz - 20) n = outsz - 20;
+    memcpy(out, target, n);
+    if (n && out[n - 1] != ':' && out[n - 1] != '/')
+        out[n++] = '/';
+    strcpy(out + n, "wasabi-speed.tmp");
+}
+
+/*
+ * Will `size` bytes fit on the volume `target` lives on, with room to
+ * spare? Asked before a byte is accepted, because the obvious mistake -
+ * a 256 MB test against RAM: on a machine with 66 MB - would otherwise
+ * fill memory until something important fails to allocate.
+ *
+ * The margin is deliberate: a filesystem that is completely full is a
+ * different kind of broken from one that is merely busy, and the test
+ * is not worth leaving a machine in that state.
+ */
+#define SPEED_MARGIN_MB 8
+
+static BOOL speed_room(const char *target, ULONG size, char *why, LONG whysz)
+{
+    struct InfoData id;
+    BPTR lock;
+    ULONG total, freemb, need = (size >> 20) + 1;
+
+    lock = Lock((STRPTR)target, ACCESS_READ);
+    if (!lock) {
+        snoop_copystr(why, whysz, "no such drawer or volume");
+        return FALSE;
+    }
+    if (!Info(lock, &id)) {
+        UnLock(lock);
+        snoop_copystr(why, whysz, "cannot read the volume's free space");
+        return FALSE;
+    }
+    UnLock(lock);
+    vol_megabytes(&id, &total, &freemb);
+    if (id.id_DiskState == ID_WRITE_PROTECTED) {
+        snoop_copystr(why, whysz, "that volume is write-protected");
+        return FALSE;
+    }
+    if (freemb < need + SPEED_MARGIN_MB) {
+        sprintf(why, "needs %lu MB plus %d MB spare, and only %lu MB is free",
+                (unsigned long)need, SPEED_MARGIN_MB, (unsigned long)freemb);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* Swallow the upload a refused sink is already receiving, or its DATA
+ * frames get read back as commands. Same rule as cmd_put's guard. */
+static BOOL speed_drain(int fd, UBYTE *buf)
+{
+    for (;;) {
+        UBYTE tag;
+        LONG n;
+        if (!recv_frame(fd, &tag, buf, &n))
+            return FALSE;
+        if (tag == T_END || tag != T_DATA)
+            return TRUE;
+    }
+}
+
+static BOOL cmd_speed(int fd, ULONG flags, ULONG size, const char *target)
 {
     UBYTE *buf;
+    BPTR fh = 0;
+    char path[300];
     LONG i;
+    BOOL tofile = target[0] != '\0';
 
     if (!size || size > (256UL << 20))
         return send_err(fd, "size must be 1 byte to 256 MB");
@@ -1850,40 +1920,85 @@ static BOOL cmd_speed(int fd, ULONG flags, ULONG size)
     if (!buf)
         return send_err(fd, "out of memory");
 
+    if (tofile) {
+        char why[100], msg[200];
+        if (!(flags & 1) && !speed_room(target, size, why, sizeof(why))) {
+            BOOL alive = speed_drain(fd, buf);
+            FreeMem(buf, MAX_PAYLOAD);
+            if (!alive)
+                return FALSE;
+            sprintf(msg, "cannot speedtest to %.40s: %.140s", target, why);
+            return send_err(fd, msg);
+        }
+        speed_path(path, target, sizeof(path));
+        fh = Open(path, (flags & 1) ? MODE_OLDFILE : MODE_NEWFILE);
+        if (!fh) {
+            if (!(flags & 1) && !speed_drain(fd, buf)) {
+                FreeMem(buf, MAX_PAYLOAD);
+                return FALSE;
+            }
+            FreeMem(buf, MAX_PAYLOAD);
+            return send_err(fd, (flags & 1)
+                ? "no test file to read back - run the upload half first"
+                : "cannot create the test file there");
+        }
+    }
+
     if (flags & 1) {                     /* source: Amiga -> client */
         ULONG left = size;
         for (i = 0; i < MAX_PAYLOAD; i++)
             buf[i] = (UBYTE)i;
         while (left) {
             LONG chunk = left > MAX_PAYLOAD ? MAX_PAYLOAD : (LONG)left;
+            if (tofile) {
+                chunk = Read(fh, buf, chunk);
+                if (chunk <= 0)
+                    break;              /* short file; END closes it honestly */
+            }
             if (!send_frame(fd, T_DATA, buf, chunk)) {
-                FreeMem(buf, MAX_PAYLOAD);
+                Close(fh); FreeMem(buf, MAX_PAYLOAD);
                 return FALSE;
             }
             left -= chunk;
+        }
+        if (tofile) {                    /* the read half also tidies up */
+            Close(fh);
+            DeleteFile(path);
         }
         FreeMem(buf, MAX_PAYLOAD);
         return send_frame(fd, T_END, NULL, 0);
     } else {                             /* sink: client -> Amiga */
         ULONG got = 0;
+        BOOL wrote = TRUE;
         for (;;) {
             UBYTE tag;
             LONG n;
             if (!recv_frame(fd, &tag, buf, &n)) {
+                if (fh) { Close(fh); DeleteFile(path); }
                 FreeMem(buf, MAX_PAYLOAD);
                 return FALSE;
             }
             if (tag == T_END)
                 break;
             if (tag != T_DATA) {
+                if (fh) { Close(fh); DeleteFile(path); }
                 FreeMem(buf, MAX_PAYLOAD);
                 return FALSE;
             }
+            if (fh && wrote && Write(fh, buf, n) != n)
+                wrote = FALSE;           /* keep draining, report after */
             got += n;
         }
+        if (fh) Close(fh);
         FreeMem(buf, MAX_PAYLOAD);
-        if (got != size)
+        if (!wrote) {
+            DeleteFile(path);
+            return send_err(fd, "write failed part way - is the volume full?");
+        }
+        if (got != size) {
+            if (fh) DeleteFile(path);
             return send_err(fd, "size mismatch");
+        }
         return send_frame(fd, T_OK, NULL, 0);
     }
 }
@@ -2105,10 +2220,16 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         return cmd_kill(fd, get_be32(p), target);
     }
 
-    case T_SPEED:
+    case T_SPEED: {
+        char target[200];
         if (len < 8)
             return send_err(fd, "bad SPEED header");
-        return cmd_speed(fd, get_be32(p), get_be32(p + 4));
+        if (len == 8)
+            target[0] = '\0';            /* older client: storage-free mode */
+        else if (!get_str(p, len, 8, target, sizeof(target)))
+            return send_err(fd, "bad SPEED target");
+        return cmd_speed(fd, get_be32(p), get_be32(p + 4), target);
+    }
 
     case T_REBOOT:
         return cmd_reboot(fd, len >= 4 ? get_be32(p) : 0);

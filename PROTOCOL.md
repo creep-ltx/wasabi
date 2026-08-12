@@ -28,9 +28,11 @@ The winner is cached in `~/.cache/wasabi/last-host` so the next command
 skips the probe, falling back to a fresh probe if the cached address
 stops answering. An explicit `--host` always wins and never probes.
 
-`wasabid` answers probes unconditionally — an unauthenticated reply
-reveals only what a port scan would, and needing the key to *find* the
-machine would defeat the point. The key still gates every TCP session.
+`wasabid` answers probes from the LAN without asking for the key — an
+unauthenticated reply reveals only what a port scan would, and needing
+the key to *find* the machine would defeat the point. The key still
+gates every TCP session. It stays silent to any address it would refuse
+a connection from; see **Who may connect** below.
 
 There is deliberately no periodic beacon: a machine that shouts every 30
 seconds is noise on a network that may be shared, and probe/response gets
@@ -98,7 +100,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x42 | RESTART  | C→S | — |
 | 0x43 | PS       | C→S | — |
 | 0x44 | KILL     | C→S | `u32 flags`, `str target` |
-| 0x45 | SPEED    | C→S | `u32 flags`, `u32 size` |
+| 0x45 | SPEED    | C→S | `u32 flags`, `u32 size`, `str target` |
 | 0x46 | QUIT     | C→S | — |
 | 0x47 | INSTALL  | C→S | `str sidecar` |
 
@@ -121,7 +123,7 @@ speak v1 to a v2 client.
 
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
-`speed,quit,install` for a current build. Self-update makes version skew
+`speed,speedfile,quit,install` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -364,8 +366,18 @@ frames totalling exactly `size` bytes, then `END`; the server counts and
 Set: the server sends `DATA` frames totalling `size` bytes from a static
 pattern buffer, then `END`.
 
-Nothing touches RAM: or any volume in either direction — the test cannot
-fill a machine up, and the number isolates the network path. `size` must
+With `target` empty nothing touches RAM: or any volume in either
+direction — the test cannot fill a machine up, and the number isolates
+the network path.
+
+A non-empty `target` writes through that volume instead, so the same
+command measures the filesystem. The daemon `Info()`s the volume first
+and refuses unless the size plus 8 MB of margin fits, since a full disk
+is a worse outcome than a missing measurement; it also refuses a
+write-protected volume. The sink half writes `wasabi-speed.tmp` there,
+the source half reads it back and deletes it. Advertised as `speedfile`
+in `caps`, because a daemon that predates it would silently ignore the
+target and report network speed as though it were disk speed. `size` must
 be 1 byte to 256 MB; anything else is an `ERR`. Timing is entirely the
 client's business.
 

@@ -591,8 +591,17 @@ def cmd_speedtest(conn, args):
               "  (%d pings)"
               % (avg, min(times), max(times), jitter, len(times)))
 
+    target = args.target or ""
+    if target:
+        if conn.caps and "speedfile" not in conn.caps:
+            raise WasabiError(
+                "this daemon (%s) cannot speedtest to a volume - update it "
+                "with 'wasabi update wasabid'" % conn.banner)
+        print("target %s (through the filesystem, not just the wire)" % target,
+              file=sys.stderr)
+
     t0 = time.time()
-    conn.send(SPEED, struct.pack(">II", 0, size))
+    conn.send(SPEED, struct.pack(">II", 0, size) + pack_str(target))
     sent = 0
     while sent < size:
         chunk = min(MAX_PAYLOAD, size - sent)
@@ -604,7 +613,7 @@ def cmd_speedtest(conn, args):
     print("up    %6.2f MB/s   %.1f MB in %.2f s" % (mb / up, mb, up))
 
     t0 = time.time()
-    conn.send(SPEED, struct.pack(">II", 1, size))
+    conn.send(SPEED, struct.pack(">II", 1, size) + pack_str(target))
     got = [0]
     drain_to_end(conn, lambda b: got.__setitem__(0, got[0] + len(b)))
     down = time.time() - t0
@@ -985,6 +994,9 @@ def main(argv=None):
                    help="payload size, e.g. 5MB (default 10MB)")
     s.add_argument("--pings", type=int, default=200, metavar="N",
                    help="round trips in the latency phase (0 skips it)")
+    s.add_argument("--target", metavar="PATH",
+                   help="write through a real volume (e.g. Dump:) instead of "
+                        "discarding - measures the filesystem, not the wire")
     s.set_defaults(fn=cmd_speedtest)
 
     s = sub.add_parser("ps", help="list tasks and processes")
