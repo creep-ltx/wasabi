@@ -47,7 +47,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 48 tests, no Amiga required.
+host mock that speaks the same protocol — 50 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -113,7 +113,8 @@ wasabi snoop [--task PAT] [--log F]     live DOS call trace
 wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter
 wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
 wasabi speedtest [SIZE] [--target PATH]  latency and throughput both ways
-wasabi screen [FILE]         grab the screen as a PNG
+wasabi screen [FILE]         grab the front screen as a PNG
+wasabi screens [--cycle]     list screens; flip between them
 ```
 
 `--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
@@ -564,12 +565,46 @@ reads its framebuffer and stops; the Linux box, idle and fast, makes the
 PNG. Doing the "wasteful" thing is several times quicker end to end than
 a screen grabber that compresses on the Amiga first.
 
-Pixels come from CyberGraphX's `ReadPixelArray()`, not
-`graphics.library`'s `ReadPixelArray8()` — only the former returns true
-RGB, the latter hands back pen numbers which mean nothing on a 24-bit
-screen. It needs an RTG stack (Picasso96 or CGX) and grabs *public*
-screens; a private screen cannot be locked this way, and a lock is what
-stops the screen closing mid-read.
+**It grabs the frontmost screen, whatever that is**, and picks how to
+read it from the screen's own depth — because no single call covers
+both cases:
+
+| Screen | Method | Measured |
+|---|---|---|
+| deeper than 8 bits | CyberGraphX `ReadPixelArray()`, true RGB | 1280x960 in **0.1 s** |
+| 8 bits or fewer | `ReadPixelArray8()` + `GetRGB32()` palette | 640x256 in **2.0 s** |
+
+CyberGraphX's autodoc says plainly that `ReadPixelArray` "should only be
+used on screens depths > 8 bits", which rules it out for every native
+Amiga screen — AGA stops at 8 bitplanes. So below that the pixels come
+from `graphics.library` as pen numbers and the screen's palette turns
+them into RGB. That path needs no RTG stack at all, so it also covers a
+stock machine with no Picasso96.
+
+The native path is far slower per byte — `ReadPixelArray8()` does a
+planar-to-chunky conversion on the CPU, and the CPU is this machine's
+slow part — but a PAL screen is a fifth the size, so it still lands in
+about two seconds.
+
+```
+$ wasabi screens
+ADDR       SIZE        DEPTH  TITLE
+0x09265ee8 640x256         2  CygnusEd Professional V4.2   <- front
+0x0829b3e0 1280x960       24  Workbench Screen
+
+$ wasabi screens --cycle                 # exactly what Amiga+M does
+$ wasabi screens --to-front "Workbench Screen"
+```
+
+Flipping screens is `ScreenToBack()`/`ScreenToFront()`, not synthesised
+keystrokes into `input.device` — naming a screen beats cycling blindly
+through them, and it keeps wasabi out of the business of injecting input.
+
+One race is worth stating: the front screen is read through
+`LockIBase()`, which makes reading the pointer safe but does not stop
+the screen closing afterwards. Grabbing a screen that is being closed
+during those few milliseconds would read freed memory. A *named* public
+screen is properly locked and has no such window.
 
 The PNG encoder on the client is about fifteen lines around `zlib`,
 which is in the standard library — so this costs no dependency.

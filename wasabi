@@ -30,7 +30,7 @@ PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
-QUIT, INSTALL, SCREEN = 0x46, 0x47, 0x48
+QUIT, INSTALL, SCREEN, SCREENS = 0x46, 0x47, 0x48, 0x49
 
 TAGNAMES = {v: k for k, v in list(globals().items()) if isinstance(v, int)}
 
@@ -670,6 +670,36 @@ def cmd_screen(conn, args):
           file=sys.stderr)
 
 
+def cmd_screens(conn, args):
+    """List the open screens, and optionally reorder them.
+
+    Cycling is ScreenToBack() on the frontmost - exactly what Amiga+M
+    does - so flipping screens from here needs no synthesised keystrokes.
+    """
+    if conn.caps and "screens" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) cannot list screens - update it with "
+            "'wasabi update wasabid'" % conn.banner)
+    flags = 1 if args.cycle else 0
+    conn.send(SCREENS, struct.pack(">I", flags) + pack_str(args.to_front or ""))
+    text = []
+    drain_to_end(conn, text.append)
+    rows = []
+    for line in b"".join(text).decode("latin-1").splitlines():
+        parts = line.split(" ", 4)
+        if len(parts) >= 4:
+            rows.append(parts + [""] * (5 - len(parts)))
+    print("%-10s %-11s %5s  %s" % ("ADDR", "SIZE", "DEPTH", "TITLE"))
+    for i, (addr, w, h, d, title) in enumerate(rows):
+        print("%-10s %-11s %5s  %s%s"
+              % (addr, "%sx%s" % (w, h), d, title,
+                 "   <- front" if i == 0 else ""))
+    if args.cycle:
+        print("cycled - the front screen went to the back", file=sys.stderr)
+    elif args.to_front:
+        print("brought %r to the front" % args.to_front, file=sys.stderr)
+
+
 def cmd_ps(conn, args):
     conn.send(PS)
     text = []
@@ -1052,6 +1082,13 @@ def main(argv=None):
     s.add_argument("--screen", metavar="NAME",
                    help="public screen to grab (default: the front one)")
     s.set_defaults(fn=cmd_screen)
+
+    s = sub.add_parser("screens", help="list screens; flip between them")
+    s.add_argument("--cycle", action="store_true",
+                   help="send the front screen to the back (what Amiga+M does)")
+    s.add_argument("--to-front", metavar="TITLE",
+                   help="bring the screen with this title to the front")
+    s.set_defaults(fn=cmd_screens)
 
     s = sub.add_parser("ps", help="list tasks and processes")
     s.add_argument("pattern", nargs="?", default="",

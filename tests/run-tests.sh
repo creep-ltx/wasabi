@@ -189,6 +189,11 @@ print('%dx%d' % struct.unpack('>II', d[16:24]))" 2>/dev/null)
 check "and its dimensions match what was sent" "8x4" "$out"
 rm -f "$SHOT"
 
+out=$($W screens 2>/dev/null | grep -c "CygnusEd Professional V4.2")
+check "screens lists what is open" "1" "$out"
+out=$($W screens 2>/dev/null | grep -c "<- front")
+check "and marks the front one" "1" "$out"
+
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")
 check "ps lists tasks" "1" "$out"

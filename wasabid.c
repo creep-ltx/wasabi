@@ -20,6 +20,8 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <intuition/screens.h>
+#include <graphics/gfxbase.h>
+#include <proto/graphics.h>
 #include <proto/intuition.h>
 #include <cybergraphx/cybergraphics.h>
 #define __NOLIBBASE__            /* see cmd_screen() */
@@ -37,10 +39,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1b22"
+#define VERSION_STR "wasabid 0.1b24"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1b22 (12.8.2026)";
+    "$VER: wasabid 0.1b24 (12.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -60,7 +62,7 @@ static const char *verstag __attribute__((used)) =
  * PROTO_VERSION stays the hard gate, and only for framing changes.
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
-                 "reboot,restart,ps,kill,speed,speedfile,quit,install,screen"
+                 "reboot,restart,ps,kill,speed,speedfile,quit,install,screen,screens"
 #define DEF_PORT        1234
 #define MAX_PAYLOAD     65536
 #define MAX_CLIENTS     8
@@ -97,6 +99,7 @@ static const char *verstag __attribute__((used)) =
 #define T_QUIT    0x46
 #define T_INSTALL 0x47
 #define T_SCREEN  0x48
+#define T_SCREENS 0x49
 
 struct Library *SocketBase;
 /*
@@ -1869,55 +1872,41 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
  * it. So the Amiga reads pixels and nothing else; the Linux box, which
  * is idle and fast, turns them into a PNG.
  *
- * ReadPixelArray() is CyberGraphX's, not graphics.library's, because
- * only it returns true RGB - ReadPixelArray8() hands back pen numbers,
- * which mean nothing on a 24-bit screen.
+ * Two ways to read those pixels, chosen by the screen's depth, because
+ * neither works everywhere:
+ *
+ *   > 8 bits   CyberGraphX ReadPixelArray(), true RGB straight out.
+ *              Its autodoc says plainly "should only be used on screens
+ *              depths > 8 bits", so it is not an option below that.
+ *
+ *   <= 8 bits  graphics.library ReadPixelArray8() gives pen numbers,
+ *              and GetRGB32() turns the screen's palette into the RGB
+ *              they stand for. Plain OS 3.x - it needs no RTG stack at
+ *              all, so this path also covers a stock machine with no
+ *              Picasso96, and every native PAL/NTSC screen.
  *
  * The stream is a 12-byte header (width, height, bytes per pixel) then
- * the rows, in DATA frames, then END.
+ * the rows, in DATA frames, then END - the same either way, so the
+ * client never learns which path was taken.
  */
-static BOOL cmd_screen(int fd, const char *scrname)
+#define SCREEN_ALIGN(w) (((w) + 15) & ~15)   /* ReadPixelArray8 wants this */
+
+static BOOL screen_send_deep(int fd, struct Screen *sc, ULONG w, ULONG h)
 {
-    struct Screen *sc;
-    UBYTE *buf, hdr[12];
-    LONG rowbytes, band, y;
-    ULONG w, h;
+    UBYTE *buf;
+    LONG rowbytes = (LONG)w * 3, band, y;
     BOOL ok = TRUE;
 
     if (!g_cgfx)
         g_cgfx = OpenLibrary("cybergraphics.library", 40);
     if (!g_cgfx)
-        return send_err(fd, "no cybergraphics.library - screen grabbing "
-                            "needs an RTG stack such as Picasso96 or CGX");
-
-    /* A locked public screen cannot close under us mid-read. Private
-     * screens are not reachable this way, which is a real limitation
-     * and better than a pointer that stops being valid. */
-    sc = LockPubScreen(scrname[0] ? (STRPTR)scrname : NULL);
-    if (!sc)
-        return send_err(fd, scrname[0] ? "no public screen by that name"
-                                       : "cannot lock the default public screen");
-    w = (ULONG)sc->Width;
-    h = (ULONG)sc->Height;
-    rowbytes = (LONG)w * 3;
-    if (!w || !h || rowbytes > MAX_PAYLOAD) {
-        UnlockPubScreen(NULL, sc);
-        return send_err(fd, "that screen is too wide to send a row at a time");
-    }
-    band = MAX_PAYLOAD / rowbytes;       /* whole rows per frame */
+        return send_err(fd, "that screen is deeper than 8 bits but there is "
+                            "no cybergraphics.library to read it with");
+    band = MAX_PAYLOAD / rowbytes;
     if (band < 1) band = 1;
-
     buf = AllocMem(band * rowbytes, MEMF_ANY);
-    if (!buf) {
-        UnlockPubScreen(NULL, sc);
+    if (!buf)
         return send_err(fd, "out of memory for the grab buffer");
-    }
-
-    put_be32(hdr, w);
-    put_be32(hdr + 4, h);
-    put_be32(hdr + 8, 3);                /* bytes per pixel, RECTFMT_RGB */
-    if (!send_frame(fd, T_DATA, hdr, 12))
-        ok = FALSE;
 
     for (y = 0; ok && y < (LONG)h; y += band) {
         LONG n = (y + band > (LONG)h) ? ((LONG)h - y) : band;
@@ -1927,9 +1916,167 @@ static BOOL cmd_screen(int fd, const char *scrname)
         if (!send_frame(fd, T_DATA, buf, n * rowbytes))
             ok = FALSE;
     }
-
     FreeMem(buf, band * rowbytes);
-    UnlockPubScreen(NULL, sc);
+    return ok;
+}
+
+static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
+                               LONG depth)
+{
+    struct RastPort temprp;
+    ULONG pal[256 * 3];
+    UBYTE *pens, *rgb;
+    LONG aligned = SCREEN_ALIGN(w), rowbytes = (LONG)w * 3;
+    LONG band, y, ncol = 1L << depth;
+    BOOL ok = TRUE;
+
+    if (ncol > 256) ncol = 256;
+    band = MAX_PAYLOAD / rowbytes;
+    if (band < 1) band = 1;
+
+    /* ReadPixelArray8 needs a scratch RastPort one row deep, and it must
+     * not have a Layer or it would clip against the real window. */
+    temprp = sc->RastPort;
+    temprp.Layer = NULL;
+    temprp.BitMap = AllocBitMap(aligned, 1, 8, 0, NULL);
+    if (!temprp.BitMap)
+        return send_err(fd, "out of memory for the scratch bitmap");
+
+    pens = AllocMem(aligned * band, MEMF_ANY);
+    rgb  = AllocMem(rowbytes * band, MEMF_ANY);
+    if (!pens || !rgb) {
+        if (pens) FreeMem(pens, aligned * band);
+        if (rgb)  FreeMem(rgb, rowbytes * band);
+        FreeBitMap(temprp.BitMap);
+        return send_err(fd, "out of memory for the grab buffer");
+    }
+
+    /* GetRGB32 hands back 32-bit components; we want the top byte. */
+    GetRGB32(sc->ViewPort.ColorMap, 0, (ULONG)ncol, pal);
+
+    for (y = 0; ok && y < (LONG)h; y += band) {
+        LONG n = (y + band > (LONG)h) ? ((LONG)h - y) : band;
+        LONG row, col;
+        ReadPixelArray8(&sc->RastPort, 0, (ULONG)y, w - 1,
+                        (ULONG)(y + n - 1), pens, &temprp);
+        for (row = 0; row < n; row++) {
+            UBYTE *src = pens + row * aligned;
+            UBYTE *dst = rgb + row * rowbytes;
+            for (col = 0; col < (LONG)w; col++) {
+                LONG pen = src[col];
+                if (pen >= ncol) pen = 0;
+                *dst++ = (UBYTE)(pal[pen * 3]     >> 24);
+                *dst++ = (UBYTE)(pal[pen * 3 + 1] >> 24);
+                *dst++ = (UBYTE)(pal[pen * 3 + 2] >> 24);
+            }
+        }
+        if (!send_frame(fd, T_DATA, rgb, n * rowbytes))
+            ok = FALSE;
+    }
+    FreeMem(pens, aligned * band);
+    FreeMem(rgb, rowbytes * band);
+    FreeBitMap(temprp.BitMap);
+    return ok;
+}
+
+/*
+ * List the open screens, front first, and optionally reorder them.
+ *
+ * Cycling is ScreenToBack() on the frontmost, which is precisely what
+ * Amiga+M does - so there is no need to synthesise keystrokes into
+ * input.device to flip screens from another machine, and naming one
+ * beats flipping blindly through them.
+ *
+ * The whole walk runs under LockIBase() because the screen list is
+ * Intuition's own and may change under a reader.
+ */
+static BOOL cmd_screens(int fd, ULONG flags, const char *want)
+{
+    struct Screen *sc, *bring = NULL, *front = NULL;
+    char line[220];
+    ULONG ib;
+    LONG n;
+
+    ib = LockIBase(0);
+    for (sc = IntuitionBase->FirstScreen; sc; sc = sc->NextScreen) {
+        LONG depth = (LONG)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH);
+        const char *title = sc->Title ? (const char *)sc->Title : "";
+        if (!front)
+            front = sc;
+        if (want[0] && !bring && str_ieq(title, want))
+            bring = sc;
+        n = sprintf(line, "0x%08lx %ld %ld %ld %s\n",
+                    (unsigned long)sc, (long)sc->Width, (long)sc->Height,
+                    (long)depth, title);
+        if (!send_frame(fd, T_DATA, line, n)) {
+            UnlockIBase(ib);
+            return FALSE;
+        }
+    }
+    UnlockIBase(ib);
+
+    if (bring)
+        ScreenToFront(bring);
+    else if ((flags & 1) && front)
+        ScreenToBack(front);             /* what Amiga+M does */
+    else if (want[0])
+        return send_err(fd, "no screen with that title");
+
+    return send_frame(fd, T_END, NULL, 0);
+}
+
+static BOOL cmd_screen(int fd, const char *scrname)
+{
+    struct Screen *sc;
+    BOOL haslock = FALSE, ok;
+    UBYTE hdr[12];
+    ULONG w, h;
+    LONG depth;
+
+    if (scrname[0]) {
+        sc = LockPubScreen((STRPTR)scrname);
+        if (!sc)
+            return send_err(fd, "no public screen by that name");
+        haslock = TRUE;
+    } else {
+        /*
+         * The frontmost screen, which is what "the screen" means to
+         * somebody looking at the machine - and it is often a private
+         * one (a game, an editor on its own screen), which no amount of
+         * LockPubScreen would reach.
+         *
+         * LockIBase() makes reading the pointer safe. Nothing keeps the
+         * screen from closing afterwards, so there is a race here: it
+         * needs the screen to be closed during the few milliseconds of
+         * the read. Said out loud rather than papered over.
+         */
+        ULONG ib = LockIBase(0);
+        sc = IntuitionBase->FirstScreen;
+        UnlockIBase(ib);
+        if (!sc)
+            return send_err(fd, "there are no screens open");
+    }
+
+    w = (ULONG)sc->Width;
+    h = (ULONG)sc->Height;
+    depth = (LONG)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH);
+    if (!w || !h || (LONG)w * 3 > MAX_PAYLOAD) {
+        if (haslock) UnlockPubScreen(NULL, sc);
+        return send_err(fd, "that screen is too wide to send a row at a time");
+    }
+
+    put_be32(hdr, w);
+    put_be32(hdr + 4, h);
+    put_be32(hdr + 8, 3);                /* bytes per pixel, RGB */
+    if (!send_frame(fd, T_DATA, hdr, 12)) {
+        if (haslock) UnlockPubScreen(NULL, sc);
+        return FALSE;
+    }
+
+    ok = (depth > 8) ? screen_send_deep(fd, sc, w, h)
+                     : screen_send_planar(fd, sc, w, h, depth);
+
+    if (haslock) UnlockPubScreen(NULL, sc);
     return ok ? send_frame(fd, T_END, NULL, 0) : FALSE;
 }
 
@@ -2312,6 +2459,13 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         if (len < 4 || !get_str(p, len, 4, target, sizeof(target)))
             return send_err(fd, "bad KILL header");
         return cmd_kill(fd, get_be32(p), target);
+    }
+
+    case T_SCREENS: {
+        char want[100];
+        if (len < 4 || !get_str(p, len, 4, want, sizeof(want)))
+            want[0] = '\0';
+        return cmd_screens(fd, len >= 4 ? get_be32(p) : 0, want);
     }
 
     case T_SCREEN: {

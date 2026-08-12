@@ -104,6 +104,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x46 | QUIT     | C→S | — |
 | 0x47 | INSTALL  | C→S | `str sidecar` |
 | 0x48 | SCREEN   | C→S | `str screenname` |
+| 0x49 | SCREENS  | C→S | `u32 flags`, `str title` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -124,7 +125,7 @@ speak v1 to a v2 client.
 
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
-`speed,speedfile,quit,install,screen` for a current build. Self-update makes version skew
+`speed,speedfile,quit,install,screen,screens` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -393,11 +394,24 @@ this system by a wide margin, so shipping 3.7 MB raw costs about thirty
 milliseconds of wire while compressing it on the Amiga would cost
 seconds. The client makes the PNG.
 
-`screenname` empty means the default public screen. Only public screens
-can be grabbed, since the server holds a `LockPubScreen()` for the
-duration — a screen that closed mid-read would otherwise leave the
-server reading freed memory. Requires `cybergraphics.library`;
-advertised as `screen` in `caps`.
+`screenname` empty means the **frontmost** screen, private ones
+included; a name locks that public screen instead. How the pixels are
+read is decided by the screen's depth: above 8 bits by CyberGraphX's
+`ReadPixelArray()`, at or below by `graphics.library`'s
+`ReadPixelArray8()` plus the screen's palette. The client is told
+neither — the reply is identical.
+
+The frontmost screen is read via `LockIBase()`, which makes the pointer
+safe to take but does not hold the screen open; closing it during the
+read is a genuine race. A named public screen is locked properly.
+
+### SCREENS — list them, and reorder
+
+`DATA` frames of `<addr> <width> <height> <depth> <title>`, front first,
+then `END`. `flags` bit 0 sends the frontmost screen to the back — the
+same thing Amiga+M does — and a non-empty `title` brings that screen to
+the front instead. Both are `ScreenToBack()`/`ScreenToFront()`; no
+keystrokes are synthesised into `input.device`.
 
 ## Teardown and the SetFunction rule
 
