@@ -42,10 +42,10 @@
 
 #include "patches.h"                 /* everything that hijacks a vector */
 
-#define VERSION_STR "wasabid 0.2b8"
+#define VERSION_STR "wasabid 0.2b9"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.2b8 (13.8.2026)";
+    "$VER: wasabid 0.2b9 (13.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -714,7 +714,12 @@ static BOOL pump_run(void)
 static BOOL send_log(int fd, ULONG stream, ULONG seq,
                      const UBYTE *text, LONG len)
 {
-    UBYTE pl[10 + RUNBUF];
+    /* Static, not automatic: this daemon runs on the shell's 8 KB
+     * stack, and 4 KB of frame here plus 4 KB in whatever is draining
+     * into it is enough to run off the end. Single-threaded, one task,
+     * never re-entered - so a static costs nothing and cannot be the
+     * thing that smashes memory somewhere else entirely. */
+    static UBYTE pl[10 + RUNBUF];
     if (len > RUNBUF)
         len = RUNBUF;
     put_be32(pl, stream);
@@ -723,6 +728,50 @@ static BOOL send_log(int fd, ULONG stream, ULONG seq,
     pl[9] = (UBYTE)len;
     memcpy(pl + 10, text, len);
     return send_frame(fd, T_LOG, pl, 10 + len);
+}
+
+/*
+ * Ship what the debug patch captured. The buffer is static for the same
+ * reason send_log's is: an 8 KB stack does not hold two 4 KB frames.
+ */
+static BOOL pump_debug_stream(void)
+{
+    static UBYTE buf[RUNBUF];
+    int fd = g_clients[g_dbg_client].fd;
+    ULONG lost;
+    LONG n;
+
+    while ((n = debug_drain(buf, sizeof(buf))) > 0)
+        if (!send_log(fd, 0, ++g_dbg_seq, buf, n))
+            return FALSE;
+    if ((lost = debug_take_lost()) != 0) {
+        char note[64];
+        LONG ln = sprintf(note, "\n[wasabi: %lu debug byte(s) lost]\n",
+                          (unsigned long)lost);
+        if (!send_log(fd, 0, ++g_dbg_seq, (UBYTE *)note, ln))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL pump_snoop_stream(void)
+{
+    static char line[SNOOP_LINE_MAX];
+    int fd = g_clients[g_snoop_client].fd;
+    ULONG lost;
+    LONG n;
+
+    while ((n = snoop_next_line(line, sizeof(line))) > 0)
+        if (!send_log(fd, 1, ++g_snoop_seq, (UBYTE *)line, n))
+            return FALSE;
+    if ((lost = snoop_take_lost()) != 0) {
+        char note[64];
+        LONG ln = sprintf(note, "[wasabi: %lu snoop event(s) lost]\n",
+                          (unsigned long)lost);
+        if (!send_log(fd, 1, ++g_snoop_seq, (UBYTE *)note, ln))
+            return FALSE;
+    }
+    return TRUE;
 }
 
 /*
@@ -2387,43 +2436,10 @@ int main(int argc, char **argv)
          * whole lines; deciding they are LOG frames on a socket is this
          * side's business, which is the entire point of the split.
          */
-        if (g_dbg_client >= 0) {
-            int fd = g_clients[g_dbg_client].fd;
-            UBYTE buf[RUNBUF];
-            BOOL ok = TRUE;
-            ULONG lost;
-            LONG n;
-            while (ok && (n = debug_drain(buf, sizeof(buf))) > 0)
-                ok = send_log(fd, 0, ++g_dbg_seq, buf, n);
-            if (ok && (lost = debug_take_lost()) != 0) {
-                char note[64];
-                LONG ln = sprintf(note,
-                                  "\n[wasabi: %lu debug byte(s) lost]\n",
-                                  (unsigned long)lost);
-                ok = send_log(fd, 0, ++g_dbg_seq, (UBYTE *)note, ln);
-            }
-            if (!ok)
-                drop(g_dbg_client);
-        }
-
-        if (g_snoop_client >= 0) {
-            int fd = g_clients[g_snoop_client].fd;
-            char line[SNOOP_LINE_MAX];
-            BOOL ok = TRUE;
-            ULONG lost;
-            LONG n;
-            while (ok && (n = snoop_next_line(line, sizeof(line))) > 0)
-                ok = send_log(fd, 1, ++g_snoop_seq, (UBYTE *)line, n);
-            if (ok && (lost = snoop_take_lost()) != 0) {
-                char note[64];
-                LONG ln = sprintf(note,
-                                  "[wasabi: %lu snoop event(s) lost]\n",
-                                  (unsigned long)lost);
-                ok = send_log(fd, 1, ++g_snoop_seq, (UBYTE *)note, ln);
-            }
-            if (!ok)
-                drop(g_snoop_client);
-        }
+        if (g_dbg_client >= 0 && !pump_debug_stream())
+            drop(g_dbg_client);
+        if (g_snoop_client >= 0 && !pump_snoop_stream())
+            drop(g_snoop_client);
 
         {
             char line[200];
