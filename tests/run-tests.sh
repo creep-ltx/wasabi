@@ -170,12 +170,23 @@ out=$(timeout -s INT 2 $W snoop --output minimal 2>/dev/null | \
 if [ "$out" -ge 1 ]; then ok "and keeps the lines that matter"
 else no "and keeps the lines that matter"; fi
 
-out=$(timeout -s INT 3.5 $W snoop --ignore-wasabi 2>/dev/null | \
-      grep -c "^wasabid")
+out=$(timeout -s INT 4 $W snoop --ignore-wasabi 2>/dev/null | \
+      grep -cE "^(wasabid|c:wasabid|wasabi-runner)")
 check "--ignore-wasabi hides the tool's own traffic" "0" "$out"
 
-out=$(timeout -s INT 3.5 $W snoop --ignore-wasabi --output full 2>/dev/null | \
-      grep -c "^wasabid")
+# the runner's temp file, whoever touches it
+out=$(timeout -s INT 4 $W snoop --ignore-wasabi 2>/dev/null | \
+      grep -c "T:wasabi-run-")
+check "and its temp files, whichever task opens them" "0" "$out"
+
+# the other half of the contract: what it must NEVER hide
+out=$(timeout -s INT 3 $W debug --ignore-wasabi 2>/dev/null | \
+      grep -c "ALERT #80000004")
+if [ "$out" -ge 1 ]; then ok "but never the guru report"
+else no "but never the guru report"; fi
+
+out=$(timeout -s INT 4 $W snoop --ignore-wasabi --output full 2>/dev/null | \
+      grep -cE "^(wasabid|c:wasabid|wasabi-runner)")
 check "and still hides it with --output full" "0" "$out"
 
 out=$(timeout -s INT 2 $W snoop --ignore-wasabi 2>/dev/null | \

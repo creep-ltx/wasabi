@@ -107,6 +107,11 @@ DOS_ERRORS = {
     241: "Lock collision",
     242: "Lock timeout",
     243: "Unlock error",
+    # dos/dosasl.h, not dos/dos.h - 304 is a Ctrl-C'd command and 305 is
+    # a file whose E bit is clear, both routine in a trace
+    303: "Buffer overflow",
+    304: "Break",
+    305: "File is not executable",
 }
 
 SNOOPF_ENTRY = 1                # SNOOP flags word, bit 0
@@ -137,6 +142,7 @@ NOISE_RE = re.compile(
 # open at all.
 WASABI_SELF_RE = re.compile(
     r'^\S*wasabid(\.new|\.bak|\.old)?\s'
+    r'|^wasabi-runner\s'          # its ln_Name, when it has no CLI name
     r'|T:wasabi-run-'
     r'|^\[wasabi: \d+\.\d+\.\d+\.\d+ connected\]')
 
@@ -199,7 +205,7 @@ ALERT_CAUSE = {
     0x0B: "process creation failed",
 }
 
-_ALERT_RE = re.compile(r"ALERT #([0-9a-fA-F]{8})(?! \()")
+_ALERT_RE = re.compile(r"ALERT #([0-9a-fA-F]{8})(?![0-9a-fA-F])(?! \()")
 
 
 def guru_decode(code):
@@ -612,7 +618,8 @@ def cmd_update(conn, args):
 
     out = []
     rc = do_run(conn, 'Version "%s" FULL' % sidecar, sink=out.append)
-    seen = "".join(out).strip().splitlines()[0] if out else ""
+    _lines = "".join(out).strip().splitlines()
+    seen = _lines[0] if _lines else ""
     if rc != 0 or ident not in seen:
         abort("the uploaded file does not identify as %s (Version said %r)"
               % (ident, seen))
@@ -740,6 +747,10 @@ def cmd_stream(conn, args):
     label = "+".join(n for n, w in (("debug", want_debug),
                                     ("snoop", want_snoop)) if w)
 
+    if want_snoop and conn.caps and "snoop" not in conn.caps:
+        print("wasabi: this daemon (%s) has no 'snoop' - update it with "
+              "'wasabi update wasabid'" % conn.banner, file=sys.stderr)
+        return 2
     entry = getattr(args, "entry", False)
     # Both of these steer the snoop trace, and there is no snoop trace in
     # a plain `debug`. Silently ignoring them would be worse than
@@ -820,8 +831,12 @@ def cmd_stream(conn, args):
         partial[stream] = lines.pop()
         for ln in lines:
             out = dress_errors(ln)
-            if mode == "minimal" and out.strip() and NOISE_RE.search(out):
-                continue
+            if (mode == "minimal" and stream == 1 and out.strip()
+                    and NOISE_RE.search(out)):
+                continue                 # snoop only: the debug stream is
+                                         # the machine's own voice, and a
+                                         # driver printing "FindTask(" is
+                                         # not poll noise
             if hide_self and out.strip() and WASABI_SELF_RE.search(out):
                 continue
             if mode != "full":
@@ -917,6 +932,11 @@ def cmd_stream(conn, args):
     try:
         while True:
             why = follow(conn)
+            # The next connection opens with the daemon's guru replay,
+            # which may be byte-identical to the last line of this one.
+            # Folding it away would swallow the machine's explanation of
+            # why it just vanished.
+            last_line.clear()
             for stream in sorted(partial):
                 if partial[stream]:
                     emit(stream, "\n")   # complete the dangling line

@@ -185,8 +185,14 @@ LONG debug_drain(UBYTE *buf, LONG max)
 
 ULONG debug_take_lost(void)
 {
-    ULONG n = g_ring_lost;
+    ULONG n;
+    Disable();                       /* the producer increments this from
+                                      * any context; a plain read-then-
+                                      * clear silently drops what lands
+                                      * between the two */
+    n = g_ring_lost;
     g_ring_lost = 0;
+    Enable();
     return n;
 }
 
@@ -718,7 +724,13 @@ static BOOL snoop_uninstall(void)
         }
         Enable();
     }
-    snoop_closelibs();
+    /*
+     * Deliberately NOT closing icon.library/diskfont.library here. A
+     * caller can still be parked inside our stub - or inside the
+     * library itself - and dropping the open count to zero invites an
+     * expunge under its feet. They are released by patches_closelibs()
+     * at the very end of teardown, after the straggler wait.
+     */
     return all;
 }
 
@@ -872,6 +884,7 @@ static BOOL snoop_selftest(char *why, LONG whysz, BOOL entry)
     ULONG i;
     BOOL found = FALSE;
     BOOL found_entry = FALSE;
+    BOOL found_a = FALSE;            /* the A-register half of the file */
 
     /* Unique per attempt, so a stale ring entry can never be mistaken
      * for this run's event. */
@@ -888,6 +901,13 @@ static BOOL snoop_selftest(char *why, LONG whysz, BOOL entry)
         me->pr_WindowPtr = (APTR)-1;
     }
     lock = Lock(path, ACCESS_READ);  /* must fail; nothing to unlock */
+    /*
+     * Lock() proves the d-half of the register file and nothing else -
+     * thirteen descriptors take their string from A0 or A1. FindPort
+     * takes its name in A1, touches no disk, and returns NULL for a
+     * name nobody has, so it costs nothing to prove the other half.
+     */
+    (void)FindPort(path);
     if (isproc)
         me->pr_WindowPtr = oldwin;
 
@@ -900,12 +920,26 @@ static BOOL snoop_selftest(char *why, LONG whysz, BOOL entry)
 
     for (i = g_snev_tail; i != g_snev_head; i = (i + 1) & (SN_EVMAX - 1)) {
         struct SnoopEv *ev = &g_snev[i];
+        if (ev->fn == &snoop_desc_FindPort) {
+            /* The A-register probe. Same rule as below: only OUR call
+             * proves anything, anyone else's is just traffic. */
+            if (strcmp(ev->s1, path) == 0)
+                found_a = TRUE;
+            continue;
+        }
         if (ev->fn != &snoop_desc_Lock)
             continue;                /* another task's call, in the window */
-        if (strcmp(ev->s1, path) != 0) {
-            copystr(why, whysz, "the path argument came back wrong");
-            goto done;
-        }
+        /*
+         * And this is why the string is unique per attempt: snooping is
+         * wide open during the window (g_snoop_self is NULL), so every
+         * task on the machine lands in the ring. A Lock() that is not
+         * ours is not a failure, it is somebody else working - skip it.
+         * Failing here instead used to report "the trampoline and this
+         * build disagree" whenever Workbench happened to touch a drawer
+         * while snoop was starting.
+         */
+        if (strcmp(ev->s1, path) != 0)
+            continue;
         if (ev->num != ACCESS_READ) {
             copystr(why, whysz, "the mode argument came back wrong");
             goto done;
@@ -923,6 +957,11 @@ static BOOL snoop_selftest(char *why, LONG whysz, BOOL entry)
             goto done;
         }
         found = TRUE;
+    }
+    if (found && !found_a) {
+        copystr(why, whysz, "the address-register half came back wrong");
+        found = FALSE;
+        goto done;
     }
     if (found && entry && !found_entry) {
         copystr(why, whysz, "the entry-side patch captured nothing");
@@ -984,8 +1023,14 @@ LONG snoop_next_line(char *out, LONG max)
 
 ULONG snoop_take_lost(void)
 {
-    ULONG n = g_snev_lost;
+    ULONG n;
+    Disable();                       /* the producer increments this from
+                                      * any context; a plain read-then-
+                                      * clear silently drops what lands
+                                      * between the two */
+    n = g_snev_lost;
     g_snev_lost = 0;
+    Enable();
     return n;
 }
 
@@ -1096,10 +1141,15 @@ static struct GuruStash *guru_stash_at(struct MemHeader *mh)
 /* Claim the region from the allocator, so writing to it is ours to do.
  * A failure is not fatal - it only means this boot has no black box,
  * and the live report and T:lastguru still work. */
-void guru_claim(void)
+/*
+ * Where the black box lives: 8-aligned, GURU_STASH_OFF below the top of
+ * the highest fast-RAM pool. Computing this takes nothing from anyone,
+ * so a daemon that failed to claim the region can still read what the
+ * last one left there.
+ */
+static struct GuruStash *guru_stash_top(void)
 {
     struct MemHeader *mh, *best = NULL;
-    ULONG top;
     Forbid();
     for (mh = (struct MemHeader *)SysBase->MemList.lh_Head;
          mh->mh_Node.ln_Succ;
@@ -1109,26 +1159,53 @@ void guru_claim(void)
             best = mh;
     Permit();
     if (!best)
+        return NULL;
+    return (struct GuruStash *)(((ULONG)guru_stash_at(best)) & ~7UL);
+}
+
+void guru_claim(void)
+{
+    struct GuruStash *top = guru_stash_top();
+
+    if (!top)
         return;
-    /* 8-aligned address and a size that is a multiple of 8, so exec has
-     * nothing to round - and then free exactly the extent it handed
+    /* An 8-aligned address and a size that is a multiple of 8, so exec
+     * has nothing to round - and then free exactly the extent it handed
      * back rather than the one we asked for, because a FreeMem whose
      * bounds do not match its AllocMem is itself a corrupt memory
      * list. */
-    top = ((ULONG)guru_stash_at(best)) & ~7UL;
     g_stash = (struct GuruStash *)AllocAbs(GURU_STASH_OFF, (APTR)top);
     if (g_stash) {
-        g_stash_size = (top + GURU_STASH_OFF) - (ULONG)g_stash;
+        g_stash_size = ((ULONG)top + GURU_STASH_OFF) - (ULONG)g_stash;
         g_stash_size = (g_stash_size + 7) & ~7UL;
     }
 }
 
+/*
+ * Give the black box back - but only if nothing can still write to it.
+ *
+ * If the Alert() patch could not be removed, our stub is still in the
+ * vector and wasabi_alert_note() -> guru_stash_write() is still live.
+ * Freeing the region then puts a MemChunk header where the next guru
+ * will scribble its report, and the machine dies later with
+ * AN_MemCorrupt at an unrelated FreeMem - which is precisely the bug
+ * that owning this region was introduced to stop. A process that stays
+ * resident keeps its memory.
+ *
+ * g_stash is cleared BEFORE the free, not after: an alert landing in
+ * between would otherwise write into a chunk exec had just taken back.
+ */
 void guru_release(void)
 {
-    if (g_stash && g_stash_size)
-        FreeMem(g_stash, g_stash_size);
+    struct GuruStash *st = g_stash;
+    ULONG size = g_stash_size;
+
+    if (g_alert_patched)                 /* the hook outlived its removal */
+        return;
     g_stash = NULL;
     g_stash_size = 0;
+    if (st && size)
+        FreeMem(st, size);
 }
 
 static ULONG guru_stash_sum(const struct GuruStash *st)
@@ -1190,9 +1267,16 @@ void wasabi_alert_note(ULONG code)
     const char *nm;
     LONG n = 0;
 
-    if (g_alert_pending)             /* a second alert before the first
-                                      * was reported: keep the first -
-                                      * it is the one that started it */
+    /*
+     * A second alert before the first was reported: keep the first, it
+     * is the one that started the trouble. EXCEPT when the newcomer is
+     * a deadend and the pending one is not - the deadend is about to
+     * take the machine down, and it is the only one whose report has
+     * to survive a reboot. Letting a stale recoverable block it loses
+     * exactly the crash worth having.
+     */
+    if (g_alert_pending &&
+        !((code & 0x80000000UL) && !(g_alert_code & 0x80000000UL)))
         return;
     g_alert_code = code;
     g_alert_taskaddr = (ULONG)t;
@@ -1332,9 +1416,16 @@ void guru_boot_check(void)
         SysBase->LastAlert[1] = 0xFFFFFFFFUL;
         Enable();
     }
-    if (g_stash) {
-        struct GuruStash *st = g_stash;
-        if (st->magic1 == GURU_MAGIC1 && st->magic2 == GURU_MAGIC2 &&
+    /*
+     * Read the black box even if the claim failed: ownership is needed
+     * to WRITE it, never to read it, and a report that survived a
+     * reboot is far too expensive to drop because AllocAbs came back
+     * NULL. Only the "seen it, forget it" store is gated on ownership,
+     * for the same reason the write is.
+     */
+    {
+        struct GuruStash *st = g_stash ? g_stash : guru_stash_top();
+        if (st && st->magic1 == GURU_MAGIC1 && st->magic2 == GURU_MAGIC2 &&
             st->sum == guru_stash_sum(st)) {
             st->name[sizeof(st->name) - 1] = '\0';
             guru_stamp(when);
@@ -1346,7 +1437,8 @@ void guru_boot_check(void)
             g_guru_note_dirty = TRUE;
             guru_file_flush();
         }
-        st->magic1 = 0;                  /* report a crash once */
+        if (g_stash)
+            st->magic1 = 0;              /* report a crash once */
     }
 }
 
@@ -1414,7 +1506,26 @@ void guru_disarm(void)
  */
 BOOL patches_stuck(void)
 {
-    return (BOOL)(g_dbg_patched || g_alert_patched || snoop_stuck());
+    /*
+     * snoop_busy() counts callers parked between a stub's use-count
+     * bump and its rts. They are not "a patch we failed to remove",
+     * but they are the same hazard: the patched set includes
+     * SystemTagList and Execute, which run whole commands, so a task
+     * can sit inside our stub for minutes. Unloading under it drops
+     * it into freed memory on the way back out.
+     */
+    return (BOOL)(g_dbg_patched || g_alert_patched || snoop_stuck() ||
+                  snoop_busy() != 0);
+}
+
+/*
+ * The last act of teardown, after the daemon has waited for callers to
+ * leave the stubs. Separated from snoop_uninstall() precisely so the
+ * open count outlives the stragglers.
+ */
+void patches_closelibs(void)
+{
+    snoop_closelibs();
 }
 
 void patches_set_daemon_task(struct Task *t)

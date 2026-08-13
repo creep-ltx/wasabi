@@ -42,10 +42,10 @@
 
 #include "patches.h"                 /* everything that hijacks a vector */
 
-#define VERSION_STR "wasabid 0.2b9"
+#define VERSION_STR "wasabid 0.2b10"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.2b9 (13.8.2026)";
+    "$VER: wasabid 0.2b10 (13.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -669,7 +669,12 @@ static BOOL start_run(int cl, const char *cmd)
  * runner's temp file still gets cleaned up and the slot freed on done. */
 static BOOL pump_run(void)
 {
-    UBYTE buf[RUNBUF];
+    /* Static for the same reason as send_log's and the stream pumps':
+     * this runs below serve() on the force-quit path, and 4 KB of
+     * automatic here is what tips that chain over the 8 KB stack.
+     * One task, never re-entered - the main loop cannot be pumping
+     * while serve() is. */
+    static UBYTE buf[RUNBUF];
     int fd = (g_run_client >= 0) ? g_clients[g_run_client].fd : -1;
     LONG n;
 
@@ -1366,7 +1371,11 @@ static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
                                LONG depth)
 {
     struct RastPort temprp;
-    ULONG pal[256 * 3];
+    /* 3 KB, and at -O2 every cmd_* is inlined into serve(), so an
+     * automatic here is charged to EVERY command the daemon serves -
+     * ping included - not just to a screen grab. Static costs 3 KB of
+     * BSS once and takes it off the stack budget for good. */
+    static ULONG pal[256 * 3];
     UBYTE *pens, *rgb;
     LONG aligned = SCREEN_ALIGN(w), rowbytes = (LONG)w * 3;
     LONG band, y, ncol = 1L << depth;
@@ -1447,7 +1456,10 @@ static BOOL cmd_screenctl(int fd, ULONG flags, const char *want)
             front = sc;
         if (want[0] && !bring && str_ieq(title, want))
             bring = sc;
-        n = sprintf(line, "0x%08lx %ld %ld %ld %s\n",
+        /* The title belongs to whichever program opened the screen -
+         * some put a full path in it - so it is bounded here rather
+         * than trusted into a 220-byte line. */
+        n = sprintf(line, "0x%08lx %ld %ld %ld %.150s\n",
                     (unsigned long)sc, (long)sc->Width, (long)sc->Height,
                     (long)depth, title);
         if (!send_frame(fd, T_DATA, line, n)) {
@@ -2283,7 +2295,11 @@ int main(int argc, char **argv)
         }
         if (g_name_set && n < (LONG)sizeof(g_extra_args) - 40)
             n += sprintf(g_extra_args + n, " name %s", g_name);
-        if (g_allow_any)
+        /* Bounded like the two above it: with a full allow-list and a
+         * long name, n reaches 124 here, and " allow any" needs 11 -
+         * which lands in g_allow[0], silently rewriting the running
+         * daemon's own allow-list. */
+        if (g_allow_any && n < (LONG)sizeof(g_extra_args) - 11)
             sprintf(g_extra_args + n, " allow any");
     }
 
@@ -2322,7 +2338,11 @@ int main(int argc, char **argv)
         guru_boot_check();
     }
 
-    refusals_load();
+    /* Shared file, same rule as the shared vectors and the shared black
+     * box: a trial instance is a guest on this machine and rewrites
+     * nothing the live daemon owns. */
+    if (!g_trial)
+        refusals_load();
 
     for (i = 0; i < MAX_CLIENTS; i++)
         g_clients[i].fd = -1;
@@ -2344,15 +2364,25 @@ int main(int argc, char **argv)
             strcpy(g_name, "amiga");
     }
 
+    /*
+     * From here on a failure must give the black box back before it
+     * returns. Leaving the region claimed by a process that then exits
+     * means every later daemon on this boot gets AllocAbs = NULL and
+     * the machine silently has no crash reporting at all - a good way
+     * to lose the one guru that mattered, days later. The Alert patch
+     * is not armed yet, so releasing here is unconditionally safe.
+     */
     SocketBase = OpenLibrary("bsdsocket.library", 4);
     if (!SocketBase) {
         Printf("wasabid: no bsdsocket.library - is the TCP/IP stack up?\n");
+        guru_release();
         return RETURN_FAIL;
     }
     payload = AllocMem(MAX_PAYLOAD, MEMF_ANY);
     if (!payload) {
         CloseLibrary(SocketBase);
         Printf("wasabid: out of memory\n");
+        guru_release();
         return RETURN_FAIL;
     }
 
@@ -2478,7 +2508,8 @@ int main(int argc, char **argv)
             }
         }
 
-        refusals_save(FALSE);            /* rate-limited to once a minute */
+        if (!g_trial)
+            refusals_save(FALSE);        /* rate-limited to once a minute */
 
         if (n <= 0)
             continue;
@@ -2549,7 +2580,8 @@ out:
         DeleteFile(g_job.outname);
         g_job_active = FALSE;
     }
-    refusals_save(TRUE);
+    if (!g_trial)
+        refusals_save(TRUE);
     say_goodbye(g_restart ? "restarting" : "stopping");
     dbg_was = g_dbg_client;              /* the stops below clear these */
     snoop_was = g_snoop_client;
@@ -2562,13 +2594,21 @@ out:
      * next instance claims the same address and reads what is still
      * there - a reboot does not clear RAM, and neither does a free. */
     guru_release();
-    /* A task may still be between the snoop stub's use-count bump and its
-     * rts; give stragglers a moment before this code segment goes away. */
+    /*
+     * A task may still be between the snoop stub's use-count bump and
+     * its rts. Wait for it: the patched set includes SystemTagList and
+     * Execute, which run whole commands, so "a moment" was optimistic
+     * at 2 seconds. Five is enough for anything short, and a straggler
+     * that outlasts it is not abandoned - patches_stuck() counts
+     * snoop_busy(), so the process parks below rather than unloading
+     * the segment somebody is still standing in.
+     */
     {
         int w;
-        for (w = 0; snoop_busy() && w < 50; w++)
+        for (w = 0; snoop_busy() && w < 125; w++)
             Delay(2);
     }
+    patches_closelibs();                 /* now nobody is inside them */
     /*
      * A patch we could not remove is a live pointer into this segment,
      * and the shell frees the segment the moment main() returns. The
@@ -2616,7 +2656,9 @@ out:
      * daemon keeps our identity and port. Run detaches it; we then exit.
      */
     if (g_restart) {
-        char self[128], cmd[160];
+        /* 13 fixed + a 127-char program path + a 5-digit port + 127
+         * chars of replayed arguments + NUL = 273 worst case. */
+        char self[128], cmd[288];
         if (GetProgramName(self, sizeof(self)) && self[0]) {
             /* Quoted: a daemon started from a path with a space in it
              * must come back from restart too. */

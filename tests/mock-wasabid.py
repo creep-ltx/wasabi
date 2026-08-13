@@ -519,6 +519,9 @@ class Handler(socketserver.BaseRequestHandler):
         ("Shell", 'Lock("DH0:Tools", read) = ok'),
         ("cfile", 'LoadSeg("C:List") = ok'),
         ("wasabid", 'GetVar("wasabi.key") = fail (err 232)'),
+        ("c:wasabid", 'Open("T:wasabi-run-5", readwrite) = ok'),
+        ("wasabi-runner", 'Lock("C:List", read) = ok'),
+        ("Shell", 'Open("T:wasabi-run-5", readwrite) = ok'),
         # the poll noise bsdsocket really makes, three ticks of it, so
         # folding and --output minimal have something to work on
         ("wasabid", 'OpenLibrary("dos.library", v0) = ok'),

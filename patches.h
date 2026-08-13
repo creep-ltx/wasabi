@@ -76,6 +76,11 @@ void  guru_retry_note(void);         /* the deferred write, if T: balked */
  */
 BOOL  patches_stuck(void);
 
+/* Release icon.library/diskfont.library. Call LAST, after waiting for
+ * callers to leave the stubs: closing them earlier can let one be
+ * expunged while a straggler is still inside it. */
+void  patches_closelibs(void);
+
 /* Who to Signal() when a patch has something urgent (a guru, or an
  * entry-mode line racing a freeze). Set once, from the daemon task. */
 void  patches_set_daemon_task(struct Task *t);
