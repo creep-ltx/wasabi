@@ -501,8 +501,19 @@ every 68k from the 68000 up, so the PC costs no per-CPU knowledge; the
 fault address does, and is read for the six-word (`$2`), eight-word
 (`$4`, 68060) and 30-word (`$7`, 68040) frames.
 
-One caveat, measured rather than assumed: **Emu68 does not deliver CPU
-exceptions to the guest OS.** An illegal instruction, a privilege
+Two caveats, both measured rather than assumed. The first is the bigger
+one: **a crashing application never reaches `Alert()` at all.** A task
+that takes a CPU exception goes to its `tc_TrapCode` — for a Process,
+dos.library's "Software Failure — task held" requester — not to exec's
+`Alert()` vector. Tested under FS-UAE with a real 68030 and the JIT off:
+a child executed an `illegal` instruction compiled into its own code,
+genuinely faulted, and the `Alert()` patch recorded **zero** hits. So
+this capture fires for the system's own alerts (exec raising
+`AN_MemCorrupt`, or a program calling `Alert()` deliberately) and not
+for ordinary application crashes; catching those needs `tc_TrapCode` or
+CPU-vector hooking, which is what Enforcer and MuForce do.
+
+The second: **Emu68 does not deliver CPU exceptions to the guest OS.** An illegal instruction, a privilege
 violation and a divide-by-zero in ordinary compiled code were each
 tried on the PiStorm32 — all three took the machine down with no
 `Alert()` reaching the hook at all, no live line and no black box.
