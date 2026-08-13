@@ -42,10 +42,10 @@
 
 #include "patches.h"                 /* everything that hijacks a vector */
 
-#define VERSION_STR "wasabid 0.2b7"
+#define VERSION_STR "wasabid 0.2b8"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.2b7 (13.8.2026)";
+    "$VER: wasabid 0.2b8 (13.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -2092,10 +2092,19 @@ static void drop(int cl)
                                           * pump_run() cleans up and frees
                                           * the slot when it finishes */
     }
-    if (g_dbg_client == cl)
+    /* Free the subscription as well as the patch. These two used to be
+     * one act, back when the patch layer owned the client index; now
+     * that it owns only the ring, forgetting the second half leaves a
+     * stale index pointing at a slot the next caller will be given -
+     * and that caller gets LOG frames instead of a welcome. */
+    if (g_dbg_client == cl) {
         debug_stop();
-    if (g_snoop_client == cl)
+        g_dbg_client = -1;
+    }
+    if (g_snoop_client == cl) {
         snoop_stop();
+        g_snoop_client = -1;
+    }
     CloseSocket(g_clients[cl].fd);
     g_clients[cl].fd = -1;
     g_clients[cl].hello = FALSE;
