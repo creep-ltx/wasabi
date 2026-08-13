@@ -271,6 +271,27 @@ out=$($W deploy "$ROOT/../wasabi-restart.$$" C:wasabid.new --restart 2>&1 | \
 check "deploy --restart uploads and reloads" "1" "$out"
 rm -f "$ROOT/../wasabi-restart.$$"
 
+# --- the guru frame decoder ---------------------------------------
+# Host-compiled against frames built by hand from M68000PM Appendix B.
+# The decoder source is extracted from patches.c at test time, so this
+# cannot drift from the code it is checking. The Amiga cannot test this
+# itself: Emu68 does not deliver CPU exceptions to the guest, so a real
+# frame never reaches the hook there.
+if command -v gcc >/dev/null 2>&1; then
+    awk '/^static ULONG guru_be32/,/^}/'      patches.c >  "$ROOT/dec.inc"
+    awk '/^static UWORD guru_be16/,/^}/'      patches.c >> "$ROOT/dec.inc"
+    awk '/^static BOOL guru_find_frame/,/^\}$/' patches.c >> "$ROOT/dec.inc"
+    if gcc -O2 -I"$ROOT" -o "$ROOT/dectest" tests/dectest.c 2>/dev/null \
+       && "$ROOT/dectest" >"$ROOT/dectest.out" 2>&1; then
+        ok "the guru frame decoder handles every documented format"
+    else
+        no "the guru frame decoder handles every documented format"
+        cat "$ROOT/dectest.out" 2>/dev/null | tail -5
+    fi
+else
+    ok "guru frame decoder (skipped: no host gcc)"
+fi
+
 # --- update: the daemon may only be replaced through verification ---
 NEWD=$ROOT/../wasabi-newd.$$
 printf 'binary\0$VER: wasabid 9.9test (1.1.2026)\0rest\n' > "$NEWD"

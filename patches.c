@@ -1083,6 +1083,11 @@ static BOOL           g_alert_patched;
 static volatile ULONG g_alert_code;
 static volatile ULONG g_alert_taskaddr;
 static char           g_alert_taskname[36];
+
+#define GURU_SNAP 192                /* bytes of supervisor stack kept */
+static UBYTE          g_alert_snap[GURU_SNAP];
+static ULONG          g_alert_snapat;
+static ULONG          g_alert_snaplen;
 static volatile BOOL  g_alert_pending;
 
 /*
@@ -1094,7 +1099,10 @@ static volatile BOOL  g_alert_pending;
  * exactly when LastAlert takes over. `Type T:lastguru` on the Amiga
  * itself reads the same note.
  */
-static char g_guru_note[192];        /* empty = nothing to tell */
+/* 320, not 192: the after-reboot line is 15+8+10+35(name)+5+8+1
+ * +79(" at PC .. (vector N, fault ..)")+37+31(stamp)+1 = 230 worst
+ * case. Sized here, once, with the arithmetic written down. */
+static char g_guru_note[320];        /* empty = nothing to tell */
 static BOOL g_guru_note_dirty;       /* file write still owed */
 
 /*
@@ -1119,13 +1127,32 @@ static BOOL g_guru_note_dirty;       /* file write still owed */
  * the write legal; the content still survives the reboot, because a
  * reboot rebuilds the memory list without clearing the RAM under it.
  */
-#define GURU_STASH_OFF 256           /* bytes below mh_Upper */
+#define GURU_STASH_OFF 512           /* bytes below mh_Upper */
 
+/*
+ * The snapshot is the difference between "it died" and "it died HERE".
+ * Exec runs trap handling in supervisor mode and pushes a longword
+ * exception number below the CPU's own frame (RKRM Exec), so at Alert()
+ * time the stack above us holds:
+ *
+ *     exception number   (longword, Exec's, CPU-independent)
+ *     STATUS REGISTER    (word)   \
+ *     PROGRAM COUNTER    (long)    | the CPU frame - SR and PC are at
+ *     FORMAT | VECTOR    (word)   /  these offsets on every 68k made
+ *     ...format-specific...
+ *
+ * We keep the raw bytes and work it out later, in daemon context, where
+ * a mistake costs a wrong log line rather than a second guru.
+ */
 struct GuruStash {
     ULONG magic1, magic2;
     ULONG code, taskaddr;
     char  name[36];
-    ULONG sum;
+    ULONG attn;                      /* AttnFlags, a hint for decoding */
+    ULONG snapat;                    /* where the snapshot was taken */
+    ULONG snaplen;
+    UBYTE snap[GURU_SNAP];
+    ULONG sum;                       /* MUST stay last: see guru_stash_sum */
 };
 #define GURU_MAGIC1 0x57534247UL     /* 'WSBG' */
 #define GURU_MAGIC2 0x55525531UL     /* 'URU1' */
@@ -1232,6 +1259,11 @@ static void guru_stash_write(void)
     st->taskaddr = g_alert_taskaddr;
     for (i = 0; i < (int)sizeof(st->name); i++)
         st->name[i] = g_alert_taskname[i];
+    st->attn = (ULONG)SysBase->AttnFlags;
+    st->snapat = g_alert_snapat;
+    st->snaplen = g_alert_snaplen;
+    for (i = 0; i < GURU_SNAP; i++)
+        st->snap[i] = g_alert_snap[i];
     st->sum = guru_stash_sum(st);
 }
 
@@ -1266,6 +1298,7 @@ void wasabi_alert_note(ULONG code)
     struct Task *t = SysBase->ThisTask;
     const char *nm;
     LONG n = 0;
+    UBYTE probe;                     /* its address is the stack pointer */
 
     /*
      * A second alert before the first was reported: keep the first, it
@@ -1303,6 +1336,39 @@ void wasabi_alert_note(ULONG code)
             g_alert_taskname[n] = nm[n];
     }
     g_alert_taskname[n] = '\0';
+
+    /*
+     * The supervisor stack above us, verbatim.
+     *
+     * Being ON that stack is the test for "this is a trap, not a
+     * program calling Alert() by hand": Exec does trap handling in
+     * supervisor mode, so a CPU exception arrives here with SP inside
+     * SysStkLower..SysStkUpper and the frame at higher addresses,
+     * pushed before any of the calls that led here. A user-mode
+     * Alert() lands on the task's own stack, fails the bounds test,
+     * and simply records nothing rather than capturing noise.
+     *
+     * Copy only. Every interpretation happens later, in daemon
+     * context - a misread here would be a second crash inside the
+     * first one.
+     */
+    g_alert_snaplen = 0;
+    {
+        UBYTE *from = (UBYTE *)&probe;
+        UBYTE *low  = (UBYTE *)SysBase->SysStkLower;
+        UBYTE *top  = (UBYTE *)SysBase->SysStkUpper;
+        if (from >= low && from < top) {
+            LONG want = (LONG)(top - from);
+            LONG i;
+            if (want > GURU_SNAP)
+                want = GURU_SNAP;
+            for (i = 0; i < want; i++)
+                g_alert_snap[i] = from[i];
+            g_alert_snapat  = (ULONG)from;
+            g_alert_snaplen = want;
+        }
+    }
+
     /* A deadend is going to reboot the machine before the daemon can
      * write any file - stash the report in the black box now, in this
      * context, while stores still land. */
@@ -1345,6 +1411,84 @@ static BOOL alert_remove(void)
     if (removed)
         g_alert_patched = FALSE;
     return removed;
+}
+
+/*
+ * Find the CPU exception frame in a snapshot of the supervisor stack.
+ *
+ * The anchor is Exec's, not the CPU's: a longword exception number sits
+ * immediately below the frame (RKRM Exec), so a candidate is confirmed
+ * when the vector offset the CPU wrote agrees with it - vector offset ==
+ * exception number * 4. Two independent fields agreeing is what tells a
+ * real frame from stack contents that merely look like one.
+ *
+ * SR (+$00) and PC (+$02) are at the same offsets on every 68k from the
+ * 68000 up, so the PC needs no per-CPU knowledge at all. The fault
+ * address does: it is at frame+$08 for the six-word ($2), eight-word
+ * ($4, the 68060's access error) and 30-word ($7, the 68040's) frames.
+ * The 68020/030 bus-fault frames ($A/$B) put it elsewhere and are not
+ * decoded here.
+ *
+ * Byte-at-a-time reads: the PC sits at an even but not longword-aligned
+ * offset, and a 68000 would fault on a misaligned longword access.
+ * Daemon context - nothing here runs in the crashing task.
+ */
+static ULONG guru_be32(const UBYTE *b)
+{
+    return ((ULONG)b[0] << 24) | ((ULONG)b[1] << 16) |
+           ((ULONG)b[2] << 8) | (ULONG)b[3];
+}
+
+static UWORD guru_be16(const UBYTE *b)
+{
+    return (UWORD)(((UWORD)b[0] << 8) | (UWORD)b[1]);
+}
+
+static BOOL guru_find_frame(const UBYTE *snap, LONG len, ULONG *pc,
+                            ULONG *fault, UWORD *vec, UWORD *fmt)
+{
+    LONG i;
+
+    for (i = 0; i + 12 <= len; i += 2) {
+        ULONG exc = guru_be32(snap + i);
+        const UBYTE *f = snap + i + 4;
+        UWORD fv;
+
+        if (exc < 2 || exc > 63)     /* a plausible vector number */
+            continue;
+        fv = guru_be16(f + 6);
+        if ((ULONG)(fv & 0x0FFF) != exc * 4)
+            continue;                /* Exec and the CPU disagree */
+
+        *vec = (UWORD)exc;
+        *fmt = (UWORD)((fv >> 12) & 0x0F);
+        *pc = guru_be32(f + 2);
+        *fault = 0;
+        if ((*fmt == 2 || *fmt == 4 || *fmt == 7) && i + 4 + 12 <= len)
+            *fault = guru_be32(f + 8);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* " at PC 0x... (vector N, fault 0x...)", or "" when nothing was found.
+ * Kept short: this rides the one line a stream greets you with. */
+static void guru_where(char *out, LONG max, const UBYTE *snap, LONG len)
+{
+    ULONG pc = 0, fault = 0;
+    UWORD vec = 0, fmt = 0;
+
+    out[0] = '\0';
+    if (len <= 0 || max < 64)
+        return;
+    if (!guru_find_frame(snap, len, &pc, &fault, &vec, &fmt))
+        return;
+    if (fault)
+        sprintf(out, " at PC 0x%08lx (vector %ld, fault 0x%08lx)",
+                (unsigned long)pc, (long)vec, (unsigned long)fault);
+    else
+        sprintf(out, " at PC 0x%08lx (vector %ld)",
+                (unsigned long)pc, (long)vec);
 }
 
 static void guru_stamp(char *out)    /* "13-Aug-26 13:36:41", or "" */
@@ -1427,13 +1571,18 @@ void guru_boot_check(void)
         struct GuruStash *st = g_stash ? g_stash : guru_stash_top();
         if (st && st->magic1 == GURU_MAGIC1 && st->magic2 == GURU_MAGIC2 &&
             st->sum == guru_stash_sum(st)) {
+            char where[80];
+            LONG snaplen = (LONG)st->snaplen;
             st->name[sizeof(st->name) - 1] = '\0';
+            if (snaplen < 0 || snaplen > GURU_SNAP)
+                snaplen = 0;         /* a stash from another build */
+            guru_where(where, sizeof(where), st->snap, snaplen);
             guru_stamp(when);
             sprintf(g_guru_note, "DEADEND ALERT #%08lx in task '%s' "
-                                 "(0x%08lx) - from before the last "
+                                 "(0x%08lx)%s - from before the last "
                                  "reboot (seen %s)",
                     (unsigned long)st->code, st->name,
-                    (unsigned long)st->taskaddr, when);
+                    (unsigned long)st->taskaddr, where, when);
             g_guru_note_dirty = TRUE;
             guru_file_flush();
         }
@@ -1444,7 +1593,7 @@ void guru_boot_check(void)
 
 BOOL guru_read_note(char *out, LONG max)
 {
-    char text[192];
+    char text[320];
     LONG n = 0;
     BPTR fh = Open("T:lastguru", MODE_OLDFILE);
     if (fh) {
@@ -1469,18 +1618,20 @@ BOOL guru_read_note(char *out, LONG max)
 BOOL guru_take_live(char *out, LONG max)
 {
     char when[2 * LEN_DATSTRING + 2];
+    char where[80];
     const char *kind;
 
     if (!g_alert_pending || max < 200)
         return FALSE;
     kind = (g_alert_code & 0x80000000UL) ? "DEADEND" : "RECOVERABLE";
-    sprintf(out, "[wasabi: %s ALERT #%08lx in task '%s' (0x%08lx)]\n",
+    guru_where(where, sizeof(where), g_alert_snap, (LONG)g_alert_snaplen);
+    sprintf(out, "[wasabi: %s ALERT #%08lx in task '%s' (0x%08lx)%s]\n",
             kind, (unsigned long)g_alert_code, g_alert_taskname,
-            (unsigned long)g_alert_taskaddr);
+            (unsigned long)g_alert_taskaddr, where);
     guru_stamp(when);
-    sprintf(g_guru_note, "%s ALERT #%08lx in task '%s' (0x%08lx) - %s",
+    sprintf(g_guru_note, "%s ALERT #%08lx in task '%s' (0x%08lx)%s - %s",
             kind, (unsigned long)g_alert_code, g_alert_taskname,
-            (unsigned long)g_alert_taskaddr, when);
+            (unsigned long)g_alert_taskaddr, where, when);
     g_guru_note_dirty = TRUE;
     g_alert_pending = FALSE;
     return TRUE;

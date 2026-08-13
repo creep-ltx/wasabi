@@ -786,7 +786,8 @@ static BOOL pump_snoop_stream(void)
  */
 static void stream_greet(int cl, ULONG stream, ULONG *seq)
 {
-    char note[240];
+    char note[384];                      /* the note is up to 319 + the
+                                          * "[wasabi: last guru: ]" wrap */
     if (guru_read_note(note, sizeof(note)))
         send_log(g_clients[cl].fd, stream, ++(*seq),
                  (UBYTE *)note, (LONG)strlen(note));
