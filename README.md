@@ -556,6 +556,11 @@ mode is in force, so a log always describes what it left out; and a
 pending fold is flushed when the stream falls quiet or drops, so a
 freeze cannot swallow the tally of what the machine was doing.
 
+`debug`, `snoop` and `debug --with-snoop` take the same five options —
+`--task`, `--entry`, `--output`, `--log` and `--once`. The first two
+steer the snoop trace, so a plain `debug` refuses them rather than
+accept a flag it will not act on.
+
 `--task PAT` filters on the caller's name with AmigaDOS wildcards
 (`#?`, `?`, `*`); no filter means everything. The caller is named the way
 SnoopDOS names it — the CLI command being run if there is one, else the

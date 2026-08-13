@@ -132,6 +132,15 @@ else no "and so does the stream's log file"; fi
 out=$(grep -c "(err 232)" "$ERRLOG")
 check "the terse wire form reaches neither" "0" "$out"
 
+out=$($W debug --entry 2>&1 | grep -c "only affects the snoop trace")
+check "--entry on a plain debug is refused, not ignored" "1" "$out"
+out=$($W debug --task foo 2>&1 | grep -c "only affects the snoop trace")
+check "and so is --task" "1" "$out"
+out=$(timeout -s INT 1.5 $W debug --with-snoop --entry 2>/dev/null | \
+      grep -c ') \.\.\.$')
+if [ "$out" -ge 1 ]; then ok "but both are accepted with --with-snoop"
+else no "but both are accepted with --with-snoop"; fi
+
 out=$(timeout -s INT 1.2 $W debug 2>/dev/null | \
       grep -c "ALERT #80000004 (CPU: illegal instruction)")
 if [ "$out" -ge 1 ]; then ok "a guru's alert code is decoded by name"

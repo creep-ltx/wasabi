@@ -726,6 +726,19 @@ def cmd_stream(conn, args):
                                     ("snoop", want_snoop)) if w)
 
     entry = getattr(args, "entry", False)
+    # Both of these steer the snoop trace, and there is no snoop trace in
+    # a plain `debug`. Silently ignoring them would be worse than
+    # refusing: the opening line would announce entry logging that is not
+    # happening, and the operator would trust it.
+    if not want_snoop:
+        unused = [n for n, v in (("--entry", entry),
+                                 ("--task", getattr(args, "task", ""))) if v]
+        if unused:
+            print("wasabi: %s only affect%s the snoop trace - add "
+                  "--with-snoop, or use the snoop command"
+                  % (" and ".join(unused), "" if len(unused) > 1 else "s"),
+                  file=sys.stderr)
+            return 2
     if entry and conn.caps and "snoopentry" not in conn.caps:
         print("wasabi: this daemon (%s) has no entry logging - update it "
               "with 'wasabi update wasabid'" % conn.banner, file=sys.stderr)
