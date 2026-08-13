@@ -170,6 +170,19 @@ out=$(timeout -s INT 2 $W snoop --output minimal 2>/dev/null | \
 if [ "$out" -ge 1 ]; then ok "and keeps the lines that matter"
 else no "and keeps the lines that matter"; fi
 
+out=$(timeout -s INT 3.5 $W snoop --ignore-wasabi 2>/dev/null | \
+      grep -c "^wasabid")
+check "--ignore-wasabi hides the tool's own traffic" "0" "$out"
+
+out=$(timeout -s INT 3.5 $W snoop --ignore-wasabi --output full 2>/dev/null | \
+      grep -c "^wasabid")
+check "and still hides it with --output full" "0" "$out"
+
+out=$(timeout -s INT 2 $W snoop --ignore-wasabi 2>/dev/null | \
+      grep -c "Startup-Sequence")
+if [ "$out" -ge 1 ]; then ok "while keeping what is being debugged"
+else no "while keeping what is being debugged"; fi
+
 out=$(timeout -s INT 1.2 $W debug 2>/dev/null | grep -c "ReadCacheNode")
 if [ "$out" -ge 1 ]; then ok "debug streams lines"
 else no "debug streams lines"; fi

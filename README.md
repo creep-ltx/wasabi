@@ -561,6 +561,13 @@ freeze cannot swallow the tally of what the machine was doing.
 steer the snoop trace, so a plain `debug` refuses them rather than
 accept a flag it will not act on.
 
+`--ignore-wasabi` hides the tool's own footprint: the daemon, the runner
+it spawns behind `wasabi run`, an update's sidecar, and the temp file
+output streams through. On a real 2601-line capture that leaves 609
+lines, and 125 with `--output minimal` as well — the rest was wasabi
+watching itself. What it never hides is anything the daemon says on
+purpose: the guru report, the lost-frame counts, the farewell.
+
 `--task PAT` filters on the caller's name with AmigaDOS wildcards
 (`#?`, `?`, `*`); no filter means everything. The caller is named the way
 SnoopDOS names it — the CLI command being run if there is one, else the

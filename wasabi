@@ -125,6 +125,21 @@ NOISE_RE = re.compile(
     r'|FindPort\("Directory Opus"\)'
     r'|OpenLibrary\("dos\.library"')
 
+# --ignore-wasabi: the tool's own footprint, so a trace shows the thing
+# being debugged rather than the machinery watching it. The daemon
+# already omits its own task, but not the runner it spawns to carry out
+# `wasabi run`, the sidecar a `wasabi update` leaves lying about, or the
+# temp file the runner streams output through.
+#
+# Deliberately NOT hidden: anything the daemon says on purpose - the
+# guru report, the lost-frame counts, the farewell. Those are wasabi's
+# voice, not its noise, and they are usually the reason a stream is
+# open at all.
+WASABI_SELF_RE = re.compile(
+    r'^\S*wasabid(\.new|\.bak|\.old)?\s'
+    r'|T:wasabi-run-'
+    r'|^\[wasabi: \d+\.\d+\.\d+\.\d+ connected\]')
+
 _ERR_RE = re.compile(r"\(err (\d+)\)")
 
 
@@ -757,6 +772,7 @@ def cmd_stream(conn, args):
     names = {0: "debug", 1: "snoop"}
     partial = {}
     mode = getattr(args, "output", "normal")
+    hide_self = getattr(args, "ignore_wasabi", False)
     last_line = {}                       # per stream, for folding repeats
     repeats = {}
 
@@ -792,7 +808,11 @@ def cmd_stream(conn, args):
         # straight through: a partial line may be the last thing a dying
         # machine ever says, and nothing should hold it back. Folding
         # repeats needs whole lines, so it implies assembling them.
-        raw = (not combined) and mode == "full"
+        # Hiding anything means looking at whole lines, so --ignore-wasabi
+        # gives up the raw byte passthrough that --output full otherwise
+        # keeps. A filter that silently does nothing in one mode is worse
+        # than no filter.
+        raw = (not combined) and mode == "full" and not hide_self
         if raw:
             sys.stdout.write(dress_errors(text))
         buf = partial.get(stream, "") + text
@@ -801,6 +821,8 @@ def cmd_stream(conn, args):
         for ln in lines:
             out = dress_errors(ln)
             if mode == "minimal" and out.strip() and NOISE_RE.search(out):
+                continue
+            if hide_self and out.strip() and WASABI_SELF_RE.search(out):
                 continue
             if mode != "full":
                 if out == last_line.get(stream):
@@ -881,6 +903,8 @@ def cmd_stream(conn, args):
         opts += ", task filter '%s'" % args.task
     if entry:
         opts += ", entry logging"
+    if hide_self:
+        opts += ", wasabi's own traffic hidden"
     if mode == "minimal":
         opts += ", output minimal (shell bookkeeping, FindTask, DOpus "
         opts += "probes and dos.library polls hidden)"
@@ -1494,6 +1518,10 @@ def main(argv=None):
     s.add_argument("--entry", action="store_true",
                    help="log snooped calls on the way in too, so a call "
                         "that never returns is still seen (slow)")
+    s.add_argument("--ignore-wasabi", action="store_true",
+                   help="hide wasabi's own footprint - the daemon, the "
+                        "runner behind 'wasabi run', and its temp files - "
+                        "so the trace shows what you are debugging")
     s.add_argument("--output", choices=("minimal", "normal", "full"),
                    default="normal",
                    help="how much to show: full is every line as it "
@@ -1512,6 +1540,10 @@ def main(argv=None):
                    help="log each call on the way in as well as on the way "
                         "out, so a call that never returns is still seen; "
                         "costs a task switch per call")
+    s.add_argument("--ignore-wasabi", action="store_true",
+                   help="hide wasabi's own footprint - the daemon, the "
+                        "runner behind 'wasabi run', and its temp files - "
+                        "so the trace shows what you are debugging")
     s.add_argument("--output", choices=("minimal", "normal", "full"),
                    default="normal",
                    help="how much to show: full is every line as it "
