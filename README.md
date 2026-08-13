@@ -490,6 +490,31 @@ machine gurus, reboots, wasabid comes back, the stream resubscribes,
 and the alert code arrives in the same terminal that watched the
 machine die.
 
+**Where it crashed** is captured too, where the platform allows it.
+Exec does trap handling in supervisor mode and pushes a longword
+exception number below the CPU's own frame, so at `Alert()` time the
+hook copies the supervisor stack verbatim and the frame is decoded
+later, in daemon context, by matching Exec's exception number against
+the CPU's vector offset — two independent fields agreeing, rather than
+a plausible-looking longword. SR and PC sit at the same offsets on
+every 68k from the 68000 up, so the PC costs no per-CPU knowledge; the
+fault address does, and is read for the six-word (`$2`), eight-word
+(`$4`, 68060) and 30-word (`$7`, 68040) frames.
+
+One caveat, measured rather than assumed: **Emu68 does not deliver CPU
+exceptions to the guest OS.** An illegal instruction, a privilege
+violation and a divide-by-zero in ordinary compiled code were each
+tried on the PiStorm32 — all three took the machine down with no
+`Alert()` reaching the hook at all, no live line and no black box.
+Software alerts (`AN_MemCorrupt`, or a program calling `Alert()`) are
+caught there exactly as before. So this half is dormant on Emu68 and
+should fire on real silicon, or under emulation that models the CPU
+properly. Since the Amiga cannot test it, the host does:
+`tests/dectest.c` extracts the decoder from `patches.c` at test time
+and runs it against frames built by hand from M68000PM Appendix B,
+including a frame buried in junk, a mismatched vector that must be
+rejected, and pure garbage that must find nothing.
+
 The patch runs in the crashing context, which may own almost nothing:
 it copies the code and task name into globals, `Signal()`s the daemon
 (the one exec call documented interrupt-callable), and chains to the
