@@ -10,7 +10,12 @@ machine — all from the terminal the code was written in.
 
 Two halves:
 
-- **`wasabid`** — a small daemon on the Amiga (C, Bebbo's gcc, one file).
+- **`wasabid`** — a small daemon on the Amiga (C, Bebbo's gcc). Two
+  files: `wasabid.c` is sockets, protocol and commands; `patches.c` is
+  every SetFunction hook — the debug stream, the snoop trace and the
+  guru report. They are apart because the rules for code running in
+  someone else's task are not the daemon's rules, and `patches.h` is
+  deliberately narrow: it passes bytes and lines, never a socket.
 - **`wasabi`** — the client (Python 3, stdlib only, one file). At home
   on Linux, macOS, FreeBSD and OpenBSD; elsewhere discovery's subnet
   sweep degrades to plain broadcast and `--host` always works.

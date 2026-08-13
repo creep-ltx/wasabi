@@ -5,3 +5,4 @@ tests/slowwrite
 tests/palscreen
 /wasabid
 tests/alertemit
+.claude/

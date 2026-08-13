@@ -11,8 +11,14 @@ DEPLOY  = /home/creep/Documents/FS-UAE/Hard Drives/Dump/Code
 
 all: wasabid
 
-wasabid: wasabid.c
-	$(CC) $(CFLAGS) wasabid.c -o wasabid
+# patches.c is every SetFunction hook in the daemon - the debug stream,
+# the snoop trace and the guru report. It is a separate translation unit
+# because the rules that govern code running in someone else's task are
+# not the daemon's rules, and the two must not blur together.
+SRCS = wasabid.c patches.c
+
+wasabid: $(SRCS) patches.h
+	$(CC) $(CFLAGS) $(SRCS) -o wasabid
 
 # Round-trip the client against the host mock - no Amiga in the loop.
 test:
