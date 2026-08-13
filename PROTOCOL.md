@@ -126,9 +126,16 @@ trusted network only.
 Version mismatch is fatal in both directions: the daemon will not try to
 speak v1 to a v2 client.
 
+`SNOOP`'s leading u32 is a flags word: bit 0 (`snoopentry`) asks the
+daemon to log each patched call on the way in as well as on the way
+out, so a call that never returns still appears. The daemon advertises
+`snoopentry` in caps when it understands the bit; older daemons ignore
+the word entirely, which is why the client checks caps rather than
+assuming silence means yes.
+
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
-`speed,speedfile,quit,install,grab,screen,hb` for a current build. Self-update makes version skew
+`speed,speedfile,quit,install,grab,screen,hb,guru` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -253,8 +260,68 @@ without this a stream client would block in `recv()` forever, unable to
 tell a quiet machine from a dead one. A client that misses heartbeats
 should *warn*, not exit: the daemon is single-threaded, and a large
 transfer on another connection legitimately starves heartbeats for as
-long as it runs. A failed heartbeat send also frees the stream slot of
-a client that vanished without closing.
+long as it runs. The daemon in turn treats a heartbeat as a courtesy,
+not a delivery: if the subscriber's socket cannot take it without
+waiting — a sleeping laptop, a blinking Wi-Fi hop — the beat is
+skipped, not blocked on. Only a send that actually *fails* frees the
+stream slot; a slow one never does.
+
+**Guru report** (`guru` in caps). The daemon patches exec's `Alert()`
+(LVO -108) for its whole lifetime. When any task on the machine raises
+an alert, one visible line goes out on every subscribed stream:
+
+```
+[wasabi: DEADEND ALERT #8000000b in task 'Amelinium_040' (0x0975c3d0)]
+```
+
+(or `RECOVERABLE` for alerts without the deadend bit). The line escapes
+before the guru freezes the display whenever the alert is raised in
+task context — the daemon runs at priority 1 and is signalled from the
+patch, so it preempts the dying task for the milliseconds the send
+takes. An alert raised in supervisor mode or an interrupt cannot be
+escaped live. For those the daemon keeps a black box: a deadend alert
+is stashed by the patch itself — magic words, code, task name,
+checksum — just under `mh_Upper` of the highest fast-RAM MemHeader, in
+a 256-byte region the daemon `AllocAbs()`es at startup and holds for
+its whole life. Owning it is the point: free memory on this machine is
+where exec keeps its free list, so writing into a chunk the daemon did
+not own would corrupt that list and guru the machine with
+`AN_MemCorrupt` at some unrelated `FreeMem` later. The daemon's
+next life checks that spot (and `ExecBase->LastAlert`, which real
+hardware preserves across a warm reboot; Emu68 does not — poke it and
+reboot, it returns FFFFFFFF) and picks the report up from there.
+
+Every captured alert — live or found in `LastAlert` at startup — also
+becomes one line of plain text in `T:lastguru`, stamped with the date
+and time it was seen. `T:` is RAM-backed: the note survives daemon
+restarts and self-updates, and dies with the boot — exactly when
+`LastAlert` takes over as the surviving copy. On the Amiga itself,
+`Type T:lastguru` reads the same note.
+
+Every new stream subscription replays the note as its first line:
+
+```
+[wasabi: last guru: DEADEND ALERT #8000000b in task 'SysInfo' (0x0975c3d0) - 13-Aug-26 13:36:41]
+```
+
+(a combined debug+snoop attach sees it once, not twice). A client that
+reconnects its streams automatically therefore closes the loop on its
+own: the machine gurus, reboots, the daemon comes back, the stream
+resubscribes, and the alert code arrives in the same terminal that
+watched the machine die. All these lines ride ordinary `LOG` frames —
+there is nothing new on the wire, and `guru` in caps only states that
+this daemon produces them.
+
+**Trial instances.** `update` proves a new binary can serve by running
+it on a spare port before committing to it — which means two daemons
+alive at once, and one of them about to unload. A daemon started with
+the `trial` argument therefore patches nothing and claims no shared
+memory: no `Alert()` hook, no black-box region, and `DEBUG`/`SNOOP`
+are refused. Without it, the trial instance's `SetFunction` patches
+outlive its code segment, and the machine gurus with a privilege
+violation (`8000 0008`) the next time anything calls through the stale
+jump-table entry — which is exactly what it did, reproducibly, until
+this was added.
 
 **Farewell.** A daemon going down on purpose — `REBOOT`, `RESTART`,
 `QUIT`, or Break at its console — writes one last visible line on each

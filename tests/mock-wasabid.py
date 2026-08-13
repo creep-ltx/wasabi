@@ -51,7 +51,21 @@ BANNER = None
 # What this mock claims to support, appended to WELCOME. --caps lets a
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
-        "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,hb")
+        "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
+        "hb,guru,snoopentry")
+# --drop-stream-after N: close the FIRST subscribed stream connection
+# after N emit ticks, once per mock lifetime - the client's reconnect
+# then finds a mock that behaves. This is how the suite proves the
+# stream comes back from a mid-flight disconnect.
+DROP_AFTER = 0
+_DROPPED = [False]
+
+
+def drop_once():
+    if _DROPPED[0]:
+        return False
+    _DROPPED[0] = True
+    return True
 # Off-LAN connections the daemon has turned away, reported in WELCOME.
 REFUSED = 0
 # The path this mock pretends to be running from, so it can refuse a plain
@@ -178,10 +192,15 @@ class Handler(socketserver.BaseRequestHandler):
             # Once a stream is subscribed, alternate between watching for
             # further frames (a second subscription - debug and snoop may
             # share one connection, as on the C daemon) and emitting.
+            ticks = 0
             while True:
                 if self.subs and not self.buf:
                     r, _, _ = select.select([self.request], [], [], 0.35)
                     if not r:
+                        ticks += 1
+                        if DROP_AFTER and ticks >= DROP_AFTER \
+                                and drop_once():
+                            return       # hang up mid-stream, no goodbye
                         self.emit_streams()
                         continue
                 tag, payload = self.recv()
@@ -500,14 +519,20 @@ class Handler(socketserver.BaseRequestHandler):
         ("Shell", 'Lock("DH0:Tools", read) = ok'),
         ("cfile", 'LoadSeg("C:List") = ok'),
         ("wasabid", 'GetVar("wasabi.key") = fail (err 232)'),
+        # the poll noise bsdsocket really makes, three ticks of it, so
+        # folding and --output minimal have something to work on
+        ("wasabid", 'OpenLibrary("dos.library", v0) = ok'),
+        ("wasabid", 'OpenLibrary("dos.library", v0) = ok'),
+        ("wasabid", 'OpenLibrary("dos.library", v0) = ok'),
     ]
 
     def do_stream(self, tag, payload):
         """Register a subscription; the handler loop does the emitting."""
         if tag == SNOOP:
+            (flags,) = struct.unpack_from(">I", payload, 0)
             pattern, _ = unpack_str(payload, 4)
             self.subs[1] = {"rx": amiga_pattern(pattern) if pattern else None,
-                            "i": 0}
+                            "i": 0, "entry": bool(flags & 1)}
         else:
             self.subs[0] = {"i": 0}
 
@@ -521,6 +546,9 @@ class Handler(socketserver.BaseRequestHandler):
             st = self.subs[0]
             st["i"] += 1
             self.emit("exfat: ReadCacheNode(0x08cc3140, %d)\n" % st["i"])
+            if st["i"] == 2:
+                self.emit("[wasabi: DEADEND ALERT #80000004 in task "
+                          "'SysInfo' (0x082a1340)]\n")
         if 1 in self.subs:
             st = self.subs[1]
             for _ in range(len(self.SNOOP_SAMPLES)):
@@ -528,6 +556,9 @@ class Handler(socketserver.BaseRequestHandler):
                 st["i"] += 1
                 if st["rx"] and not st["rx"].match(task):
                     continue
+                if st.get("entry"):
+                    self.emit("%-20s %s ...\n"
+                              % (task, line.split(" = ")[0]), stream=1)
                 self.emit("%-20s %s\n" % (task, line), stream=1)
                 break
 
@@ -560,7 +591,7 @@ def discovery_responder(port, name):
 
 
 def main():
-    global ROOT, KEY, PORT, BANNER, CAPS, REFUSED
+    global ROOT, KEY, PORT, BANNER, CAPS, REFUSED, DROP_AFTER
     p = argparse.ArgumentParser()
     p.add_argument("--root", default=ROOT)
     p.add_argument("--port", type=int, default=1234)
@@ -571,8 +602,12 @@ def main():
                    help="capability list; empty plays a pre-caps daemon")
     p.add_argument("--refused", type=int, default=0,
                    help="off-LAN refusals to report in WELCOME")
+    p.add_argument("--drop-stream-after", type=int, default=0, metavar="N",
+                   help="close the first stream connection after N emit "
+                        "ticks (once) - for the reconnect tests")
     args = p.parse_args()
     REFUSED = args.refused
+    DROP_AFTER = args.drop_stream_after
     ROOT, KEY, PORT, BANNER = args.root, args.key, args.port, args.banner
     CAPS = args.caps
     os.makedirs(ROOT, exist_ok=True)

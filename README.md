@@ -65,6 +65,8 @@ pulling in its libraries — captured live off the A1200.
 | `grab` / `screen` | **working on the real A1200** — front screen to PNG in 0.1 s; RTG and native paths both |
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
 | stream heartbeat + farewell | **working on the real A1200** — a dead machine is noticed; a deliberate exit says goodbye first |
+| stream auto-reconnect | client-side — a lost stream retries forever and says why it dropped; `--once` restores stop-on-disconnect |
+| guru report | **working on the real A1200** — Alert() hook names the alert code and dying task on both streams (proven live with `alertemit`, 13 Aug 2026); the note persists in `T:lastguru` and greets every new stream attach; a deadend guru survives the reboot in a top-of-RAM black box, proven with a live `#8035c0de` guru on 13 Aug 2026 (`LastAlert` is dead on Emu68 - proven by poke+reboot) |
 | exit guards + `--force` | **working on the real A1200** — no exit with a runner alive; `--force` Ctrl-Cs it and delivers its real exit code |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
@@ -410,14 +412,99 @@ daemon's heartbeats for exactly as long as it runs, and the stream picks
 back up when it finishes. TCP keepalive on every connection is what
 finally declares a truly dead machine dead, about half a minute in.
 
+**And a stream, once open, stays open.** Whatever kills the connection —
+keepalive giving up on a frozen machine, a reboot's reset, a Wi-Fi hop
+blinking overnight, the daemon restarting for a self-update — the client
+announces the loss and then retries every couple of seconds, forever:
+
+```
+[debug+snoop: connection lost (connection closed by the Amiga) - reconnecting until the Amiga returns; Ctrl-C to stop]
+[debug+snoop: reconnected after 34 s - wasabid 0.1]
+```
+
+then resubscribes and streams on. `--once` restores the old
+stop-on-disconnect behaviour for scripts.
+
+A `--log` file also records the client's own side of the story as
+`client |` lines — how the stream was started and with which options,
+every loss and reconnect, and how it ended — so a log read weeks later
+says for itself what was subscribed and when:
+
+```
+2026-08-13 09:14:20.101 client | debug+snoop stream open to 192.168.68.109:1234 (wasabid 0.1) - Ctrl-C to stop
+```
+
+## The guru report
+
+A guru used to be the one event these streams could not describe: the
+snoop trace just stops mid-thought, and which task died with which alert
+code stayed on the Amiga's frozen screen. Emu68 has no MMU, so
+Enforcer-style tooling is not an option — instead wasabid patches exec's
+`Alert()` (LVO -108), the one call every crash path funnels through, for
+its whole lifetime. When an alert fires in task context, the patch wakes
+the daemon (which runs at priority 1 precisely so it wins this race) and
+one line reaches both streams before the original `Alert()` freezes the
+display:
+
+```
+snoop | Amelinium_040        OpenLibrary("dos.library", v0) = ok
+snoop | [wasabi: DEADEND ALERT #8000000b in task 'Amelinium_040' (0x0975c3d0)]
+```
+
+An alert raised in supervisor mode or an interrupt cannot be escaped
+live — no task switch can happen before the freeze. Exec's own
+`ExecBase->LastAlert` would be the classic place to look after the
+reboot, but on Emu68 it does not survive one (poke a value in, reboot,
+it comes back `FFFFFFFF`) — while plain RAM content at the top of the
+fast pool does, proven the same way. So the daemon keeps a black box:
+the patch stashes the report (code, task name, checksum) just under
+`mh_Upper` of the highest fast-RAM MemHeader — a deadend machine is
+dying anyway, which is what excuses writing to memory it does not own —
+and the next boot's daemon finds it there. `LastAlert` is still checked
+too, for hardware where exec cooperates.
+
+Either way, every captured alert also becomes one line of plain text in
+`T:lastguru`, stamped with when it was seen — and every new `wasabi
+debug` or `wasabi snoop` replays that note as its first line:
+
+```
+[wasabi: last guru: DEADEND ALERT #8000000b in task 'SysInfo' (0x0975c3d0) - 13-Aug-26 13:36:41]
+```
+
+The client puts a name to any real code it recognizes, straight from
+`exec/alerts.h` — `ALERT #80000004 (CPU: illegal instruction)`,
+`#8100000F (exec: bad address passed to FreeMem)` — the same way it
+dresses DOS error codes. A code it cannot parse (like alertemit's
+deliberately synthetic `8035C0DE`) stays bare rather than guessed at.
+
+`T:` is RAM-backed, so the note survives daemon restarts and
+self-updates, and dies with the boot — exactly when `LastAlert` takes
+over as the surviving copy. On the Amiga itself, `Type T:lastguru`
+reads the same note. Auto-reconnect closes the loop by itself: the
+machine gurus, reboots, wasabid comes back, the stream resubscribes,
+and the alert code arrives in the same terminal that watched the
+machine die.
+
+The patch runs in the crashing context, which may own almost nothing:
+it copies the code and task name into globals, `Signal()`s the daemon
+(the one exec call documented interrupt-callable), and chains to the
+original so the alert still shows on the Amiga itself. Teardown follows
+the same rule as the other patches — the vector is only restored if it
+still points at ours.
+
 ## The snoop stream
 
 `wasabi snoop` is the SnoopDOS trick delivered over the wire: the daemon
 `SetFunction()`s fourteen of the `dos.library` and `exec.library` calls a
 developer most wants to watch — `Open`, `Lock`, `LoadSeg`, `Execute`,
 `SystemTagList`, `GetVar`, `SetVar`, `DeleteFile`, `Rename`, `CreateDir`,
-`MakeLink`, `OpenLibrary`, `OpenDevice`, `FindPort` — and logs each call
-with its caller, its string/numeric arguments and its real result:
+`MakeLink`, `CurrentDir`, `SetComment`, `SetProtection`, `RunCommand`,
+`NewLoadSeg`, `DeleteVar`, `OpenLibrary`, `OpenDevice`, `FindPort`,
+`FindTask`, `FindResident`, `FindSemaphore`, `OpenResource`, plus
+icon.library's `GetDiskObject`, `GetDiskObjectNew`, `PutDiskObject`,
+`FindToolType`, `MatchToolValue` and diskfont's `OpenDiskFont` — and
+logs each call with its caller, its string/numeric arguments and its
+real result:
 
 ```
 $ wasabi snoop --task '#?'
@@ -427,10 +514,54 @@ cfile                LoadSeg("C:List") = ok
 wasabid              GetVar("wasabi.key") = ok
 ```
 
+A failed call's bare IoErr code is dressed by the client throughout
+the stream — on screen and in the `--log` file alike, `= fail
+(Error 205: Object not found)` rather than the wire's terse
+`(err 205)` — and guru alert codes are decoded the same way. `run`'s
+output is the one place left alone: there the failing command already
+speaks for itself, and nothing is bolted on after it.
+
+`--entry` logs each call on the way **in** as well as on the way out:
+
+```
+SysInfo              OpenDevice("brcm-emmc.device", unit 1) ...
+SysInfo              OpenDevice("brcm-emmc.device", unit 1) = ok
+```
+
+A line with no partner is the call the machine died inside — the one
+thing a log-on-return trace can never show, because the return never
+happens. It costs a task switch per patched call (the daemon is
+signalled immediately, to get the line on the wire before a freeze can
+swallow it), so it is opt-in and deliberately slow.
+
+`--output` sets how much survives to the screen and the log:
+
+| mode | what it does |
+|---|---|
+| `full` | every line as it arrives, raw bytes and all — nothing folded, nothing hidden |
+| `normal` (default) | folds a run of identical lines into one plus `... N more identical` |
+| `minimal` | also hides routine noise: the five variables the shell probes before every command, `FindTask`, the Directory Opus port probe, and `OpenLibrary("dos.library")` |
+
+The noise is real and it is relentless: bsdsocket's `WaitSelect` opens
+`dos.library` once per daemon poll, which is twenty lines a second on
+its own. Replaying a real 2306-line capture gives 600 lines at
+`normal` and 196 at `minimal` — one run in it was **588 identical
+lines**, folded to two. The opening line of every stream says which
+mode is in force, so a log always describes what it left out; and a
+pending fold is flushed when the stream falls quiet or drops, so a
+freeze cannot swallow the tally of what the machine was doing.
+
 `--task PAT` filters on the caller's name with AmigaDOS wildcards
 (`#?`, `?`, `*`); no filter means everything. The caller is named the way
 SnoopDOS names it — the CLI command being run if there is one, else the
 task name.
+
+icon.library and diskfont.library are opened by the daemon for exactly
+as long as they are patched — not politeness but necessity: a library
+expunged with our stub in its jump table would take the stub with it.
+Every LVO and register assignment comes from the NDK's `.fd` files, and
+`OpenDiskFont`'s argument is a `TextAttr`, so that patch follows
+`ta_Name` to print a font name rather than a pointer.
 
 Each patch is a tiny stub that pushes a descriptor and jumps to one
 common trampoline. The trampoline runs in the **calling** task's context,

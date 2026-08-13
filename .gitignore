@@ -4,3 +4,4 @@ tests/dbgemit
 tests/slowwrite
 tests/palscreen
 /wasabid
+tests/alertemit

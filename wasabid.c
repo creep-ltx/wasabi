@@ -17,6 +17,7 @@
 #include <dos/dos.h>
 #include <dos/dostags.h>
 #include <dos/dosextens.h>
+#include <dos/datetime.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <intuition/screens.h>
@@ -39,10 +40,10 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define VERSION_STR "wasabid 0.1"
+#define VERSION_STR "wasabid 0.2b7"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.1 (12.8.2026)";
+    "$VER: wasabid 0.2b7 (13.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -63,7 +64,7 @@ static const char *verstag __attribute__((used)) =
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
-                 "grab,screen,hb"
+                 "grab,screen,hb,guru,snoopentry"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -236,6 +237,25 @@ static char g_name[32] = "amiga";    /* discovery name: the 'name' startup
 static BOOL g_name_set;              /* 'name' given on the command line */
 static BOOL g_quit;
 static BOOL g_restart;               /* relaunch ourselves on the way out */
+
+/*
+ * 'trial': this instance exists only to prove a binary can serve, on a
+ * spare port, beside the daemon it is about to replace - and then it
+ * exits and its code segment is freed.
+ *
+ * Two daemons must therefore never both patch the same exec vector.
+ * The chain nests correctly on paper (the second one patches over the
+ * first and removes itself first), but the cost of being wrong is a
+ * jump table entry pointing into freed memory, and the machine then
+ * gurus with a privilege violation the moment anything calls through
+ * it - somewhere else entirely, minutes later, in a task that had
+ * nothing to do with any of this.
+ *
+ * So a trial instance installs no patches and claims no shared memory
+ * at all. It answers a handshake and a ping, which is the entire point
+ * of it, and it touches nothing the live daemon owns.
+ */
+static BOOL g_trial;
 static int  g_port = DEF_PORT;        /* the port we listen on */
 static char g_extra_args[128];       /* replayed on restart, so a running
                                       * allow-list and name survive a
@@ -821,6 +841,9 @@ static LONG ring_drain(UBYTE *buf, LONG max)
     return n;
 }
 
+/* Defined with the guru report below; both stream starts replay it. */
+static void guru_header(int cl, ULONG stream, ULONG *seq);
+
 static BOOL debug_start(int cl)
 {
     if (g_dbg_client >= 0)
@@ -830,6 +853,7 @@ static BOOL debug_start(int cl)
     g_dbg_client = cl;
     g_dbg_seq = 0;
     debug_install();
+    guru_header(cl, 0, &g_dbg_seq);       /* the T:lastguru note, if any */
     return TRUE;                          /* LOG frames follow from the pump */
 }
 
@@ -885,6 +909,9 @@ static void debug_stop(void)
  *    stack rather than overflowing it building the record.
  */
 
+/* SNOOP's flags word, reserved since the first protocol version. */
+#define SNOOPF_ENTRY 1               /* log calls on the way in as well */
+
 #define SN_EVMAX   512               /* events in the ring, power of two.
                                       * ~107 KB of BSS: a PiStorm-fast CPU
                                       * can fire >150 patched calls between
@@ -897,24 +924,40 @@ static void debug_stop(void)
 #define RF_D1 1
 #define RF_D2 2
 #define RF_D3 3
+#define RF_D4 4
 #define RF_A0 8
 #define RF_A1 9
 
-#define SN_DOS  0                    /* which library the LVO lives in */
-#define SN_EXEC 1
+#define SN_DOS      0                /* which library the LVO lives in */
+#define SN_EXEC     1
+#define SN_ICON     2                /* opened by us while snooping */
+#define SN_DISKFONT 3
+#define SN_NLIB     4
 
 #define NK_NONE     0                /* how to render the numeric arg */
 #define NK_OPENMODE 1
 #define NK_LOCKMODE 2
 #define NK_VERSION  3
 #define NK_UNIT     4
+#define NK_BPTR     5                /* a lock, shown as a raw BPTR */
+#define NK_HEX      6                /* a mask (SetProtection) */
+#define NK_PLAIN    7                /* just a number (RunCommand's length) */
 
 #define RK_BOOL 0                    /* how to read d0: nonzero = ok */
 #define RK_RC   1                    /* a return code (SystemTagList) */
 #define RK_LEN  2                    /* -1 = fail, else a length (GetVar) */
 #define RK_ZERO 3                    /* zero = ok (OpenDevice) */
+#define RK_PTR  4                    /* the value itself is the answer */
 
 #define SNF_SOFT2 1                  /* str2 is a string only if d3 != 0 */
+#define SNF_DEREF1 2                 /* str1 register points AT the string
+                                      * pointer, not at the string: a
+                                      * TextAttr's ta_Name is its first
+                                      * field, which is how OpenDiskFont
+                                      * gets a readable name */
+#define SNF_LEN1  4                  /* str1 is not NUL-terminated - the
+                                      * numeric arg is its length, and the
+                                      * copy stops there (RunCommand) */
 
 struct SnoopFn {
     APTR        orig;                /* MUST be first: the asm reads (a2) */
@@ -934,6 +977,7 @@ struct SnoopEv {
     char  s1[100];
     char  s2[64];
     BOOL  has2;
+    BOOL  entry;                     /* logged on the way IN: no result yet */
     LONG  num;
     LONG  res;
     LONG  err;                       /* pr_Result2 after the call */
@@ -951,11 +995,23 @@ static struct Task *g_snoop_self;    /* the daemon; its own calls are not
                                       * logged, or draining the ring over
                                       * bsdsocket could feed the ring */
 
+/* icon.library and diskfont.library are not open on a bare system, and
+ * a library with our patch in it must not be expunged underneath us -
+ * so snoop holds them open for exactly as long as it is patched. NULL
+ * means "could not open": those descriptors are skipped, not fatal. */
+static struct Library *g_snoop_libs[SN_NLIB];
+
+/* The daemon itself: entry-mode snooping and the Alert patch both wake
+ * it from another task's context. Set once, in main(). */
+static struct Task *g_daemon_task;
+
 /* Read by the trampoline, so plain globals with asm-visible names. */
 volatile UWORD wasabi_snoop_on;      /* stubs record only while set */
 volatile UWORD wasabi_snoop_users;   /* callers currently inside a stub */
+volatile UWORD wasabi_snoop_entry;   /* also log calls on the way in */
 
 void snoop_record(struct SnoopFn *d, ULONG *regs, LONG res);
+void snoop_record_entry(struct SnoopFn *d, ULONG *regs);
 
 /*
  * HERE BE DRAGONS. This trampoline and the RF_* indices in the
@@ -982,6 +1038,15 @@ void snoop_record(struct SnoopFn *d, ULONG *regs, LONG res);
  * with the caller's registers intact, hand descriptor + register file +
  * result to C, then restore with d0 (and d1 - old dos.library returned
  * results in both, and SnoopDOS keeps that quirk alive) as the result.
+ *
+ * Entry logging sits between the register file and that call. It is
+ * gated on a plain global word - the same trick the enabled check
+ * already uses, and deliberately NOT on a field of the descriptor:
+ * a struct offset hardcoded in asm is exactly the split definition
+ * this comment warns about. Since the C call clobbers the scratch
+ * registers the original still needs, the whole file is reloaded
+ * afterwards and a2/a3 re-derived from the stack, which leaves the
+ * machine in precisely the state the no-entry path reaches the jsr in.
  */
 asm(
     "    .text                          \n"
@@ -999,6 +1064,15 @@ asm(
     "snoop_live:                        \n"
     "    addq.w  #1,_wasabi_snoop_users \n"
     "    movem.l %d0-%d7/%a0-%a6,-(%sp) \n"  /* the 60-byte register file */
+    "    tst.w   _wasabi_snoop_entry    \n"
+    "    beq     snoop_docall           \n"
+    "    move.l  60(%sp),%a2            \n"  /* a2 = desc */
+    "    pea     0(%sp)                 \n"  /* C arg 2: the register file */
+    "    move.l  %a2,-(%sp)             \n"  /* C arg 1: the descriptor */
+    "    jsr     _snoop_record_entry    \n"
+    "    addq.l  #8,%sp                 \n"
+    "    movem.l (%sp),%d0-%d7/%a0-%a6  \n"  /* every caller register back */
+    "snoop_docall:                      \n"
     "    move.l  60(%sp),%a2            \n"  /* a2 = desc */
     "    move.l  (%a2),%a3              \n"  /* a3 = desc->orig */
     "    jsr     (%a3)                  \n"  /* argument regs untouched */
@@ -1058,12 +1132,57 @@ SNOOP_DESC(OpenDevice,    SN_EXEC, -444, RF_A0, SN_NONE, RF_D0,
 SNOOP_DESC(FindPort,      SN_EXEC, -390, RF_A1, SN_NONE, SN_NONE,
            NK_NONE, RK_BOOL, 0)
 
+/* The rest of SnoopDOS's list. CurrentDir's lock stays a raw BPTR:
+ * naming it would mean NameFromLock, a dos.library call, from inside a
+ * dos.library patch in someone else's context. RunCommand's parameter
+ * string is counted, not terminated, so its copy is bounded by d4. */
+SNOOP_DESC(CurrentDir,    SN_DOS,  -126, SN_NONE, SN_NONE, RF_D1,
+           NK_BPTR, RK_PTR, 0)
+SNOOP_DESC(SetComment,    SN_DOS,  -180, RF_D1, RF_D2, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(SetProtection, SN_DOS,  -186, RF_D1, SN_NONE, RF_D2,
+           NK_HEX, RK_BOOL, 0)
+SNOOP_DESC(RunCommand,    SN_DOS,  -504, RF_D3, SN_NONE, RF_D4,
+           NK_PLAIN, RK_RC, SNF_LEN1)
+SNOOP_DESC(NewLoadSeg,    SN_DOS,  -768, RF_D1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(DeleteVar,     SN_DOS,  -912, RF_D1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(FindResident,  SN_EXEC, -96,  RF_A1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(FindTask,      SN_EXEC, -294, RF_A1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(OpenResource,  SN_EXEC, -498, RF_A1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(FindSemaphore, SN_EXEC, -594, RF_A1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(GetDiskObject, SN_ICON, -78,  RF_A0, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(PutDiskObject, SN_ICON, -84,  RF_A0, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(FindToolType,  SN_ICON, -96,  RF_A1, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(MatchToolValue, SN_ICON, -102, RF_A0, RF_A1, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(GetDiskObjectNew, SN_ICON, -132, RF_A0, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, 0)
+SNOOP_DESC(OpenDiskFont,  SN_DISKFONT, -30, RF_A0, SN_NONE, SN_NONE,
+           NK_NONE, RK_BOOL, SNF_DEREF1)
+
 static struct SnoopFn *snoop_fns[] = {
     &snoop_desc_Open,        &snoop_desc_Lock,      &snoop_desc_LoadSeg,
     &snoop_desc_Execute,     &snoop_desc_SystemTagList,
     &snoop_desc_GetVar,      &snoop_desc_SetVar,    &snoop_desc_DeleteFile,
     &snoop_desc_Rename,      &snoop_desc_CreateDir, &snoop_desc_MakeLink,
     &snoop_desc_OpenLibrary, &snoop_desc_OpenDevice, &snoop_desc_FindPort,
+    &snoop_desc_CurrentDir,  &snoop_desc_SetComment,
+    &snoop_desc_SetProtection, &snoop_desc_RunCommand,
+    &snoop_desc_NewLoadSeg,  &snoop_desc_DeleteVar,
+    &snoop_desc_FindResident, &snoop_desc_FindTask,
+    &snoop_desc_OpenResource, &snoop_desc_FindSemaphore,
+    &snoop_desc_GetDiskObject, &snoop_desc_PutDiskObject,
+    &snoop_desc_FindToolType, &snoop_desc_MatchToolValue,
+    &snoop_desc_GetDiskObjectNew, &snoop_desc_OpenDiskFont,
 };
 #define SN_NFN (LONG)(sizeof(snoop_fns) / sizeof(snoop_fns[0]))
 
@@ -1076,10 +1195,24 @@ static void snoop_copystr(char *dst, LONG dstsz, const char *src)
     dst[i] = '\0';
 }
 
+/* Bounded copy of a counted (not NUL-terminated) string: RunCommand's
+ * parameter block is d4 bytes long and often ends in a newline rather
+ * than a zero, so trust the count, not the bytes. */
+static void snoop_copycount(char *dst, LONG dstsz, const char *src, LONG len)
+{
+    LONG i = 0;
+    if (!src || len < 0) { snoop_copystr(dst, dstsz, src); return; }
+    while (i < dstsz - 1 && i < len && src[i] && src[i] != '\n') {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
 /* The expensive half, in its own frame so the headroom check in
  * snoop_record() has already passed before this local exists. */
 static void __attribute__((noinline))
-snoop_record2(struct SnoopFn *d, ULONG *regs, LONG res)
+snoop_record2(struct SnoopFn *d, ULONG *regs, LONG res, BOOL entry)
 {
     struct SnoopEv ev;
     struct Task *t = SysBase->ThisTask;
@@ -1090,6 +1223,7 @@ snoop_record2(struct SnoopFn *d, ULONG *regs, LONG res)
     ev.res  = res;
     ev.err  = 0;
     ev.has2 = FALSE;
+    ev.entry = entry;
     ev.task[0] = '\0';
 
     /* Name the culprit the way SnoopDOS does: the CLI command being run
@@ -1098,7 +1232,9 @@ snoop_record2(struct SnoopFn *d, ULONG *regs, LONG res)
         struct Process *pr = (struct Process *)t;
         struct CommandLineInterface *cli =
             (struct CommandLineInterface *)BADDR(pr->pr_CLI);
-        ev.err = pr->pr_Result2;
+        if (!entry)                      /* on the way in, pr_Result2 still
+                                          * belongs to some earlier call */
+            ev.err = pr->pr_Result2;
         if (cli) {
             UBYTE *b = (UBYTE *)BADDR(cli->cli_CommandName);
             if (b && b[0]) {                 /* a BSTR: length, then bytes */
@@ -1113,9 +1249,18 @@ snoop_record2(struct SnoopFn *d, ULONG *regs, LONG res)
     if (!ev.task[0])
         snoop_copystr(ev.task, sizeof(ev.task), t->tc_Node.ln_Name);
 
-    if (d->str1 != SN_NONE)
-        snoop_copystr(ev.s1, sizeof(ev.s1), (const char *)regs[d->str1]);
-    else
+    if (d->str1 != SN_NONE) {
+        ULONG p = regs[d->str1];
+        /* A TextAttr, not a string: its first field is the name. One
+         * indirection, guarded - a caller's struct pointer is as
+         * trustworthy as the string pointers we already follow. */
+        if ((d->flags & SNF_DEREF1) && p)
+            p = *(ULONG *)p;
+        if (d->flags & SNF_LEN1)
+            snoop_copycount(ev.s1, sizeof(ev.s1), (const char *)p, ev.num);
+        else
+            snoop_copystr(ev.s1, sizeof(ev.s1), (const char *)p);
+    } else
         ev.s1[0] = '\0';
     if (d->str2 != SN_NONE) {
         ev.has2 = TRUE;
@@ -1156,22 +1301,84 @@ void snoop_record(struct SnoopFn *d, ULONG *regs, LONG res)
         Disable(); g_snev_lost++; Enable();
         return;
     }
-    snoop_record2(d, regs, res);
+    snoop_record2(d, regs, res, FALSE);
+}
+
+/*
+ * The same, on the way IN - the only way to see a call that never
+ * comes back. A machine that dies inside brcm-emmc.device leaves its
+ * last completed call in the log and its fatal one nowhere; this puts
+ * the fatal one on the wire before it is made.
+ *
+ * Racing a freeze is the whole point, so the daemon is signalled the
+ * moment the event is queued rather than waiting up to a poll interval
+ * for the drain. That is a task switch per patched call - entry mode
+ * is deliberately slow, and deliberately opt-in.
+ */
+void snoop_record_entry(struct SnoopFn *d, ULONG *regs)
+{
+    struct Task *t = SysBase->ThisTask;
+    char probe;
+
+    if (!wasabi_snoop_on || !wasabi_snoop_entry || t == g_snoop_self)
+        return;
+    if ((APTR)&probe > t->tc_SPLower && (APTR)&probe <= t->tc_SPUpper &&
+        (char *)&probe - (char *)t->tc_SPLower < 800) {
+        Disable(); g_snev_lost++; Enable();
+        return;
+    }
+    snoop_record2(d, regs, 0, TRUE);
+    if (g_daemon_task && t != g_daemon_task)
+        Signal(g_daemon_task, SIGBREAKF_CTRL_F);
 }
 
 static struct Library *snoop_base(struct SnoopFn *d)
 {
-    return d->lib == SN_EXEC ? (struct Library *)SysBase
-                             : (struct Library *)DOSBase;
+    switch (d->lib) {
+    case SN_EXEC: return (struct Library *)SysBase;
+    case SN_DOS:  return (struct Library *)DOSBase;
+    default:      return g_snoop_libs[d->lib];
+    }
+}
+
+/*
+ * icon.library and diskfont.library get opened here and closed only
+ * when every patch of theirs is out again. That open is not politeness
+ * - a library expunged with our stub in its jump table takes the stub
+ * with it, and the restore afterwards would write a stale pointer into
+ * a fresh library. Holding it open makes expunge impossible.
+ */
+static void snoop_openlibs(void)
+{
+    if (!g_snoop_libs[SN_ICON])
+        g_snoop_libs[SN_ICON] = OpenLibrary("icon.library", 0);
+    if (!g_snoop_libs[SN_DISKFONT])
+        g_snoop_libs[SN_DISKFONT] = OpenLibrary("diskfont.library", 0);
+}
+
+static void snoop_closelibs(void)
+{
+    LONG i;
+    for (i = 0; i < SN_NFN; i++)     /* a stuck patch keeps its base */
+        if (snoop_fns[i]->installed && snoop_fns[i]->lib >= SN_ICON)
+            return;
+    for (i = SN_ICON; i < SN_NLIB; i++) {
+        if (g_snoop_libs[i])
+            CloseLibrary(g_snoop_libs[i]);
+        g_snoop_libs[i] = NULL;
+    }
 }
 
 static void snoop_install(void)
 {
     LONG i;
+    snoop_openlibs();
     for (i = 0; i < SN_NFN; i++) {
         struct SnoopFn *d = snoop_fns[i];
         if (d->installed)
             continue;                /* left over from a stuck teardown */
+        if (!snoop_base(d))
+            continue;                /* that library is not on this machine */
         Disable();
         d->orig = (APTR)SetFunction(snoop_base(d), d->lvo,
                                     (ULONG (*)())d->stub);
@@ -1202,6 +1409,7 @@ static BOOL snoop_uninstall(void)
         }
         Enable();
     }
+    snoop_closelibs();
     return all;
 }
 
@@ -1271,7 +1479,22 @@ static LONG snoop_format(struct SnoopEv *ev, char *out)
     case NK_UNIT:
         n += sprintf(out + n, ", unit %ld", (long)ev->num);
         break;
+    case NK_BPTR:
+        n += sprintf(out + n, "lock 0x%08lx", (unsigned long)ev->num);
+        break;
+    case NK_HEX:
+        n += sprintf(out + n, ", 0x%08lx", (unsigned long)ev->num);
+        break;
+    case NK_PLAIN:
+        n += sprintf(out + n, ", %ld byte(s)", (long)ev->num);
+        break;
     }
+
+    /* On the way in there is no result yet - and saying so is the
+     * point: a line that never gains its partner is the call the
+     * machine died inside. */
+    if (ev->entry)
+        return n + sprintf(out + n, ") ...\n");
 
     switch (d->rkind) {
     case RK_RC:
@@ -1291,10 +1514,13 @@ static LONG snoop_format(struct SnoopEv *ev, char *out)
         else
             n += sprintf(out + n, ") = error %ld\n", (long)ev->res);
         break;
+    case RK_PTR:
+        n += sprintf(out + n, ") = 0x%08lx\n", (unsigned long)ev->res);
+        break;
     default:                         /* RK_BOOL */
         if (ev->res)
             n += sprintf(out + n, ") = ok\n");
-        else if (ev->err && d->lib == SN_DOS)
+        else if (ev->err && (d->lib == SN_DOS || d->lib == SN_ICON))
             n += sprintf(out + n, ") = fail (err %ld)\n", (long)ev->err);
         else
             n += sprintf(out + n, ") = fail\n");
@@ -1325,7 +1551,7 @@ static LONG snoop_format(struct SnoopEv *ev, char *out)
  * raise a "please insert volume" requester - and pr_WindowPtr is -1 for
  * the duration in case anything else would try.
  */
-static BOOL snoop_selftest(char *why, LONG whysz)
+static BOOL snoop_selftest(char *why, LONG whysz, BOOL entry)
 {
     static LONG serial;
     char path[64];
@@ -1336,6 +1562,7 @@ static BOOL snoop_selftest(char *why, LONG whysz)
     BPTR lock;
     ULONG i;
     BOOL found = FALSE;
+    BOOL found_entry = FALSE;
 
     /* Unique per attempt, so a stale ring entry can never be mistaken
      * for this run's event. */
@@ -1344,6 +1571,7 @@ static BOOL snoop_selftest(char *why, LONG whysz)
 
     g_snev_head = g_snev_tail = g_snev_lost = 0;
     g_snoop_self = NULL;             /* record our own call, just this once */
+    wasabi_snoop_entry = entry ? 1 : 0;
     wasabi_snoop_on = 1;
 
     if (isproc) {
@@ -1355,6 +1583,7 @@ static BOOL snoop_selftest(char *why, LONG whysz)
         me->pr_WindowPtr = oldwin;
 
     wasabi_snoop_on = 0;
+    wasabi_snoop_entry = 0;
     g_snoop_self = self;
 
     if (lock)                        /* absurd, but do not leak it */
@@ -1372,15 +1601,28 @@ static BOOL snoop_selftest(char *why, LONG whysz)
             snoop_copystr(why, whysz, "the mode argument came back wrong");
             goto done;
         }
+        /* The entry event is the new half of the trampoline: it proves
+         * the register file survived the C call made before the
+         * original ran. It carries no result, so it is checked for its
+         * arguments and counted separately. */
+        if (ev->entry) {
+            found_entry = TRUE;
+            continue;
+        }
         if (ev->res != (LONG)lock) {
             snoop_copystr(why, whysz, "the result came back wrong");
             goto done;
         }
         found = TRUE;
-        snoop_copystr(why, whysz, "ok");
-        break;
     }
-    if (!found)
+    if (found && entry && !found_entry) {
+        snoop_copystr(why, whysz, "the entry-side patch captured nothing");
+        found = FALSE;
+        goto done;
+    }
+    if (found)
+        snoop_copystr(why, whysz, "ok");
+    else
         snoop_copystr(why, whysz, g_snev_lost ? "the ring overflowed"
                                               : "the patch captured nothing");
 done:
@@ -1388,9 +1630,10 @@ done:
     return found;
 }
 
-static BOOL snoop_start(int cl, const char *pat)
+static BOOL snoop_start(int cl, const char *pat, ULONG flags)
 {
     char why[64];
+    BOOL entry = (flags & SNOOPF_ENTRY) != 0;
 
     if (g_snoop_client >= 0)
         return send_perr(g_clients[cl].fd, "the snoop stream is already in use");
@@ -1401,8 +1644,11 @@ static BOOL snoop_start(int cl, const char *pat)
     g_snoop_self = FindTask(NULL);
     snoop_install();
 
-    /* Patches are live from here; nothing records until the flag is set. */
-    if (!snoop_selftest(why, sizeof(why))) {
+    /* Patches are live from here; nothing records until the flag is set.
+     * The self-test runs in whichever mode the session asked for, so
+     * entry logging is proven on this machine before any other task can
+     * reach the new half of the trampoline. */
+    if (!snoop_selftest(why, sizeof(why), entry)) {
         char msg[200];
         snoop_uninstall();
         sprintf(msg, "snoop self-test failed (%.60s) - the patch trampoline "
@@ -1411,6 +1657,11 @@ static BOOL snoop_start(int cl, const char *pat)
     }
 
     g_snoop_client = cl;
+    /* Same note as on the debug stream - but not twice to a client
+     * whose combined debug+snoop attach already saw it there. */
+    if (g_dbg_client != cl)
+        guru_header(cl, 1, &g_snoop_seq);
+    wasabi_snoop_entry = entry ? 1 : 0;
     wasabi_snoop_on = 1;
     return TRUE;                     /* LOG frames follow from the pump */
 }
@@ -1443,6 +1694,7 @@ static BOOL snoop_pump(void)
 static void snoop_stop(void)
 {
     wasabi_snoop_on = 0;
+    wasabi_snoop_entry = 0;
     snoop_uninstall();               /* best effort; a stuck stub idles */
     g_snoop_client = -1;
 }
@@ -1456,23 +1708,393 @@ static ULONG now_secs(void)
            (ULONG)d.ds_Tick / 50UL;
 }
 
-/*
- * The daemon is going down on purpose - reboot, restart, quit, Break.
- * Say so on any open stream first: to the operator watching `wasabi
- * debug`, a machine that stops streaming and one that froze look
- * identical, and only the daemon knows which this is. One visible line,
- * in the same voice as the connect/refusal notices.
- */
-static void say_goodbye(const char *why)
+/* An empty heartbeat LOG, sent only if the socket will take it without
+ * waiting. Skipping is TRUE - congested is not dead; see the heartbeat
+ * comment in the main loop. FALSE means the send itself failed. */
+static BOOL hb_send(int fd, ULONG stream, ULONG *seq)
 {
-    char line[80];
-    LONG n = sprintf(line, "[wasabi: %s - closing this stream]\n", why);
+    fd_set w;
+    struct timeval tv;
+    FD_ZERO(&w);
+    FD_SET(fd, &w);
+    tv.tv_secs = 0;
+    tv.tv_micro = 0;
+    if (WaitSelect(fd + 1, NULL, &w, NULL, &tv, NULL) <= 0)
+        return TRUE;
+    return send_log(fd, stream, ++(*seq), (const UBYTE *)"", 0);
+}
+
+/* One visible line on every open stream, in the same voice as the
+ * connect/refusal notices. A failed send is not a reason to drop the
+ * subscriber here - these lines are best-effort by nature. */
+static void stream_note(const char *line, LONG n)
+{
     if (g_dbg_client >= 0)
         send_log(g_clients[g_dbg_client].fd, 0, ++g_dbg_seq,
                  (UBYTE *)line, n);
     if (g_snoop_client >= 0)
         send_log(g_clients[g_snoop_client].fd, 1, ++g_snoop_seq,
                  (UBYTE *)line, n);
+}
+
+/*
+ * The daemon is going down on purpose - reboot, restart, quit, Break.
+ * Say so on any open stream first: to the operator watching `wasabi
+ * debug`, a machine that stops streaming and one that froze look
+ * identical, and only the daemon knows which this is.
+ */
+static void say_goodbye(const char *why)
+{
+    char line[80];
+    LONG n = sprintf(line, "[wasabi: %s - closing this stream]\n", why);
+    stream_note(line, n);
+}
+
+/* --- the guru report ------------------------------------------------ */
+
+/*
+ * Emu68 has no MMU, so Enforcer-style hit detection is off the table;
+ * what this machine CAN say is which task died with which alert code,
+ * in the moment before the guru takes the display. A SetFunction patch
+ * on exec's Alert() (LVO -108 - the one call every crash path funnels
+ * through) copies the code and the calling task's name into globals,
+ * wakes the daemon, and then chains to the original so the alert still
+ * shows on the Amiga itself.
+ *
+ * The report escapes when the scheduler still runs, and waits for the
+ * next boot when it does not:
+ *
+ *  - Alert raised in task context (an application calling Alert(), or
+ *    a trap handler running on the task's behalf): Signal() preempts
+ *    straight into the daemon - it runs at priority 1 for exactly this
+ *    reason - and the LOG line is on the wire before the original
+ *    Alert() freezes the machine.
+ *
+ *  - Alert raised in supervisor mode or an interrupt: no task switch
+ *    can happen before the freeze, so the line cannot leave now. But
+ *    exec preserves the code in ExecBase->LastAlert across the warm
+ *    reboot - that is how the post-reboot guru screen knows what to
+ *    show - and this daemon's next life reports it to the first stream
+ *    subscriber. A client that auto-reconnects closes the loop: the
+ *    machine dies, comes back, and the guru code arrives by itself.
+ *
+ * The note function runs in the crashing context, which may own almost
+ * nothing: no allocation, no I/O, no library call but Signal() (which
+ * exec documents as interrupt-callable), bounded stack, absolute
+ * addressing (no a4 setup, same as the other patches).
+ */
+static BOOL           g_alert_patched;
+static volatile ULONG g_alert_code;
+static volatile ULONG g_alert_taskaddr;
+static char           g_alert_taskname[36];
+static volatile BOOL  g_alert_pending;
+
+/*
+ * T:lastguru is the durable half of the guru report: one line of plain
+ * text, written whenever an alert is captured live (or found waiting
+ * in ExecBase->LastAlert at startup) and replayed at the top of every
+ * new stream subscription. T: is RAM-backed, so the note survives
+ * daemon restarts and self-updates - and dies with the boot, which is
+ * exactly when LastAlert takes over. `Type T:lastguru` on the Amiga
+ * itself reads the same note.
+ */
+static char g_guru_note[192];        /* empty = nothing to tell */
+static BOOL g_guru_note_dirty;       /* file write still owed */
+
+/*
+ * The black box. Exec's LastAlert does not survive a reboot on Emu68
+ * (proven by poking it and rebooting: it comes back FFFFFFFF), but
+ * plain RAM content does - a marker written at the TOP of the fast
+ * pool rode a reboot intact while one at the bottom was recycled by
+ * the boot. So a DEADEND alert is stashed just under mh_Upper of the
+ * highest fast MemHeader, and the daemon's next life finds it there.
+ * A checksum keeps leftover garbage from faking a guru. Recoverable
+ * alerts never touch it: for those the daemon is alive to write
+ * T:lastguru properly.
+ *
+ * The region is AllocAbs()'d at startup and held for the daemon's
+ * whole life, which is the difference between a black box and a bug.
+ * Free memory on this machine is not blank: exec keeps its free list
+ * IN it, as MemChunks. Writing 60 bytes into a chunk we do not own
+ * corrupts that list, and the machine gurus with AN_MemCorrupt at
+ * some unrelated FreeMem minutes later - which is precisely the kind
+ * of delayed, unattributable failure this daemon exists to catch,
+ * and an unforgivable thing for it to cause. Owning the region makes
+ * the write legal; the content still survives the reboot, because a
+ * reboot rebuilds the memory list without clearing the RAM under it.
+ */
+#define GURU_STASH_OFF 256           /* bytes below mh_Upper */
+
+struct GuruStash {
+    ULONG magic1, magic2;
+    ULONG code, taskaddr;
+    char  name[36];
+    ULONG sum;
+};
+#define GURU_MAGIC1 0x57534247UL     /* 'WSBG' */
+#define GURU_MAGIC2 0x55525531UL     /* 'URU1' */
+
+static struct GuruStash *g_stash;    /* ours, or NULL: no black box */
+static ULONG g_stash_size;           /* what AllocAbs actually gave us */
+
+static struct GuruStash *guru_stash_at(struct MemHeader *mh)
+{
+    return (struct GuruStash *)((UBYTE *)mh->mh_Upper - GURU_STASH_OFF);
+}
+
+/* Claim the region from the allocator, so writing to it is ours to do.
+ * A failure is not fatal - it only means this boot has no black box,
+ * and the live report and T:lastguru still work. */
+static void guru_stash_claim(void)
+{
+    struct MemHeader *mh, *best = NULL;
+    ULONG top;
+    Forbid();
+    for (mh = (struct MemHeader *)SysBase->MemList.lh_Head;
+         mh->mh_Node.ln_Succ;
+         mh = (struct MemHeader *)mh->mh_Node.ln_Succ)
+        if ((mh->mh_Attributes & MEMF_FAST) &&
+            (!best || mh->mh_Upper > best->mh_Upper))
+            best = mh;
+    Permit();
+    if (!best)
+        return;
+    /* 8-aligned address and a size that is a multiple of 8, so exec has
+     * nothing to round - and then free exactly the extent it handed
+     * back rather than the one we asked for, because a FreeMem whose
+     * bounds do not match its AllocMem is itself a corrupt memory
+     * list. */
+    top = ((ULONG)guru_stash_at(best)) & ~7UL;
+    g_stash = (struct GuruStash *)AllocAbs(GURU_STASH_OFF, (APTR)top);
+    if (g_stash) {
+        g_stash_size = (top + GURU_STASH_OFF) - (ULONG)g_stash;
+        g_stash_size = (g_stash_size + 7) & ~7UL;
+    }
+}
+
+static void guru_stash_release(void)
+{
+    if (g_stash && g_stash_size)
+        FreeMem(g_stash, g_stash_size);
+    g_stash = NULL;
+    g_stash_size = 0;
+}
+
+static ULONG guru_stash_sum(const struct GuruStash *st)
+{
+    const ULONG *w = (const ULONG *)st;
+    ULONG sum = 0;
+    int i, n = (sizeof(struct GuruStash) - sizeof(ULONG)) / sizeof(ULONG);
+    for (i = 0; i < n; i++)
+        sum += w[i];
+    return sum;
+}
+
+/* Crashing-context rules apply: reads and plain stores only - and the
+ * region was claimed at startup, so no list walking is needed here. */
+static void guru_stash_write(void)
+{
+    struct GuruStash *st = g_stash;
+    int i;
+    if (!st)
+        return;
+    st->magic1 = GURU_MAGIC1;
+    st->magic2 = GURU_MAGIC2;
+    st->code = g_alert_code;
+    st->taskaddr = g_alert_taskaddr;
+    for (i = 0; i < (int)sizeof(st->name); i++)
+        st->name[i] = g_alert_taskname[i];
+    st->sum = guru_stash_sum(st);
+}
+
+/* Non-static: the asm stub below reaches both by symbol. */
+APTR wasabi_alert_orig;
+void wasabi_alert_note(ULONG code);
+extern void wasabi_alert_patch(void);
+
+/*
+ * Entry: D7 = alert code (Alert's argument register, unusually), A6 =
+ * ExecBase. Save the scratch registers around the C call - gcc
+ * preserves d2-d7/a2-a6 itself, so D7 and A6 arrive at the original
+ * untouched - then chain by pushing the original and rts'ing into it,
+ * which spends no register at all.
+ */
+asm(
+    "    .text                          \n"
+    "    .even                          \n"
+    "    .globl _wasabi_alert_patch     \n"
+    "_wasabi_alert_patch:               \n"
+    "    movem.l %d0-%d1/%a0-%a1,-(%sp) \n"
+    "    move.l  %d7,-(%sp)             \n"
+    "    jsr     _wasabi_alert_note     \n"
+    "    addq.l  #4,%sp                 \n"
+    "    movem.l (%sp)+,%d0-%d1/%a0-%a1 \n"
+    "    move.l  _wasabi_alert_orig,-(%sp) \n"
+    "    rts                            \n"
+);
+
+void wasabi_alert_note(ULONG code)
+{
+    struct Task *t = SysBase->ThisTask;
+    const char *nm;
+    LONG n = 0;
+
+    if (g_alert_pending)             /* a second alert before the first
+                                      * was reported: keep the first -
+                                      * it is the one that started it */
+        return;
+    g_alert_code = code;
+    g_alert_taskaddr = (ULONG)t;
+    /* Name the culprit the way snoop does: the CLI command being run
+     * if there is one - 'Amelinium_040', not 'Background CLI' - else
+     * the task name. Pointer reads only; this context may belong to a
+     * machine already coming apart. */
+    if (t && t->tc_Node.ln_Type == NT_PROCESS) {
+        struct CommandLineInterface *cli = (struct CommandLineInterface *)
+            BADDR(((struct Process *)t)->pr_CLI);
+        if (cli) {
+            UBYTE *b = (UBYTE *)BADDR(cli->cli_CommandName);
+            if (b && b[0]) {                 /* a BSTR: length, then bytes */
+                n = b[0];
+                if (n > (LONG)sizeof(g_alert_taskname) - 1)
+                    n = sizeof(g_alert_taskname) - 1;
+                memcpy(g_alert_taskname, b + 1, n);
+            }
+        }
+    }
+    if (!n) {
+        nm = (t && t->tc_Node.ln_Name) ? t->tc_Node.ln_Name : "(no name)";
+        for (; n < (LONG)sizeof(g_alert_taskname) - 1 && nm[n]; n++)
+            g_alert_taskname[n] = nm[n];
+    }
+    g_alert_taskname[n] = '\0';
+    /* A deadend is going to reboot the machine before the daemon can
+     * write any file - stash the report in the black box now, in this
+     * context, while stores still land. */
+    if (code & 0x80000000UL)
+        guru_stash_write();
+    g_alert_pending = TRUE;
+    if (g_daemon_task && t != g_daemon_task)
+        Signal(g_daemon_task, SIGBREAKF_CTRL_F);
+}
+
+static void alert_install(void)
+{
+    if (g_alert_patched)
+        return;
+    Disable();
+    wasabi_alert_orig = SetFunction((struct Library *)SysBase, -108,
+                                    (ULONG (*)())wasabi_alert_patch);
+    Enable();
+    g_alert_patched = TRUE;
+}
+
+/* Same removal rule as the RawPutChar patch: only restore the vector if
+ * it still points at us, or we would unlink whoever chained on top. */
+static BOOL alert_uninstall(void)
+{
+    APTR res;
+    BOOL removed;
+    if (!g_alert_patched)
+        return TRUE;
+    Disable();
+    res = SetFunction((struct Library *)SysBase, -108,
+                      (ULONG (*)())wasabi_alert_orig);
+    if (res == (APTR)wasabi_alert_patch) {
+        removed = TRUE;
+    } else {
+        SetFunction((struct Library *)SysBase, -108, (ULONG (*)())res);
+        removed = FALSE;
+    }
+    Enable();
+    if (removed)
+        g_alert_patched = FALSE;
+    return removed;
+}
+
+static void guru_stamp(char *out)    /* "13-Aug-26 13:36:41", or "" */
+{
+    struct DateTime dt;
+    char date[LEN_DATSTRING], time[LEN_DATSTRING];
+    DateStamp(&dt.dat_Stamp);
+    dt.dat_Format  = FORMAT_DOS;
+    dt.dat_Flags   = 0;
+    dt.dat_StrDay  = NULL;
+    dt.dat_StrDate = date;
+    dt.dat_StrTime = time;
+    out[0] = '\0';
+    if (DateToStr(&dt))
+        sprintf(out, "%s %s", date, time);
+}
+
+/* Try now, and again on a later pump turn if T: was not ready - the
+ * note must not be lost to writing it too early in the boot. */
+static void guru_file_flush(void)
+{
+    BPTR fh;
+    char nl = '\n';
+    if (!g_guru_note_dirty || !g_guru_note[0])
+        return;
+    fh = Open("T:lastguru", MODE_NEWFILE);
+    if (!fh)
+        return;
+    Write(fh, g_guru_note, strlen(g_guru_note));
+    Write(fh, &nl, 1);
+    Close(fh);
+    g_guru_note_dirty = FALSE;
+}
+
+/*
+ * The note, replayed to a fresh stream subscriber. Read back from the
+ * file rather than the global so a note left by this daemon's previous
+ * life still greets the first attach after a self-update.
+ */
+static void guru_header(int cl, ULONG stream, ULONG *seq)
+{
+    char text[192], line[240];
+    LONG n = 0;
+    BPTR fh = Open("T:lastguru", MODE_OLDFILE);
+    if (fh) {
+        n = Read(fh, text, sizeof(text) - 1);
+        Close(fh);
+    }
+    if (n <= 0)
+        return;
+    while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r'))
+        n--;
+    text[n] = '\0';
+    n = sprintf(line, "[wasabi: last guru: %s]\n", text);
+    send_log(g_clients[cl].fd, stream, ++(*seq), (UBYTE *)line, n);
+}
+
+/*
+ * The live half of the report: one visible line on any stream open at
+ * the moment of the alert - and the durable note for everyone later.
+ * Nobody subscribed is no longer a reason to hold the report; the
+ * note file is what waits, not the flag.
+ */
+static void guru_pump(void)
+{
+    char line[160];
+    LONG n;
+
+    if (g_alert_pending) {
+        char when[2 * LEN_DATSTRING + 2];
+        const char *kind = (g_alert_code & 0x80000000UL) ? "DEADEND"
+                                                         : "RECOVERABLE";
+        n = sprintf(line, "[wasabi: %s ALERT #%08lx in task '%s' "
+                          "(0x%08lx)]\n",
+                    kind, (unsigned long)g_alert_code, g_alert_taskname,
+                    (unsigned long)g_alert_taskaddr);
+        guru_stamp(when);
+        sprintf(g_guru_note, "%s ALERT #%08lx in task '%s' (0x%08lx) - %s",
+                kind, (unsigned long)g_alert_code, g_alert_taskname,
+                (unsigned long)g_alert_taskaddr, when);
+        g_guru_note_dirty = TRUE;
+        g_alert_pending = FALSE;
+        stream_note(line, n);
+    }
+    guru_file_flush();
 }
 
 /* --- ps and kill --------------------------------------------------- */
@@ -2725,13 +3347,19 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         return cmd_install(fd, path);
 
     case T_DEBUG:
+        if (g_trial)
+            return send_perr(fd, "this is a trial instance - it installs "
+                                 "no patches, so it cannot stream");
         return debug_start(cl);
 
     case T_SNOOP: {
         char pat[64];
         if (len < 4 || !get_str(p, len, 4, pat, sizeof(pat)))
             return send_perr(fd, "bad SNOOP header");
-        return snoop_start(cl, pat);
+        if (g_trial)
+            return send_perr(fd, "this is a trial instance - it installs "
+                                 "no patches, so it cannot snoop");
+        return snoop_start(cl, pat, get_be32(p));
     }
 
     default:
@@ -2824,6 +3452,8 @@ static int selftest(const char *nonce)
 int main(int argc, char **argv)
 {
     int listen_fd = -1, disco_fd = -1, port = DEF_PORT, i;
+    int dbg_was = -1, snoop_was = -1;    /* stream clients at teardown */
+    BOOL stuck;                          /* a patch outlived its removal */
     UBYTE *payload;
 
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
@@ -2847,6 +3477,8 @@ int main(int argc, char **argv)
             for (p = g_name; *p; p++)
                 if (*p == ' ') *p = '-'; /* the reply is space-delimited */
             g_name_set = TRUE;
+        } else if (strcmp(argv[i], "trial") == 0) {
+            g_trial = TRUE;
         } else if (strcmp(argv[i], "allow") == 0 && i + 1 < argc) {
             const char *what = argv[++i];
             if (strcmp(what, "any") == 0)
@@ -2889,7 +3521,67 @@ int main(int argc, char **argv)
         struct Task *me = FindTask(NULL);
         if (me->tc_Node.ln_Type == NT_PROCESS)
             ((struct Process *)me)->pr_WindowPtr = (APTR)-1;
+        g_daemon_task = me;
+        /* Priority 1, and deliberately: when a crashing task Signal()s
+         * us from the Alert patch, being the higher-priority ready task
+         * is what puts the guru report on the wire before the original
+         * Alert() freezes the display. The rest of the time the loop is
+         * asleep in WaitSelect, so nobody pays for this. */
+        SetTaskPri(me, 1);
     }
+
+    /*
+     * The previous life's guru, if any - two places to look.
+     *
+     * ExecBase->LastAlert first: on real hardware exec preserves it
+     * across a warm reboot (that is how the boot-time guru screen
+     * knows what to show). On Emu68 it comes back FFFFFFFF no matter
+     * what died - proven by poking a value in and rebooting - so the
+     * check costs nothing there and works where exec cooperates.
+     * Retire whatever is found, or one old crash would be
+     * rediscovered by every future daemon start.
+     *
+     * Then the black box, which is what actually survives on Emu68;
+     * checked second so its richer report (task name included) wins
+     * the note file when both exist.
+     */
+    {
+        ULONG a0 = g_trial ? 0 : SysBase->LastAlert[0];
+        ULONG a1 = g_trial ? 0 : SysBase->LastAlert[1];
+        if (a0 != 0 && a0 != 0xFFFFFFFFUL) {
+            char when[2 * LEN_DATSTRING + 2];
+            guru_stamp(when);
+            sprintf(g_guru_note, "ALERT #%08lx (task 0x%08lx) - from "
+                                 "before the last reboot (seen %s)",
+                    (unsigned long)a0, (unsigned long)a1, when);
+            g_guru_note_dirty = TRUE;
+            guru_file_flush();           /* main loop retries if T: balks */
+            Disable();
+            SysBase->LastAlert[0] = 0xFFFFFFFFUL;
+            SysBase->LastAlert[1] = 0xFFFFFFFFUL;
+            Enable();
+        }
+    }
+    if (!g_trial)                        /* shared region: not ours to take */
+        guru_stash_claim();
+    if (g_stash) {
+        struct GuruStash *st = g_stash;
+        if (st->magic1 == GURU_MAGIC1 && st->magic2 == GURU_MAGIC2 &&
+            st->sum == guru_stash_sum(st)) {
+            char when[2 * LEN_DATSTRING + 2];
+            st->name[sizeof(st->name) - 1] = '\0';
+            guru_stamp(when);
+            sprintf(g_guru_note, "DEADEND ALERT #%08lx in task '%s' "
+                                 "(0x%08lx) - from before the last "
+                                 "reboot (seen %s)",
+                    (unsigned long)st->code, st->name,
+                    (unsigned long)st->taskaddr, when);
+            g_guru_note_dirty = TRUE;
+            guru_file_flush();
+        }
+        st->magic1 = 0;                  /* report a crash once */
+    }
+
     refusals_load();
 
     for (i = 0; i < MAX_CLIENTS; i++)
@@ -2941,6 +3633,13 @@ int main(int argc, char **argv)
         }
     }
     disco_fd = open_discovery(port);
+
+    /* Armed for the daemon's whole life, not per-subscription like the
+     * stream patches: a guru waits for its first listener, and the
+     * LastAlert path needs nothing at all. A trial instance patches
+     * nothing: see g_trial. */
+    if (!g_trial)
+        alert_install();
 
     Printf("%s listening on port %ld%s. Break C to stop.\n",
            (LONG)VERSION_STR, (long)port,
@@ -3000,26 +3699,34 @@ int main(int argc, char **argv)
             if (!snoop_pump())
                 drop(g_snoop_client);
 
+        guru_pump();
+
         /*
          * Heartbeat: an empty LOG on each subscribed stream every few
          * seconds. The client renders nothing - there is nothing to
          * render - but its silence timer resets, so a machine that
          * Gurus or reboots behind a stream's back is noticed in
-         * seconds instead of holding the terminal open forever. A
-         * failed send also reclaims the slot of a client that vanished
-         * without a FIN.
+         * seconds instead of holding the terminal open forever.
+         *
+         * A heartbeat is a courtesy, not a delivery. If the socket
+         * cannot take it RIGHT NOW - the client's machine is asleep,
+         * the Wi-Fi link is blinking, the buffer is full of unread
+         * stream - skip it rather than sit in io_wait for ten seconds
+         * and then drop a subscriber whose only crime was a flaky hop.
+         * A peer that is truly gone still gets reclaimed: the
+         * unacknowledged bytes already in flight make the stack time
+         * the connection out, and the next send into it fails.
          */
         if (g_dbg_client >= 0 || g_snoop_client >= 0) {
             ULONG hbnow = now_secs();
             if (hbnow - g_hb_last >= HB_SECS) {
                 g_hb_last = hbnow;
                 if (g_dbg_client >= 0 &&
-                    !send_log(g_clients[g_dbg_client].fd, 0, ++g_dbg_seq,
-                              (const UBYTE *)"", 0))
+                    !hb_send(g_clients[g_dbg_client].fd, 0, &g_dbg_seq))
                     drop(g_dbg_client);
                 if (g_snoop_client >= 0 &&
-                    !send_log(g_clients[g_snoop_client].fd, 1,
-                              ++g_snoop_seq, (const UBYTE *)"", 0))
+                    !hb_send(g_clients[g_snoop_client].fd, 1,
+                             &g_snoop_seq))
                     drop(g_snoop_client);
             }
         }
@@ -3097,8 +3804,15 @@ out:
     }
     refusals_save(TRUE);
     say_goodbye(g_restart ? "restarting" : "stopping");
+    dbg_was = g_dbg_client;              /* the stops below clear these */
+    snoop_was = g_snoop_client;
     debug_stop();                        /* clears client and removes patch */
     snoop_stop();
+    alert_uninstall();
+    /* After the patch is gone, so nothing can be writing to it. The
+     * next instance claims the same address and reads what is still
+     * there - a reboot does not clear RAM, and neither does a free. */
+    guru_stash_release();
     /* A task may still be between the snoop stub's use-count bump and its
      * rts; give stragglers a moment before this code segment goes away. */
     {
@@ -3106,9 +3820,38 @@ out:
         for (w = 0; wasabi_snoop_users && w < 50; w++)
             Delay(2);
     }
-    if (g_dbg_patched || snoop_stuck())  /* could not: unloading now = Guru */
+    /*
+     * A patch we could not remove is a live pointer into this segment,
+     * and the shell frees the segment the moment main() returns. The
+     * next call through that vector then jumps into memory that has
+     * been handed to somebody else - which surfaces later, somewhere
+     * else, as a corrupt memory list or a wild address. This used to
+     * print a warning and return anyway; the warning went to a
+     * detached daemon's NIL: output, where nobody has ever read one.
+     *
+     * So: say it where it will be seen, and then do not unload. One
+     * stranded process costs 50 KB. Guruing the machine minutes later
+     * costs the operator their afternoon and their trust in the log.
+     */
+    stuck = (g_dbg_patched || g_alert_patched || snoop_stuck());
+    if (stuck) {
+        char w[200];
+        LONG n = sprintf(w, "[wasabi: WARNING - a SetFunction patch could "
+                            "not be removed (someone patched over it). "
+                            "This daemon is staying resident rather than "
+                            "unloading into a guru; reboot when "
+                            "convenient.]\n");
+        /* The stops above cleared the stream indices; put them back for
+         * exactly this one message, which is the last thing worth
+         * saying on a stream. */
+        g_dbg_client = dbg_was;
+        g_snoop_client = snoop_was;
+        stream_note(w, n);
+        g_dbg_client = g_snoop_client = -1;
         Printf("wasabid: WARNING - a SetFunction patch could not be removed "
-               "(someone patched over it). Do NOT let this binary unload.\n");
+               "(someone patched over it). Staying resident: this binary "
+               "must not unload. Reboot when convenient.\n");
+    }
     for (i = 0; i < MAX_CLIENTS; i++)
         if (g_clients[i].fd >= 0)
             CloseSocket(g_clients[i].fd);
@@ -3132,5 +3875,13 @@ out:
             Execute(cmd, 0, 0);
         }
     }
+
+    /* The replacement daemon has the port; this process now exists only
+     * to keep its code in memory, because something still points into
+     * it. Returning here is what would guru the machine later. */
+    if (stuck)
+        for (;;)
+            Delay(250);
+
     return RETURN_OK;
 }

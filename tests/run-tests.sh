@@ -21,6 +21,7 @@ FAIL=0
 
 cleanup() {
     [ -n "${MOCK_PID:-}" ] && kill "$MOCK_PID" 2>/dev/null
+    [ -n "${MOCK2_PID:-}" ] && kill "$MOCK2_PID" 2>/dev/null
     rm -rf "$ROOT"
 }
 trap cleanup EXIT
@@ -118,6 +119,48 @@ else no "snoop honours the task filter (got $out lines)"; fi
 out=$(timeout -s INT 1.5 $W snoop --task cfile 2>/dev/null | grep -c "Shell")
 check "snoop filter suppresses other tasks" "0" "$out"
 
+out=$(timeout -s INT 1.5 $W snoop 2>/dev/null | \
+      grep -c "(Error 232: No more entries in directory)")
+if [ "$out" -ge 1 ]; then ok "the live stream dresses err codes"
+else no "the live stream dresses err codes"; fi
+
+ERRLOG=$ROOT/err.log
+timeout -s INT 1.5 $W snoop --log "$ERRLOG" >/dev/null 2>&1
+out=$(grep -c "(Error 232: No more entries in directory)" "$ERRLOG")
+if [ "$out" -ge 1 ]; then ok "and so does the stream's log file"
+else no "and so does the stream's log file"; fi
+out=$(grep -c "(err 232)" "$ERRLOG")
+check "the terse wire form reaches neither" "0" "$out"
+
+out=$(timeout -s INT 1.2 $W debug 2>/dev/null | \
+      grep -c "ALERT #80000004 (CPU: illegal instruction)")
+if [ "$out" -ge 1 ]; then ok "a guru's alert code is decoded by name"
+else no "a guru's alert code is decoded by name"; fi
+
+out=$(timeout -s INT 1.5 $W snoop --entry 2>/dev/null | grep -c ') \.\.\.$')
+if [ "$out" -ge 1 ]; then ok "entry mode shows calls on the way in"
+else no "entry mode shows calls on the way in"; fi
+
+out=$(timeout -s INT 1.5 $W snoop 2>/dev/null | grep -c ') \.\.\.$')
+check "and only when it is asked for" "0" "$out"
+
+out=$(timeout -s INT 3.5 $W snoop 2>/dev/null | grep -c "more identical")
+if [ "$out" -ge 1 ]; then ok "runs of identical lines are folded"
+else no "runs of identical lines are folded"; fi
+
+out=$(timeout -s INT 3.5 $W snoop --output full 2>/dev/null | \
+      grep -c "more identical")
+check "--output full folds nothing" "0" "$out"
+
+out=$(timeout -s INT 3.5 $W snoop --output minimal 2>/dev/null | \
+      grep -c 'OpenLibrary("dos.library"')
+check "--output minimal hides the poll noise" "0" "$out"
+
+out=$(timeout -s INT 2 $W snoop --output minimal 2>/dev/null | \
+      grep -c "Startup-Sequence")
+if [ "$out" -ge 1 ]; then ok "and keeps the lines that matter"
+else no "and keeps the lines that matter"; fi
+
 out=$(timeout -s INT 1.2 $W debug 2>/dev/null | grep -c "ReadCacheNode")
 if [ "$out" -ge 1 ]; then ok "debug streams lines"
 else no "debug streams lines"; fi
@@ -142,7 +185,51 @@ h=$(printf '%s\n' "$out" | grep -cE '^(debug|snoop) \| $')
 check "heartbeats are invisible in the stream view" "0" "$h"
 h=$(grep -cE ' (debug|snoop) \| $' "$STREAMLOG" 2>/dev/null)
 check "and invisible in the log file" "0" "${h:-0}"
+
+# The log must say for itself how the stream was started and how it
+# ended - a reader should never have to assume what was subscribed.
+c=$(grep -cE ' client \| debug\+snoop stream open to 127\.0\.0\.1' \
+    "$STREAMLOG" 2>/dev/null)
+check "--log records how the stream was started" "1" "${c:-0}"
+c=$(grep -cE ' client \| debug\+snoop stream closed' "$STREAMLOG" 2>/dev/null)
+check "and that it was closed" "1" "${c:-0}"
 rm -f "$STREAMLOG"
+
+# --- stream reconnect: a mock that hangs up on its subscriber once ---
+# The stream must announce the loss, come back by itself, keep flowing,
+# and not mistake the daemon's restarted sequence numbers for loss.
+PORT2=$((PORT+1))
+./tests/mock-wasabid.py --root "$ROOT" --port "$PORT2" --key "$KEY" \
+    --drop-stream-after 2 >"$ROOT/mock2.log" 2>&1 &
+MOCK2_PID=$!
+sleep 1
+W2="./wasabi --host 127.0.0.1 --port $PORT2 --key $KEY"
+
+RECERR=$ROOT/reconnect.err
+out=$(timeout -s INT 8 $W2 debug 2>"$RECERR" | grep -c "ReadCacheNode")
+lost=$(grep -c "connection lost" "$RECERR")
+back=$(grep -c "reconnected after" "$RECERR")
+check "a dropped stream announces the loss" "1" "$lost"
+check "and reconnects by itself" "1" "$back"
+if [ "$out" -ge 3 ]; then ok "and the stream flows again"
+else no "and the stream flows again (got $out lines)"; fi
+gap=$(grep -c "frame(s) lost" "$RECERR")
+check "a reconnect is not mistaken for lost frames" "0" "$gap"
+kill $MOCK2_PID 2>/dev/null; MOCK2_PID=
+
+# --once restores stop-on-disconnect: the client must exit on its own,
+# well before the timeout would have killed it.
+PORT2=$((PORT+2))
+./tests/mock-wasabid.py --root "$ROOT" --port "$PORT2" --key "$KEY" \
+    --drop-stream-after 2 >"$ROOT/mock3.log" 2>&1 &
+MOCK2_PID=$!
+sleep 1
+W2="./wasabi --host 127.0.0.1 --port $PORT2 --key $KEY"
+timeout 8 $W2 debug --once >"$ROOT/once.out" 2>&1
+check "--once exits when the connection drops" "0" "$?"
+out=$(grep -c "stream closed" "$ROOT/once.out")
+check "and says the stream closed" "1" "$out"
+kill $MOCK2_PID 2>/dev/null; MOCK2_PID=
 
 # --- deploy --restart: upload then reload the daemon in one shot ---
 echo restarter > "$ROOT/../wasabi-restart.$$"
@@ -176,6 +263,20 @@ check "update keeps the previous binary" \
       "old daemon" "$(cat "$ROOT/C/wasabid.bak" 2>/dev/null)"
 [ ! -f "$ROOT/C/wasabid.new" ] && ok "update clears the sidecar" \
                               || no "update clears the sidecar"
+
+# --no-trial: the flag must actually skip the trial daemon, not just
+# exist. It shipped once as a no-op, which is worth a test of its own.
+printf 'old daemon\n' > "$ROOT/C/wasabid"
+out=$($W update "$NEWD" --no-trial 2>&1)
+check "--no-trial says it skipped the live probe" "1" \
+      "$(printf '%s\n' "$out" | grep -c 'skipped (--no-trial)')"
+check "--no-trial does not start a trial daemon" "0" \
+      "$(printf '%s\n' "$out" | grep -c 'served a handshake')"
+if cmp -s "$NEWD" "$ROOT/C/wasabid"; then
+    ok "--no-trial still installs the binary"
+else
+    no "--no-trial still installs the binary"
+fi
 
 # A real wasabid that passes its own self-test and still cannot serve:
 # only the live probe can catch this one.
@@ -276,6 +377,17 @@ check "a daemon without a capability is named, not guessed at" "1" "$out"
 out=$(./wasabi --host 127.0.0.1 --port $((PORT+7)) --key "$KEY" ping 2>&1 | \
       grep -c "mock-wasabid")
 check "commands it does have still work" "1" "$out"
+kill $OLD_PID 2>/dev/null
+
+# One that snoops but predates entry logging: the specific gap is named,
+# not the whole command refused.
+./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+9)) --key "$KEY" \
+    --caps "ping,info,run,debug,snoop,hb" >>"$ROOT/mock.log" 2>&1 &
+OLD_PID=$!
+sleep 1
+out=$(./wasabi --host 127.0.0.1 --port $((PORT+9)) --key "$KEY" \
+      snoop --entry 2>&1 | grep -c "no entry logging")
+check "and entry logging it lacks is named too" "1" "$out"
 kill $OLD_PID 2>/dev/null
 
 # A daemon from before capabilities existed: never refuse, just try.

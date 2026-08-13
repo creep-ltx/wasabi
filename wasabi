@@ -57,6 +57,169 @@ def unpack_str(buf, off=0):
     return buf[off:off + n].decode("latin-1"), off + n
 
 
+# AmigaDOS error names, for dressing a bare code wherever one surfaces:
+# snoop's "fail (err 205)", run's IoErr, the daemon's error frames.
+# Wording follows the classic AmigaDOS manual where it names a code
+# (per bambi-amiga.co.uk/amigahistory/codes.html), dos/dos.h otherwise.
+DOS_ERRORS = {
+    103: "Insufficient free store",
+    105: "Task table full",
+    114: "Bad template",
+    115: "Bad number",
+    116: "Required argument missing",
+    117: "Keyword needs an argument",
+    118: "Too many arguments",
+    119: "Unmatched quotes",
+    120: "Argument line invalid or too long",
+    121: "File is not an object module",
+    122: "Invalid resident library during load",
+    201: "No default directory",
+    202: "Object in use",
+    203: "Object already exists",
+    204: "Directory not found",
+    205: "Object not found",
+    206: "Invalid window description",
+    207: "Object too large",
+    209: "Packet request type unknown",
+    210: "Invalid stream component name",
+    211: "Invalid object lock",
+    212: "Object not of required type",
+    213: "Disk not validated",
+    214: "Disk write protected",
+    215: "Rename across device attempted",
+    216: "Directory not empty",
+    217: "Too many levels",
+    218: "Device not mounted",
+    219: "Seek error",
+    220: "Comment too big",
+    221: "Disk full",
+    222: "File is protected from deletion",
+    223: "File is protected from writing",
+    224: "File is protected from reading",
+    225: "Not a DOS disk",
+    226: "No disk in drive",
+    232: "No more entries in directory",
+    233: "Object is a soft link",
+    234: "Object is linked",
+    235: "Bad loadfile hunk",
+    236: "Action not implemented",
+    240: "Record not locked",
+    241: "Lock collision",
+    242: "Lock timeout",
+    243: "Unlock error",
+}
+
+SNOOPF_ENTRY = 1                # SNOOP flags word, bit 0
+
+# What --output minimal hides: high-volume, low-signal calls that every
+# Amiga makes constantly. The shell probes these five variables before
+# every command; FindTask(NULL) is how a program asks "who am I"; the
+# DOpus port probe is in half the software ever written; and
+# bsdsocket's WaitSelect opens dos.library once per daemon poll, which
+# is 20 lines a second on its own. Each is listed here rather than
+# guessed at, and the stream says it is filtering when it does.
+NOISE_RE = re.compile(
+    r'(GetVar|SetVar)\("(echo|debug|oldredirect|interactive|simpleshell|'
+    r'SHELLCOMPLETION|HISTSIZE|RC|Result2|process)"\)'
+    r'|FindTask\('
+    r'|FindPort\("Directory Opus"\)'
+    r'|OpenLibrary\("dos\.library"')
+
+_ERR_RE = re.compile(r"\(err (\d+)\)")
+
+
+def dos_error(code):
+    """205 -> 'Error 205: Object not found'; an unknown code stays bare."""
+    name = DOS_ERRORS.get(code)
+    return "Error %d: %s" % (code, name) if name else "error %d" % code
+
+
+# Guru meditation decoding, from exec/alerts.h. Subsystem 0 is the CPU
+# exception group (8000 0004 = illegal instruction); everything else is
+# subsystem byte + general-cause byte, with exact names for the exec
+# memory alerts a mungwall hunt most wants to recognize.
+CPU_ALERTS = {
+    0x02: "bus error", 0x03: "address error", 0x04: "illegal instruction",
+    0x05: "divide by zero", 0x06: "CHK instruction",
+    0x07: "TRAPV instruction", 0x08: "privilege violation", 0x09: "trace",
+    0x0A: "line-A emulator", 0x0B: "line-F emulator",
+    0x0E: "stack frame format error", 0x18: "spurious interrupt",
+    0x19: "autovector level 1", 0x1A: "autovector level 2",
+    0x1B: "autovector level 3", 0x1C: "autovector level 4",
+    0x1D: "autovector level 5", 0x1E: "autovector level 6",
+    0x1F: "autovector level 7",
+}
+
+ALERT_SPECIFIC = {                       # deadend bit stripped
+    0x01000003: "exec: library checksum failure",
+    0x01000005: "exec: corrupt memory list detected in FreeMem",
+    0x01000006: "exec: no memory for interrupt servers",
+    0x01000008: "exec: semaphore in an illegal state",
+    0x01000009: "exec: freeing memory already freed",
+    0x0100000B: "exec: attempt to reuse active IORequest",
+    0x0100000C: "exec: sanity check on memory list failed",
+    0x0100000D: "exec: IO attempted on closed IORequest",
+    0x0100000E: "exec: stack out of range",
+    0x0100000F: "exec: bad address passed to FreeMem",
+}
+
+ALERT_SUBSYS = {
+    0x01: "exec.library", 0x02: "graphics.library", 0x03: "layers.library",
+    0x04: "intuition.library", 0x05: "math libraries", 0x07: "dos.library",
+    0x08: "ramlib", 0x09: "icon.library", 0x0A: "expansion.library",
+    0x0B: "diskfont.library", 0x10: "audio.device", 0x11: "console.device",
+    0x12: "gameport.device", 0x13: "keyboard.device",
+    0x14: "trackdisk.device", 0x15: "timer.device", 0x20: "cia resource",
+    0x21: "disk resource", 0x22: "misc resource", 0x30: "bootstrap",
+    0x31: "workbench", 0x32: "diskcopy", 0x33: "gadtools.library",
+    0x34: "utility.library", 0x35: "unknown subsystem",
+}
+
+ALERT_CAUSE = {
+    0x01: "no memory", 0x02: "MakeLibrary failed",
+    0x03: "OpenLibrary failed", 0x04: "OpenDevice failed",
+    0x05: "OpenResource failed", 0x06: "I/O error",
+    0x07: "no signal available", 0x08: "bad parameter",
+    0x09: "library closed too often", 0x0A: "device closed too often",
+    0x0B: "process creation failed",
+}
+
+_ALERT_RE = re.compile(r"ALERT #([0-9a-fA-F]{8})(?! \()")
+
+
+def guru_decode(code):
+    """80000004 -> 'CPU: illegal instruction'; None when unrecognized."""
+    c = code & 0x7FFFFFFF
+    if (c >> 24) == 0:
+        name = CPU_ALERTS.get(c & 0xFFFF)
+        return "CPU: %s" % name if name else None
+    if c in ALERT_SPECIFIC:
+        return ALERT_SPECIFIC[c]
+    sub = ALERT_SUBSYS.get(c >> 24)
+    cause = ALERT_CAUSE.get((c >> 16) & 0xFF)
+    if sub and cause:
+        return "%s: %s" % (sub, cause)
+    return sub
+
+
+def dress_alerts(text):
+    """Put a name to a guru's alert code."""
+    def alert(m):
+        name = guru_decode(int(m.group(1), 16))
+        return "ALERT #%s (%s)" % (m.group(1), name) if name else m.group(0)
+    return _ALERT_RE.sub(alert, text)
+
+
+def dress_errors(text):
+    """The full treatment for the STREAM, on screen and in the log
+    alike: '(err 205)' becomes '(Error 205: Object not found)' on top
+    of the alert decoding - the stream is forensic, and its reader
+    should never have to look a code up. `run` output stays untouched:
+    there the failing command speaks for itself. Idempotent."""
+    text = _ERR_RE.sub(lambda m: "(%s)" % dos_error(int(m.group(1))), text)
+    return dress_alerts(text)
+
+
 class Conn:
     def __init__(self, host, port, key, timeout=15.0):
         self.host, self.port = host, port
@@ -78,6 +241,7 @@ class Conn:
                 self.sock.setsockopt(socket.IPPROTO_TCP,
                                      getattr(socket, opt), val)
         self.buf = b""
+        self.key = key                  # kept so a stream can reconnect
         self.send(HELLO, struct.pack(">H", VERSION) + pack_str(key))
         tag, payload = self.recv()
         if tag == ERR:
@@ -130,7 +294,7 @@ class Conn:
             msg, _ = unpack_str(payload, 4)
         except struct.error:
             return "malformed error frame (%d byte(s))" % len(payload)
-        return "%s (AmigaDOS error %d)" % (msg, code) if code else msg
+        return "%s (%s)" % (msg, dos_error(code)) if code else msg
 
     def expect_ok(self):
         tag, payload = self.recv()
@@ -362,8 +526,6 @@ def _run_loop(conn, sink):
                 sys.stderr.flush()
         elif tag == EXIT:
             rc, secondary = struct.unpack(">II", payload)
-            if rc and secondary:
-                print("[rc %d, IoErr %d]" % (rc, secondary), file=sys.stderr)
             return rc
         elif tag == ERR:
             raise WasabiError(conn._errtext(payload))
@@ -455,8 +617,30 @@ def cmd_update(conn, args):
     # trial instance needs one too, or the live probe below is refused by
     # the very binary it is vouching for. Redundant on a plain LAN, and
     # harmless: /32 admits exactly this client.
+    #
+    # --no-trial skips this whole stage. It is the only part of an update
+    # that runs a SECOND daemon beside the live one - two processes
+    # patching the same exec vectors, one of which then unloads - which
+    # is the situation that reliably takes this machine down. The
+    # identity and self-test checks above still run, so what gets
+    # installed is still a binary that named itself correctly and passed
+    # its own tests; only the live-on-a-spare-port proof is given up.
+    if args.no_trial:
+        print("  live       skipped (--no-trial)", file=sys.stderr)
+        conn.send(INSTALL, pack_str(sidecar))
+        conn.expect_ok()
+        do_restart(conn)
+        print("installed - the daemon is reloading itself", file=sys.stderr)
+        return 0
+
     myip = conn.sock.getsockname()[0]
-    do_run(conn, "Run >NIL: %s %d allow %s/32" % (sidecar, testport, myip))
+    # 'trial' tells the new binary to patch nothing and claim nothing:
+    # it is about to be unloaded, and a jump table pointing into a freed
+    # segment gurus the machine with a privilege violation later on.
+    # A binary too old to know the word ignores it and is no worse off
+    # than it was before.
+    do_run(conn, "Run >NIL: %s %d trial allow %s/32"
+                 % (sidecar, testport, myip))
     time.sleep(2.0)
     try:
         probe = Conn(conn.host, testport, args.key, timeout=5.0)
@@ -527,94 +711,202 @@ def cmd_stream(conn, args):
     combined view every line is prefixed with its stream name; --log
     appends each line to a file stamped with the client's receive time,
     so logs from parallel terminals line up.
+
+    The stream does not give up. A lost connection - keepalive giving
+    up on a frozen machine, a reboot's reset, a flaky Wi-Fi hop, the
+    daemon restarting - is announced and then retried forever, and the
+    daemon reports the previous guru to its first subscriber, so the
+    terminal that watched a machine die also greets it coming back and
+    says why it died. --once restores the old stop-on-disconnect.
     """
     want_debug = args.mode == "debug"
     want_snoop = args.mode == "snoop" or getattr(args, "with_snoop", False)
     combined = want_debug and want_snoop
-    if want_debug:
-        conn.send(DEBUG, struct.pack(">I", 0))
-    if want_snoop:
-        conn.send(SNOOP, struct.pack(">I", 0) + pack_str(args.task or ""))
     label = "+".join(n for n, w in (("debug", want_debug),
                                     ("snoop", want_snoop)) if w)
 
+    entry = getattr(args, "entry", False)
+    if entry and conn.caps and "snoopentry" not in conn.caps:
+        print("wasabi: this daemon (%s) has no entry logging - update it "
+              "with 'wasabi update wasabid'" % conn.banner, file=sys.stderr)
+        return 2
+
+    def subscribe(c):
+        if want_debug:
+            c.send(DEBUG, struct.pack(">I", 0))
+        if want_snoop:
+            c.send(SNOOP, struct.pack(">I", SNOOPF_ENTRY if entry else 0)
+                   + pack_str(args.task or ""))
+
+    subscribe(conn)
+
     logf = open(args.log, "a") if args.log else None
     names = {0: "debug", 1: "snoop"}
-    last_seq = {}
     partial = {}
+    mode = getattr(args, "output", "normal")
+    last_line = {}                       # per stream, for folding repeats
+    repeats = {}
 
     def stamp():
         now = time.time()
         return (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) +
                 ".%03d" % int(now % 1 * 1000))
 
-    def emit(stream, text):
-        # The debug stream is raw bytes and can break mid-line, so both
-        # the prefixed view and the log assemble whole lines per stream;
-        # the plain single-stream view passes bytes straight through.
+    def write_line(stream, out, to_stdout=True):
         name = names.get(stream, "stream%d" % stream)
-        if not combined:
-            sys.stdout.write(text)
-        buf = partial.get(stream, "") + text
-        lines = buf.split("\n")
-        partial[stream] = lines.pop()
-        for ln in lines:
-            if combined:
-                sys.stdout.write("%s | %s\n" % (name, ln))
-            if logf:
-                logf.write("%s %s | %s\n" % (stamp(), name, ln))
+        if to_stdout:
+            sys.stdout.write(("%s | %s\n" % (name, out)) if combined
+                             else out + "\n")
+        if logf:
+            logf.write("%s %s | %s\n" % (stamp(), name, out))
+
+    def flush_repeats(stream=None):
+        """Emit the tally for a run of identical lines. Called when the
+        run ends - and also when the stream falls quiet or drops, so a
+        freeze cannot swallow the count of what it was doing."""
+        for st in ([stream] if stream is not None else list(repeats)):
+            n = repeats.pop(st, 0)
+            if n:
+                write_line(st, "  ... %d more identical" % n)
         sys.stdout.flush()
         if logf:
             logf.flush()
 
-    print("[%s stream open - Ctrl-C to stop]" % label, file=sys.stderr)
-    # A daemon with the 'hb' capability sends an invisible empty LOG on
-    # each subscribed stream every ~5 s, precisely so this timer can
-    # exist: silence now means something. Missing one is a warning, not
-    # an exit - the daemon is single-threaded, and a big put in another
-    # terminal starves heartbeats for as long as it runs. TCP keepalive
-    # (set in Conn) is what finally declares a dead machine dead.
-    heartbeat = "hb" in conn.caps
-    conn.sock.settimeout(20.0 if heartbeat else None)
-    silent = 0
-    try:
+    def emit(stream, text):
+        # The debug stream is raw bytes and can break mid-line, so both
+        # the prefixed view and the log assemble whole lines per stream.
+        # --output full keeps the plain single-stream view passing bytes
+        # straight through: a partial line may be the last thing a dying
+        # machine ever says, and nothing should hold it back. Folding
+        # repeats needs whole lines, so it implies assembling them.
+        raw = (not combined) and mode == "full"
+        if raw:
+            sys.stdout.write(dress_errors(text))
+        buf = partial.get(stream, "") + text
+        lines = buf.split("\n")
+        partial[stream] = lines.pop()
+        for ln in lines:
+            out = dress_errors(ln)
+            if mode == "minimal" and out.strip() and NOISE_RE.search(out):
+                continue
+            if mode != "full":
+                if out == last_line.get(stream):
+                    repeats[stream] = repeats.get(stream, 0) + 1
+                    continue
+                flush_repeats(stream)
+                last_line[stream] = out
+            write_line(stream, out, to_stdout=not raw)
+        sys.stdout.flush()
+        if logf:
+            logf.flush()
+
+    def status(text):
+        flush_repeats()
+        # Client-side events go to stderr AND the log, as 'client |'
+        # lines: a log must say for itself what was subscribed, when
+        # the connection came and went, and why it ended - a reader
+        # (human or otherwise) should never have to assume.
+        print("[%s]" % text, file=sys.stderr)
+        if logf:
+            logf.write("%s client | %s\n" % (stamp(), text))
+            logf.flush()
+
+    def follow(c):
+        """Pump one connection until it dies; return why it did.
+
+        A daemon with the 'hb' capability sends an invisible empty LOG
+        on each subscribed stream every ~5 s, precisely so the silence
+        timer can exist: silence now means something. Missing one is a
+        warning, not an exit - the daemon is single-threaded, and a big
+        put in another terminal starves heartbeats for as long as it
+        runs. TCP keepalive (set in Conn) is what finally declares a
+        dead machine dead.
+        """
+        heartbeat = "hb" in c.caps
+        c.sock.settimeout(20.0 if heartbeat else None)
+        last_seq = {}                    # per connection: the daemon's
+        silent = 0                       # counters restart with it
         while True:
             try:
-                tag, payload = conn.recv()
+                tag, payload = c.recv()
             except socket.timeout:
                 silent += 1
                 if silent == 1:
-                    print("[%s: nothing heard for 20 s - the machine is "
-                          "frozen, rebooted, or busy with something long]"
-                          % label, file=sys.stderr)
+                    status("%s: nothing heard for 20 s - the machine is "
+                           "frozen, rebooted, or busy with something long"
+                           % label)
                 continue
             except WasabiError as exc:
                 # EOF: the daemon closed the socket properly. Its last
                 # visible line said why (rebooting/restarting/stopping).
-                print("[%s stream closed: %s]" % (label, exc),
-                      file=sys.stderr)
-                return 0
+                return str(exc)
+            except OSError as exc:
+                # Keepalive gave up on a frozen machine, a reboot's
+                # reset, a route that went away: none of these are a
+                # reason to stop watching.
+                return exc.strerror or str(exc) or type(exc).__name__
             if silent:
-                print("[%s: the stream is back]" % label, file=sys.stderr)
+                status("%s: the stream is back" % label)
                 silent = 0
             if tag == LOG:
                 stream, seq = struct.unpack_from(">II", payload, 0)
                 text, _ = unpack_str(payload, 8)
                 prev = last_seq.get(stream)
                 if prev is not None and seq != prev + 1:
-                    print("[%s: %d frame(s) lost]"
-                          % (names.get(stream, stream), seq - prev - 1),
-                          file=sys.stderr)
+                    status("%s: %d frame(s) lost"
+                           % (names.get(stream, stream), seq - prev - 1))
                 last_seq[stream] = seq
                 emit(stream, text)
             elif tag == ERR:
-                raise WasabiError(conn._errtext(payload))
+                status("%s: the daemon refused: %s"
+                       % (label, c._errtext(payload)))
+                raise WasabiError(c._errtext(payload))
+
+    host, port, key = conn.host, conn.port, conn.key
+    opts = ""
+    if want_snoop and args.task:
+        opts += ", task filter '%s'" % args.task
+    if entry:
+        opts += ", entry logging"
+    if mode == "minimal":
+        opts += ", output minimal (shell bookkeeping, FindTask, DOpus "
+        opts += "probes and dos.library polls hidden)"
+    elif mode == "normal":
+        opts += ", identical repeats folded"
+    if getattr(args, "once", False):
+        opts += ", --once"
+    status("%s stream open to %s:%d (%s)%s - Ctrl-C to stop"
+           % (label, host, port, conn.banner, opts))
+    try:
+        while True:
+            why = follow(conn)
+            for stream in sorted(partial):
+                if partial[stream]:
+                    emit(stream, "\n")   # complete the dangling line
+            if getattr(args, "once", False):
+                status("%s stream closed: %s" % (label, why))
+                return 0
+            status("%s: connection lost (%s) - reconnecting until the "
+                   "Amiga returns; Ctrl-C to stop" % (label, why))
+            conn.close()
+            gone = time.time()
+            while True:
+                try:
+                    conn = Conn(host, port, key)
+                    subscribe(conn)      # dies with the daemon: retry too
+                    break
+                except (OSError, WasabiError):
+                    time.sleep(2.0)
+            status("%s: reconnected after %d s - %s"
+                   % (label, int(time.time() - gone), conn.banner))
     except KeyboardInterrupt:
         for stream in sorted(partial):
             if partial[stream]:
                 emit(stream, "\n")       # complete the dangling line
-        print("\n[%s stream closed]" % label, file=sys.stderr)
+        print(file=sys.stderr)           # step past the ^C on the tty
+        status("%s stream closed" % label)
     finally:
+        conn.close()
         if logf:
             logf.close()
     return 0
@@ -1164,6 +1456,11 @@ def main(argv=None):
     s.add_argument("local", help="the new wasabid binary")
     s.add_argument("--sidecar", default="C:wasabid.new",
                    help="where to stage it on the Amiga")
+    s.add_argument("--no-trial", action="store_true",
+                   help="do not start a trial daemon on a spare port "
+                        "first; identity and self-test still run. Use "
+                        "when the trial stage itself destabilises the "
+                        "machine")
     s.add_argument("--testport", type=int, default=0,
                    help="port for the trial instance (default: --port + 1)")
     s.set_defaults(fn=cmd_update)
@@ -1181,14 +1478,37 @@ def main(argv=None):
                    help="merge the DOS call trace into the same view")
     s.add_argument("--task", default="",
                    help="task filter for --with-snoop")
+    s.add_argument("--entry", action="store_true",
+                   help="log snooped calls on the way in too, so a call "
+                        "that never returns is still seen (slow)")
+    s.add_argument("--output", choices=("minimal", "normal", "full"),
+                   default="normal",
+                   help="how much to show: full is every line as it "
+                        "arrives, normal folds runs of identical lines, "
+                        "minimal also hides routine shell and poll noise")
     s.add_argument("--log", metavar="FILE",
                    help="append timestamped lines to FILE")
+    s.add_argument("--once", action="store_true",
+                   help="stop when the connection drops instead of "
+                        "reconnecting forever")
     s.set_defaults(fn=cmd_stream, mode="debug")
 
     s = sub.add_parser("snoop", help="live DOS call trace")
     s.add_argument("--task", default="", help="AmigaDOS pattern to filter on")
+    s.add_argument("--entry", action="store_true",
+                   help="log each call on the way in as well as on the way "
+                        "out, so a call that never returns is still seen; "
+                        "costs a task switch per call")
+    s.add_argument("--output", choices=("minimal", "normal", "full"),
+                   default="normal",
+                   help="how much to show: full is every line as it "
+                        "arrives, normal folds runs of identical lines, "
+                        "minimal also hides routine shell and poll noise")
     s.add_argument("--log", metavar="FILE",
                    help="append timestamped lines to FILE")
+    s.add_argument("--once", action="store_true",
+                   help="stop when the connection drops instead of "
+                        "reconnecting forever")
     s.set_defaults(fn=cmd_stream, mode="snoop")
 
     s = sub.add_parser("speedtest",
