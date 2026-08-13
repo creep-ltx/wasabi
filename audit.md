@@ -1,5 +1,8 @@
 # Wasabi — Full Audit
 
+> *(Superseded for the 0.2 line by `audit2.md`, 2026-08-13 — this file
+> remains the record for wasabid 0.1 and is not maintained further.)*
+
 > **Status: CLOSED.** Every actionable finding below is fixed and was
 > verified on the real A1200 — the four bugs in 0.1b26, the cleanup
 > tier in 0.1b27, the exit-with-a-live-runner hazard in 0.1b30/b31 —
