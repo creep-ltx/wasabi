@@ -264,6 +264,38 @@ finding in this ledger came from reading and from the real A1200. The
 canary that caught the corruption in practice was `wasabi ping` failing
 with "bad key", because `g_key` sits immediately after `g_clients[]`.
 
+## Postscript, later the same night: the scope was narrower than believed
+
+After this audit closed, the guru report was extended to capture *where*
+a crash happened — a supervisor-stack snapshot decoded against Exec's
+exception number. Testing it turned up something the audit had no reason
+to question, because the whole feature rested on it:
+
+**`Alert()` is not the call every crash path funnels through.** A
+program that faults goes to its task's `tc_TrapCode` — for a Process,
+dos.library's "Software Failure" requester — and never touches the
+`Alert()` vector. Verified under FS-UAE on a real 68030 with the JIT
+off: a child that genuinely executed an `illegal` instruction (proven by
+a control flag either side of it) produced **zero** hits on the patch.
+
+So the report catches exec's own alerts and deliberate `Alert()` calls,
+which is what it had always actually been catching — `AN_MemCorrupt`
+above being a real example — and not application crashes. On Emu68 the
+distinction is academic: an illegal instruction, a privilege violation
+and a divide-by-zero each took the whole machine down without reaching
+the guest OS at all.
+
+Two lessons worth keeping:
+
+- A crash test that has not been proven to crash has measured nothing.
+  The first attempt used `r = 4321 / zero`, which Bebbo's gcc compiles
+  to `jsr ___divsi3` — a helper that never traps. It reported a clean
+  "0 hits" and looked like a finding.
+- Searching RAM for a guru after the fact does not work. Raise a known
+  alert, reboot, scan every byte: chip RAM has nothing, and fast RAM has
+  only what this daemon deliberately wrote. A guru can be recorded in
+  advance or not at all.
+
 ## Verified on the A1200 after the fixes
 
 Update restarts in ~2 s, three times running. Snoop starts cleanly three

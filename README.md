@@ -71,7 +71,8 @@ pulling in its libraries — captured live off the A1200.
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
 | stream heartbeat + farewell | **working on the real A1200** — a dead machine is noticed; a deliberate exit says goodbye first |
 | stream auto-reconnect | client-side — a lost stream retries forever and says why it dropped; `--once` restores stop-on-disconnect |
-| guru report | **working on the real A1200** — Alert() hook names the alert code and dying task on both streams (proven live with `alertemit`, 13 Aug 2026); the note persists in `T:lastguru` and greets every new stream attach; a deadend guru survives the reboot in a top-of-RAM black box, proven with a live `#8035c0de` guru on 13 Aug 2026 (`LastAlert` is dead on Emu68 - proven by poke+reboot) |
+| guru report | **working on the real A1200, for system alerts only** — the `Alert()` hook names the code and dying task on both streams, the note persists in `T:lastguru` and greets every stream attach, and a deadend survives the reboot in an owned top-of-RAM black box (proven end to end with live `#8035c0de` and `#8100000b` gurus). **It does not catch a program faulting**: those go to `tc_TrapCode`, not `Alert()` — verified under FS-UAE on a real 68030, where a genuinely faulting child produced zero hits. `LastAlert` is dead on Emu68 (proven by poke + reboot) |
+| guru PC capture | **built, unit-tested, dormant here** — the hook snapshots the supervisor stack and the frame is decoded by matching Exec's exception number to the CPU's vector offset; `tests/dectest.c` proves the decoder against frames from M68000PM Appendix B. It reports nothing on this machine because the alerts it can see are raised from user mode, where there is no trap frame — and because Emu68 does not deliver CPU exceptions to the guest at all |
 | exit guards + `--force` | **working on the real A1200** — no exit with a runner alive; `--force` Ctrl-Cs it and delivers its real exit code |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
@@ -442,19 +443,23 @@ says for itself what was subscribed and when:
 ## The guru report
 
 A guru used to be the one event these streams could not describe: the
-snoop trace just stops mid-thought, and which task died with which alert
-code stayed on the Amiga's frozen screen. Emu68 has no MMU, so
-Enforcer-style tooling is not an option — instead wasabid patches exec's
-`Alert()` (LVO -108), the one call every crash path funnels through, for
-its whole lifetime. When an alert fires in task context, the patch wakes
-the daemon (which runs at priority 1 precisely so it wins this race) and
-one line reaches both streams before the original `Alert()` freezes the
-display:
+snoop trace just stops mid-thought, and which task died with which
+alert code stayed on the Amiga's frozen screen. Emu68 has no MMU, so
+Enforcer-style tooling is not an option — instead wasabid patches
+exec's `Alert()` (LVO -108) for its whole lifetime. When an alert fires
+in task context, the patch wakes the daemon (which runs at priority 1
+precisely so it wins this race) and one line reaches both streams
+before the original `Alert()` freezes the display:
 
 ```
-snoop | Amelinium_040        OpenLibrary("dos.library", v0) = ok
-snoop | [wasabi: DEADEND ALERT #8000000b in task 'Amelinium_040' (0x0975c3d0)]
+snoop | c:wasabid            Rename("C:wasabid", "C:wasabid.bak") = ok
+snoop | [wasabi: DEADEND ALERT #81000005 in task 'c:wasabid' (0x08298d08)]
 ```
+
+**Read the scope below before relying on this.** `Alert()` is *not*
+"the call every crash path funnels through" — that was the assumption
+this was built on, and it is wrong. It catches the system's own alerts;
+it does not catch a program faulting.
 
 An alert raised in supervisor mode or an interrupt cannot be escaped
 live — no task switch can happen before the freeze. Exec's own
@@ -462,18 +467,30 @@ live — no task switch can happen before the freeze. Exec's own
 reboot, but on Emu68 it does not survive one (poke a value in, reboot,
 it comes back `FFFFFFFF`) — while plain RAM content at the top of the
 fast pool does, proven the same way. So the daemon keeps a black box:
-the patch stashes the report (code, task name, checksum) just under
-`mh_Upper` of the highest fast-RAM MemHeader — a deadend machine is
-dying anyway, which is what excuses writing to memory it does not own —
-and the next boot's daemon finds it there. `LastAlert` is still checked
-too, for hardware where exec cooperates.
+at startup it `AllocAbs()`es 512 bytes just under `mh_Upper` of the
+highest fast-RAM MemHeader, and the patch stashes the report there
+(code, task name, address, a stack snapshot, checksum) for the next
+boot's daemon to find. **Owning that region is not optional**: free
+memory on AmigaOS holds the allocator's own `MemChunk` headers in its
+first eight bytes, so writing into memory you have not reserved
+corrupts the free list and gurus the machine later with `AN_MemCorrupt`
+somewhere unrelated. An earlier version did exactly that. `LastAlert`
+is still checked too, for hardware where exec cooperates.
+
+Searching for the code after the fact does *not* work, and was tested
+rather than assumed: raise a known alert, reboot, then scan every byte
+of RAM for it. Chip RAM, zero hits; fast RAM, two hits — both of them
+stashes this daemon wrote deliberately, one of them left over from an
+earlier build hours before. Nothing else in 2 GB kept a copy. You
+cannot recover a guru afterwards; you can only arrange in advance for
+it to be written somewhere the boot will not reuse.
 
 Either way, every captured alert also becomes one line of plain text in
 `T:lastguru`, stamped with when it was seen — and every new `wasabi
 debug` or `wasabi snoop` replays that note as its first line:
 
 ```
-[wasabi: last guru: DEADEND ALERT #8000000b in task 'SysInfo' (0x0975c3d0) - 13-Aug-26 13:36:41]
+[wasabi: last guru: DEADEND ALERT #81000005 (exec: corrupt memory list detected in FreeMem) in task 'c:wasabid' (0x08298d08) - 13-Aug-26 19:27:12]
 ```
 
 The client puts a name to any real code it recognizes, straight from
@@ -483,14 +500,16 @@ dresses DOS error codes. A code it cannot parse (like alertemit's
 deliberately synthetic `8035C0DE`) stays bare rather than guessed at.
 
 `T:` is RAM-backed, so the note survives daemon restarts and
-self-updates, and dies with the boot — exactly when `LastAlert` takes
-over as the surviving copy. On the Amiga itself, `Type T:lastguru`
+self-updates, and dies with the boot — exactly when the black box takes
+over as the surviving copy (`LastAlert` would, on hardware where it
+survives a reset; on Emu68 it does not). On the Amiga itself, `Type T:lastguru`
 reads the same note. Auto-reconnect closes the loop by itself: the
 machine gurus, reboots, wasabid comes back, the stream resubscribes,
 and the alert code arrives in the same terminal that watched the
 machine die.
 
-**Where it crashed** is captured too, where the platform allows it.
+**Where it crashed** is captured too — though on this hardware it is
+dormant, for the reason in the first caveat below.
 Exec does trap handling in supervisor mode and pushes a longword
 exception number below the CPU's own frame, so at `Alert()` time the
 hook copies the supervisor stack verbatim and the frame is decoded

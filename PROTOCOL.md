@@ -271,8 +271,20 @@ stream slot; a slow one never does.
 an alert, one visible line goes out on every subscribed stream:
 
 ```
-[wasabi: DEADEND ALERT #8000000b in task 'Amelinium_040' (0x0975c3d0)]
+[wasabi: DEADEND ALERT #81000005 in task 'c:wasabid' (0x08298d08)]
 ```
+
+**Scope, measured rather than assumed.** This sees alerts raised
+through the `Alert()` vector — exec's own (`AN_MemCorrupt` and
+friends), and programs that call `Alert()` deliberately. It does **not**
+see a program faulting: a CPU exception goes to the task's
+`tc_TrapCode`, which for a Process is dos.library's "Software Failure"
+requester, and never touches `Alert()`. Verified under FS-UAE on a real
+68030 with the JIT off — a child that genuinely faulted produced zero
+hits on the patch. Catching those needs `tc_TrapCode` or CPU-vector
+hooking, i.e. what Enforcer does. On Emu68 the question is moot anyway:
+CPU exceptions take the whole machine down without reaching the guest
+OS at all.
 
 (or `RECOVERABLE` for alerts without the deadend bit). The line escapes
 before the guru freezes the display whenever the alert is raised in
@@ -281,9 +293,9 @@ patch, so it preempts the dying task for the milliseconds the send
 takes. An alert raised in supervisor mode or an interrupt cannot be
 escaped live. For those the daemon keeps a black box: a deadend alert
 is stashed by the patch itself — magic words, code, task name,
-checksum — just under `mh_Upper` of the highest fast-RAM MemHeader, in
-a 256-byte region the daemon `AllocAbs()`es at startup and holds for
-its whole life. Owning it is the point: free memory on this machine is
+checksum, and a snapshot of the supervisor stack — just under
+`mh_Upper` of the highest fast-RAM MemHeader, in a 512-byte region the
+daemon `AllocAbs()`es at startup and holds for its whole life. Owning it is the point: free memory on this machine is
 where exec keeps its free list, so writing into a chunk the daemon did
 not own would corrupt that list and guru the machine with
 `AN_MemCorrupt` at some unrelated `FreeMem` later. The daemon's
@@ -294,14 +306,22 @@ reboot, it returns FFFFFFFF) and picks the report up from there.
 Every captured alert — live or found in `LastAlert` at startup — also
 becomes one line of plain text in `T:lastguru`, stamped with the date
 and time it was seen. `T:` is RAM-backed: the note survives daemon
-restarts and self-updates, and dies with the boot — exactly when
-`LastAlert` takes over as the surviving copy. On the Amiga itself,
-`Type T:lastguru` reads the same note.
+restarts and self-updates, and dies with the boot — exactly when the
+black box takes over as the surviving copy. (`LastAlert` would serve
+that role on hardware that preserves it across a reset; Emu68 does
+not.) On the Amiga itself, `Type T:lastguru` reads the same note.
+
+Nothing else in RAM keeps a copy, which was tested rather than
+assumed: raise a known alert, reboot, and scan every byte of every
+MemHeader for it. Chip RAM yields nothing; fast RAM yields only the
+stashes the daemon wrote itself. A guru cannot be recovered after the
+fact — it can only be recorded in advance, somewhere the boot will not
+reuse.
 
 Every new stream subscription replays the note as its first line:
 
 ```
-[wasabi: last guru: DEADEND ALERT #8000000b in task 'SysInfo' (0x0975c3d0) - 13-Aug-26 13:36:41]
+[wasabi: last guru: DEADEND ALERT #81000005 (exec: corrupt memory list detected in FreeMem) in task 'c:wasabid' (0x08298d08) - 13-Aug-26 19:27:12]
 ```
 
 (a combined debug+snoop attach sees it once, not twice). A client that
