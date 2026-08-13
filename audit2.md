@@ -271,6 +271,13 @@ times in a row with the hardened self-test. Entry mode pairs 85 lines.
 The icon.library and diskfont.library patches still report
 (`GetDiskObject`, `OpenDiskFont("topaz.font")`). `screen` and `grab`
 (1280×960, 3.7 MB raw) still work after their buffers moved. The
+deadend guru path was re-proven end to end after the refactor and these
+fixes — `alertemit deadend` raised a real `#8035c0de`, the machine
+showed the red screen, rebooted, and the black box carried the report
+across into `T:lastguru` and onto the next stream attach. That path had
+last been proven on 0.2b3, before `patches.c` existed and before the
+audit changed `guru_release`, `guru_boot_check` and the claim; code
+rewritten twice and tested only by inference is not tested. The
 corruption canary held through: heavy commands during an entry-mode
 combined stream, twelve rapid subscribe/drop cycles, two concurrent
 streams dropped out of order, twelve simultaneous connections against an
