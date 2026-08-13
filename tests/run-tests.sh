@@ -111,21 +111,28 @@ $W del L:big >/dev/null 2>&1
 [ ! -f "$ROOT/L/big" ] && ok "del removes a file" || no "del removes a file"
 
 # --- streams ---
-out=$(timeout -s INT 1.5 $W snoop --task cfile 2>/dev/null | \
+# TIMING CONTRACT: the mock emits one SNOOP_SAMPLES line per 0.35 s idle
+# tick, so a sample's position in that list is how long a test must wait
+# to see it - roughly 0.35 s x index, plus interpreter start-up. Every
+# timeout below must clear that with room for a CI runner slower than a
+# dev box. Adding samples ahead of a tested line pushes it later and can
+# break a green suite from a distance: that is exactly how the macOS job
+# went red on 13 Aug 2026, while ubuntu stayed green.
+out=$(timeout -s INT 3 $W snoop --task cfile 2>/dev/null | \
       grep -c "^cfile")
 if [ "$out" -ge 2 ]; then ok "snoop honours the task filter"
 else no "snoop honours the task filter (got $out lines)"; fi
 
-out=$(timeout -s INT 1.5 $W snoop --task cfile 2>/dev/null | grep -c "Shell")
+out=$(timeout -s INT 3 $W snoop --task cfile 2>/dev/null | grep -c "Shell")
 check "snoop filter suppresses other tasks" "0" "$out"
 
-out=$(timeout -s INT 1.5 $W snoop 2>/dev/null | \
+out=$(timeout -s INT 3 $W snoop 2>/dev/null | \
       grep -c "(Error 232: No more entries in directory)")
 if [ "$out" -ge 1 ]; then ok "the live stream dresses err codes"
 else no "the live stream dresses err codes"; fi
 
 ERRLOG=$ROOT/err.log
-timeout -s INT 1.5 $W snoop --log "$ERRLOG" >/dev/null 2>&1
+timeout -s INT 3 $W snoop --log "$ERRLOG" >/dev/null 2>&1
 out=$(grep -c "(Error 232: No more entries in directory)" "$ERRLOG")
 if [ "$out" -ge 1 ]; then ok "and so does the stream's log file"
 else no "and so does the stream's log file"; fi
@@ -136,71 +143,71 @@ out=$($W debug --entry 2>&1 | grep -c "only affects the snoop trace")
 check "--entry on a plain debug is refused, not ignored" "1" "$out"
 out=$($W debug --task foo 2>&1 | grep -c "only affects the snoop trace")
 check "and so is --task" "1" "$out"
-out=$(timeout -s INT 1.5 $W debug --with-snoop --entry 2>/dev/null | \
+out=$(timeout -s INT 3 $W debug --with-snoop --entry 2>/dev/null | \
       grep -c ') \.\.\.$')
 if [ "$out" -ge 1 ]; then ok "but both are accepted with --with-snoop"
 else no "but both are accepted with --with-snoop"; fi
 
-out=$(timeout -s INT 1.2 $W debug 2>/dev/null | \
+out=$(timeout -s INT 3 $W debug 2>/dev/null | \
       grep -c "ALERT #80000004 (CPU: illegal instruction)")
 if [ "$out" -ge 1 ]; then ok "a guru's alert code is decoded by name"
 else no "a guru's alert code is decoded by name"; fi
 
-out=$(timeout -s INT 1.5 $W snoop --entry 2>/dev/null | grep -c ') \.\.\.$')
+out=$(timeout -s INT 3 $W snoop --entry 2>/dev/null | grep -c ') \.\.\.$')
 if [ "$out" -ge 1 ]; then ok "entry mode shows calls on the way in"
 else no "entry mode shows calls on the way in"; fi
 
-out=$(timeout -s INT 1.5 $W snoop 2>/dev/null | grep -c ') \.\.\.$')
+out=$(timeout -s INT 3 $W snoop 2>/dev/null | grep -c ') \.\.\.$')
 check "and only when it is asked for" "0" "$out"
 
-out=$(timeout -s INT 3.5 $W snoop 2>/dev/null | grep -c "more identical")
+out=$(timeout -s INT 5 $W snoop 2>/dev/null | grep -c "more identical")
 if [ "$out" -ge 1 ]; then ok "runs of identical lines are folded"
 else no "runs of identical lines are folded"; fi
 
-out=$(timeout -s INT 3.5 $W snoop --output full 2>/dev/null | \
+out=$(timeout -s INT 5 $W snoop --output full 2>/dev/null | \
       grep -c "more identical")
 check "--output full folds nothing" "0" "$out"
 
-out=$(timeout -s INT 3.5 $W snoop --output minimal 2>/dev/null | \
+out=$(timeout -s INT 5 $W snoop --output minimal 2>/dev/null | \
       grep -c 'OpenLibrary("dos.library"')
 check "--output minimal hides the poll noise" "0" "$out"
 
-out=$(timeout -s INT 2 $W snoop --output minimal 2>/dev/null | \
+out=$(timeout -s INT 5 $W snoop --output minimal 2>/dev/null | \
       grep -c "Startup-Sequence")
 if [ "$out" -ge 1 ]; then ok "and keeps the lines that matter"
 else no "and keeps the lines that matter"; fi
 
-out=$(timeout -s INT 4 $W snoop --ignore-wasabi 2>/dev/null | \
+out=$(timeout -s INT 6 $W snoop --ignore-wasabi 2>/dev/null | \
       grep -cE "^(wasabid|c:wasabid|wasabi-runner)")
 check "--ignore-wasabi hides the tool's own traffic" "0" "$out"
 
 # the runner's temp file, whoever touches it
-out=$(timeout -s INT 4 $W snoop --ignore-wasabi 2>/dev/null | \
+out=$(timeout -s INT 6 $W snoop --ignore-wasabi 2>/dev/null | \
       grep -c "T:wasabi-run-")
 check "and its temp files, whichever task opens them" "0" "$out"
 
 # the other half of the contract: what it must NEVER hide
-out=$(timeout -s INT 3 $W debug --ignore-wasabi 2>/dev/null | \
+out=$(timeout -s INT 5 $W debug --ignore-wasabi 2>/dev/null | \
       grep -c "ALERT #80000004")
 if [ "$out" -ge 1 ]; then ok "but never the guru report"
 else no "but never the guru report"; fi
 
-out=$(timeout -s INT 4 $W snoop --ignore-wasabi --output full 2>/dev/null | \
+out=$(timeout -s INT 6 $W snoop --ignore-wasabi --output full 2>/dev/null | \
       grep -cE "^(wasabid|c:wasabid|wasabi-runner)")
 check "and still hides it with --output full" "0" "$out"
 
-out=$(timeout -s INT 2 $W snoop --ignore-wasabi 2>/dev/null | \
+out=$(timeout -s INT 6 $W snoop --ignore-wasabi 2>/dev/null | \
       grep -c "Startup-Sequence")
 if [ "$out" -ge 1 ]; then ok "while keeping what is being debugged"
 else no "while keeping what is being debugged"; fi
 
-out=$(timeout -s INT 1.2 $W debug 2>/dev/null | grep -c "ReadCacheNode")
+out=$(timeout -s INT 3 $W debug 2>/dev/null | grep -c "ReadCacheNode")
 if [ "$out" -ge 1 ]; then ok "debug streams lines"
 else no "debug streams lines"; fi
 
 # --- combined view and --log ---
 STREAMLOG=$ROOT/../wasabi-streamlog.$$
-out=$(timeout -s INT 1.6 $W debug --with-snoop --log "$STREAMLOG" 2>/dev/null)
+out=$(timeout -s INT 3 $W debug --with-snoop --log "$STREAMLOG" 2>/dev/null)
 d=$(printf '%s\n' "$out" | grep -c "^debug | ")
 s=$(printf '%s\n' "$out" | grep -c "^snoop | ")
 if [ "$d" -ge 1 ] && [ "$s" -ge 1 ]; then ok "combined view carries both streams"

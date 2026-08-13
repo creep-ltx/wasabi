@@ -514,19 +514,24 @@ class Handler(socketserver.BaseRequestHandler):
             return self.err("that is wasabid itself - use restart or reboot")
         self.send(OK)
 
-    SNOOP_SAMPLES = [  # shaped like the C daemon's snoop_format() output
+    # Shaped like the C daemon's snoop_format() output. ORDER MATTERS:
+    # one sample goes out per idle tick, so a line's position is how
+    # many ticks a test must wait to see it. The tested lines are
+    # front-loaded deliberately - burying them cost a macOS CI run,
+    # because the runner is slower than the machine they were timed on.
+    SNOOP_SAMPLES = [
         ("cfile", 'Open("S:Startup-Sequence", read) = ok'),
-        ("Shell", 'Lock("DH0:Tools", read) = ok'),
-        ("cfile", 'LoadSeg("C:List") = ok'),
         ("wasabid", 'GetVar("wasabi.key") = fail (err 232)'),
-        ("c:wasabid", 'Open("T:wasabi-run-5", readwrite) = ok'),
-        ("wasabi-runner", 'Lock("C:List", read) = ok'),
-        ("Shell", 'Open("T:wasabi-run-5", readwrite) = ok'),
         # the poll noise bsdsocket really makes, three ticks of it, so
         # folding and --output minimal have something to work on
         ("wasabid", 'OpenLibrary("dos.library", v0) = ok'),
         ("wasabid", 'OpenLibrary("dos.library", v0) = ok'),
         ("wasabid", 'OpenLibrary("dos.library", v0) = ok'),
+        ("c:wasabid", 'Open("T:wasabi-run-5", readwrite) = ok'),
+        ("wasabi-runner", 'Lock("C:List", read) = ok'),
+        ("Shell", 'Open("T:wasabi-run-5", readwrite) = ok'),
+        ("Shell", 'Lock("DH0:Tools", read) = ok'),
+        ("cfile", 'LoadSeg("C:List") = ok'),
     ]
 
     def do_stream(self, tag, payload):
