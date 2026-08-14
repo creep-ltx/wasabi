@@ -5,4 +5,7 @@ tests/slowwrite
 tests/palscreen
 /wasabid
 tests/alertemit
+tests/trapprobe
+tests/stepprobe
+tests/pcprobe
 .claude/

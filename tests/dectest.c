@@ -83,6 +83,19 @@ int main(void)
     if (!ok) printf("  ok    %-34s rejected\n", "garbage");
     else { printf("  FAIL  garbage accepted as PC 0x%08lx\n", pc); fails++; }
 
+    /* A frame at an ODD offset must NOT be found - the scan steps by 2
+     * from 0 and Exec pushes at even addresses, so odd is by definition
+     * not a real frame. This documents the invariant the CAPTURE side
+     * has to keep: patches.c rounds its copy origin down to even, and
+     * without that a real frame lands at odd offsets and disappears.
+     * Measured for real under FS-UAE before it was fixed - see
+     * tests/pcprobe.c. */
+    memset(buf,0,sizeof buf); frame(41, 4, 0x2700, 0x00123456, 0, 0);
+    ok = guru_find_frame(buf, sizeof buf, &pc, &fault, &vec, &fmt);
+    if (!ok) printf("  ok    %-34s rejected\n", "frame at an odd offset");
+    else { printf("  FAIL  odd-offset frame accepted as PC 0x%08lx\n", pc);
+           fails++; }
+
     printf("\n%s\n", fails ? "FAILURES" : "all decoder cases pass");
     return fails ? 1 : 0;
 }

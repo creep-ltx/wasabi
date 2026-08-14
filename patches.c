@@ -3,7 +3,7 @@
  * place.
  *
  * Three features live here: the debug stream (exec's RawPutChar, so
- * every KPrintF byte), the snoop stream (fourteen dos.library and
+ * every KPrintF byte), the snoop stream (thirty dos.library and
  * exec.library calls plus icon.library and diskfont), and the guru
  * report (exec's Alert, and the black box that outlives a reboot).
  * They are one file because they are one thing three times: patch a
@@ -1354,7 +1354,23 @@ void wasabi_alert_note(ULONG code)
      */
     g_alert_snaplen = 0;
     {
-        UBYTE *from = (UBYTE *)&probe;
+        /*
+         * Rounded DOWN to an even address, and that is not cosmetic.
+         * Exec pushes its exception number at an even address - the 68k
+         * keeps the stack even - and guru_find_frame() scans the
+         * snapshot at even offsets only. So if this origin is odd,
+         * every field of the frame lands at an odd offset inside the
+         * copy and the decoder cannot find it, ever. `probe` is one
+         * byte; the compiler puts it wherever it likes.
+         *
+         * Measured under FS-UAE (68030, JIT off) with tests/pcprobe.c:
+         * the origin came back 0x40002313, the decoder found nothing,
+         * and rounding it down recovered the exact PC. That failure is
+         * silent - it looks identical to "this alert had no trap
+         * frame", which is the answer on Emu68 anyway, so it could have
+         * sat here indefinitely.
+         */
+        UBYTE *from = (UBYTE *)((ULONG)&probe & ~1UL);
         UBYTE *low  = (UBYTE *)SysBase->SysStkLower;
         UBYTE *top  = (UBYTE *)SysBase->SysStkUpper;
         if (from >= low && from < top) {
