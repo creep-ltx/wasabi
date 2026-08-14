@@ -1056,6 +1056,104 @@ def write_png(path, w, h, rgb):
     return len(blob)
 
 
+def read_png(path):
+    """Decode a PNG back to (w, h, raw RGB) — the inverse of write_png.
+
+    Only the subset write_png emits is accepted: 8-bit, colour type 2,
+    no interlace. Anything else is refused by name rather than decoded
+    wrongly, because a diff against a misread image is worse than no
+    diff. All five filter types are handled so a baseline made elsewhere
+    still works; ours are always type 0, which is also the only one that
+    avoids a per-byte Python loop.
+    """
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    if blob[:8] != b"\x89PNG\r\n\x1a\n":
+        raise WasabiError("%s is not a PNG" % path)
+    pos, idat, w, h = 8, [], None, None
+    while pos + 8 <= len(blob):
+        (ln,) = struct.unpack_from(">I", blob, pos)
+        typ = blob[pos + 4:pos + 8]
+        data = blob[pos + 8:pos + 8 + ln]
+        pos += 12 + ln                      # length + type + data + CRC
+        if typ == b"IHDR":
+            w, h, depth, ctype, _comp, _filt, inter = struct.unpack(
+                ">IIBBBBB", data)
+            if (depth, ctype, inter) != (8, 2, 0):
+                raise WasabiError(
+                    "%s is %d-bit colour-type-%d%s; this client reads the "
+                    "8-bit RGB PNGs it writes" % (path, depth, ctype,
+                                                  ", interlaced" if inter
+                                                  else ""))
+        elif typ == b"IDAT":
+            idat.append(data)
+        elif typ == b"IEND":
+            break
+    if w is None or not idat:
+        raise WasabiError("%s has no image data" % path)
+
+    raw = zlib.decompress(b"".join(idat))
+    stride, out, prev, p = w * 3, bytearray(), bytearray(w * 3), 0
+    for _y in range(h):
+        if p >= len(raw):
+            raise WasabiError("%s is truncated" % path)
+        f = raw[p]
+        p += 1
+        line = bytearray(raw[p:p + stride])
+        p += stride
+        if f == 1:                          # Sub
+            for i in range(3, stride):
+                line[i] = (line[i] + line[i - 3]) & 255
+        elif f == 2:                        # Up
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 255
+        elif f == 3:                        # Average
+            for i in range(stride):
+                a = line[i - 3] if i >= 3 else 0
+                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 255
+        elif f == 4:                        # Paeth
+            for i in range(stride):
+                a = line[i - 3] if i >= 3 else 0
+                c = prev[i - 3] if i >= 3 else 0
+                b = prev[i]
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 255
+        elif f != 0:
+            raise WasabiError("%s uses unknown PNG filter %d" % (path, f))
+        out += line
+        prev = line
+    return w, h, bytes(out)
+
+
+def rgb_diff(a, b, w, h):
+    """Changed pixels and their bounding box, between two RGB buffers.
+
+    Rows are compared whole first, so an unchanged screen costs h slice
+    compares rather than w*h pixel compares — which matters, because the
+    common answer to "did anything change" is no.
+    """
+    stride = w * 3
+    changed, x0, x1, y0, y1 = 0, w, -1, h, -1
+    for y in range(h):
+        ra = a[y * stride:(y + 1) * stride]
+        rb = b[y * stride:(y + 1) * stride]
+        if ra == rb:
+            continue
+        if y < y0:
+            y0 = y
+        y1 = y
+        for x in range(w):
+            i = x * 3
+            if ra[i:i + 3] != rb[i:i + 3]:
+                changed += 1
+                if x < x0:
+                    x0 = x
+                if x > x1:
+                    x1 = x
+    return changed, (x0, y0, x1, y1) if changed else None
+
+
 def cmd_grab(conn, args):
     if conn.caps and "grab" not in conn.caps:
         raise WasabiError(
@@ -1101,6 +1199,27 @@ def cmd_grab(conn, args):
           % (w, h, scaled, args.file, size // 1024, want / 1e6, grabbed),
           file=sys.stderr)
 
+    # Comparing against a baseline is entirely this end's work: the Amiga
+    # already sent raw pixels precisely so the fast idle machine does the
+    # thinking. Exit status follows diff(1) - 0 identical, 1 changed - so
+    # "did that command touch the screen" is answerable from a script.
+    if args.diff:
+        bw, bh, base = read_png(args.diff)
+        if (bw, bh) != (w, out_h):
+            raise WasabiError(
+                "%s is %dx%d and this grab is %dx%d - a diff needs the same "
+                "screen mode on both sides" % (args.diff, bw, bh, w, out_h))
+        changed, box = rgb_diff(base, pixels, w, out_h)
+        total = w * out_h
+        if not changed:
+            print("diff vs %s: identical" % args.diff, file=sys.stderr)
+            return 0
+        print("diff vs %s: %d of %d pixels changed (%.2f%%), "
+              "bounding box %d,%d - %d,%d"
+              % (args.diff, changed, total, 100.0 * changed / total,
+                 box[0], box[1], box[2], box[3]), file=sys.stderr)
+        return 1
+
 
 def cmd_screen(conn, args):
     """List the open screens, and optionally reorder them.
@@ -1132,34 +1251,88 @@ def cmd_screen(conn, args):
         print("brought %r to the front" % args.to_front, file=sys.stderr)
 
 
+PSF_FREE = 1                    # PS flags word, bit 0: include headroom
+
+# When to say a task is running out of stack.
+#
+# The first attempt was a flat 1024 bytes, and the A1200 rejected it
+# immediately: trackdisk.device, card.resource and carddisk.device all
+# live on 512-byte stacks and sit at ~300 free, so every single ps
+# warned about three idle system tasks that were nowhere near trouble.
+# "Close to the edge" is a proportion, not a byte count - 300 of 512 is
+# fine, 300 of 131072 is a task about to take the machine down.
+#
+# The absolute floor stays as a backstop for the genuinely tiny, where
+# any proportion is misleading and one nested call is the whole margin.
+STACK_TIGHT_PCT = 15
+STACK_TIGHT_ABS = 256
+
+
+def stack_tight(free, cap):
+    if free < 0 or cap <= 0:
+        return False                # not measured; not a claim either way
+    return free * 100 < cap * STACK_TIGHT_PCT or free < STACK_TIGHT_ABS
+
+
 def cmd_ps(conn, args):
-    conn.send(PS)
+    # Ask for headroom only when the daemon says it understands the
+    # flags word. A daemon that predates it ignores the payload and
+    # sends the seven-field line, which is what we would then parse; a
+    # daemon whose caps we cannot read at all (pre-caps) is not
+    # second-guessed, same rule as everywhere else in this client.
+    want_free = "psfree" in conn.caps
+    conn.send(PS, struct.pack(">I", PSF_FREE if want_free else 0))
     text = []
     drain_to_end(conn, lambda b: text.append(b))
     rx = amiga_pattern(args.pattern) if args.pattern else None
+    nfield = 8 if want_free else 7
     rows = []
     for line in b"".join(text).decode("latin-1").splitlines():
-        parts = line.split(" ", 6)
-        if len(parts) < 7:
+        parts = line.split(" ", nfield - 1)
+        if len(parts) < nfield:
             continue
-        addr, kind, pri, state, stack, cli, rest = parts
+        if want_free:
+            addr, kind, pri, state, stack, free, cli, rest = parts
+        else:
+            addr, kind, pri, state, stack, cli, rest = parts
+            free = "-1"
         name, _, cmd = rest.partition("\t")
         if rx and not (rx.match(name) or (cmd and rx.match(cmd))):
             continue
-        rows.append((addr, kind, int(pri), state, int(stack), int(cli),
-                     name, cmd))
-    rows.sort(key=lambda r: (r[1] != "p", r[5] if r[5] >= 0 else 999,
-                             r[6].lower()))
-    print("%-10s %-4s %4s %-6s %7s %4s  %s"
-          % ("ADDR", "KIND", "PRI", "STATE", "STACK", "CLI", "NAME"))
-    for addr, kind, pri, state, stack, cli, name, cmd in rows:
+        rows.append((addr, kind, int(pri), state, int(stack), int(free),
+                     int(cli), name, cmd))
+    rows.sort(key=lambda r: (r[1] != "p", r[6] if r[6] >= 0 else 999,
+                             r[7].lower()))
+
+    head = "%-10s %-4s %4s %-6s %7s" % ("ADDR", "KIND", "PRI", "STATE",
+                                        "STACK")
+    if want_free:
+        head += " %7s" % "FREE"
+    print(head + " %4s  %s" % ("CLI", "NAME"))
+
+    for addr, kind, pri, state, stack, free, cli, name, cmd in rows:
         label = name
         if cmd and cmd.lower() != name.lower():
             label += " (%s)" % cmd
-        print("%-10s %-4s %4d %-6s %7d %4s  %s" % (
-            addr, "proc" if kind == "p" else "task", pri, state, stack,
-            cli if cli >= 0 else "-", label))
+        row = "%-10s %-4s %4d %-6s %7d" % (
+            addr, "proc" if kind == "p" else "task", pri, state, stack)
+        if want_free:
+            # '-' where the daemon could not measure honestly: a task
+            # that swapped stacks, and the running task on a daemon too
+            # old to sample its own sp instead of a stale tc_SPReg.
+            row += " %7s" % (free if free >= 0 else "-")
+        print(row + " %4s  %s" % (cli if cli >= 0 else "-", label))
+
     print("%d tasks" % len(rows), file=sys.stderr)
+    # Headroom is the number that predicts a crash, so say something
+    # when one is close rather than leaving it to be spotted in a column.
+    tight = [r for r in rows if stack_tight(r[5], r[4])]
+    if tight:
+        tight.sort(key=lambda r: r[5] / float(r[4]))
+        print("wasabi: low stack - %s" % ", ".join(
+            "%s has %d of %d left (%.0f%%)"
+            % (r[7] or r[8], r[5], r[4], 100.0 * r[5] / r[4])
+            for r in tight[:3]), file=sys.stderr)
 
 
 def cmd_kill(conn, args):
@@ -1594,6 +1767,10 @@ def main(argv=None):
     s.add_argument("--raw", action="store_true",
                    help="no aspect correction - keep the pixels exactly "
                         "as read (a 640x256 screen stays 640x256)")
+    s.add_argument("--diff", metavar="BASELINE.png",
+                   help="compare this grab against an earlier one and "
+                        "report what changed; exits 1 if anything did, "
+                        "like diff(1), so it scripts as a regression check")
     s.set_defaults(fn=cmd_grab)
 
     s = sub.add_parser("screen", help="list screens; flip between them")

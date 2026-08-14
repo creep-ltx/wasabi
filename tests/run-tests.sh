@@ -22,6 +22,7 @@ FAIL=0
 cleanup() {
     [ -n "${MOCK_PID:-}" ] && kill "$MOCK_PID" 2>/dev/null
     [ -n "${MOCK2_PID:-}" ] && kill "$MOCK2_PID" 2>/dev/null
+    [ -n "${MOCK4_PID:-}" ] && kill "$MOCK4_PID" 2>/dev/null
     rm -rf "$ROOT"
 }
 trap cleanup EXIT
@@ -391,6 +392,59 @@ import struct,sys
 d=open('$SHOT','rb').read()
 print('%dx%d' % struct.unpack('>II', d[16:24]))" 2>/dev/null)
 check "--raw keeps the pixels exactly as sent" "8x4" "$out"
+
+# --- grab --diff: regression checking against an earlier shot ----------
+# The mock draws the same screen every time, so two grabs must compare
+# identical - which also round-trips write_png through read_png, the
+# only proof that the new decoder agrees with the encoder beside it.
+BASE=$ROOT/../wasabi-base.$$
+$W grab "$BASE" >/dev/null 2>&1
+$W grab "$SHOT" --diff "$BASE" >/dev/null 2>&1
+check "an unchanged screen diffs clean, and exits 0" "0" "$?"
+out=$($W grab "$SHOT" --diff "$BASE" 2>&1 >/dev/null | grep -c "identical")
+check "and says so" "1" "$out"
+
+# Doctor one pixel of the baseline: the diff must find it, locate it,
+# and exit 1 the way diff(1) does so a script can branch on it.
+python3 - "$BASE" <<'EOF'
+import struct, sys, zlib
+p = sys.argv[1]
+d = open(p, "rb").read()
+w, h = struct.unpack(">II", d[16:24])
+pos, idat = 8, []
+while pos + 8 <= len(d):
+    (ln,) = struct.unpack_from(">I", d, pos)
+    typ = d[pos+4:pos+8]
+    if typ == b"IDAT":
+        idat.append(d[pos+8:pos+8+ln])
+    pos += 12 + ln
+raw = bytearray(zlib.decompress(b"".join(idat)))
+raw[1 + 3] ^= 0xFF                      # row 0, filter byte, then pixel 1
+def chunk(t, b):
+    return struct.pack(">I", len(b)) + t + b + struct.pack(
+        ">I", zlib.crc32(t + b) & 0xFFFFFFFF)
+open(p, "wb").write(
+    b"\x89PNG\r\n\x1a\n"
+    + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+    + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+    + chunk(b"IEND", b""))
+EOF
+$W grab "$SHOT" --diff "$BASE" >/dev/null 2>&1
+check "a changed screen exits 1" "1" "$?"
+out=$($W grab "$SHOT" --diff "$BASE" 2>&1 >/dev/null | \
+      grep -c "1 of 64 pixels changed")
+check "and counts exactly the pixels that moved" "1" "$out"
+out=$($W grab "$SHOT" --diff "$BASE" 2>&1 >/dev/null | \
+      grep -c "bounding box 1,0 - 1,0")
+check "and locates it" "1" "$out"
+
+# A baseline from a different screen mode is refused, not diffed against
+# whatever happens to line up.
+$W grab --raw "$ROOT/../wasabi-raw.$$" >/dev/null 2>&1
+out=$($W grab "$SHOT" --diff "$ROOT/../wasabi-raw.$$" 2>&1 >/dev/null | \
+      grep -c "same screen mode")
+check "a baseline of a different size is refused" "1" "$out"
+rm -f "$BASE" "$ROOT/../wasabi-raw.$$"
 rm -f "$SHOT"
 
 out=$($W screen 2>/dev/null | grep -c "CygnusEd Professional V4.2")
@@ -407,6 +461,44 @@ check "ps lists tasks" "1" "$out"
 
 out=$($W ps 'input#?' 2>/dev/null | grep -c "device")
 check "ps honours a filter" "1" "$out"
+
+# --- ps stack headroom -------------------------------------------------
+# Capacity says what a task was given; headroom says how close it is to
+# the crash. Four things have to hold: the column appears, an
+# unmeasurable task says so rather than guessing, a tight one is called
+# out on stderr, and - the one that matters for anyone already running a
+# client - a daemon without the capability still parses.
+out=$($W ps 2>/dev/null | grep -c "FREE")
+check "ps shows a stack headroom column" "1" "$out"
+
+out=$($W ps 'input#?' 2>/dev/null | grep -cE "6144 +380")
+check "and the headroom next to the capacity" "1" "$out"
+
+out=$($W ps 'con#?' 2>/dev/null | grep -cE "4096 +-")
+check "a task whose stack cannot be measured says so" "1" "$out"
+
+out=$($W ps 2>&1 >/dev/null | grep -c "low stack - input.device has 380 of 6144")
+check "a task close to the edge is called out" "1" "$out"
+
+# The warning is proportional, not a flat byte count. A 512-byte device
+# task at ~300 free is 59% clear and must NOT be flagged - a flat 1024
+# threshold warned about three idle system tasks on every real ps.
+out=$($W ps 2>&1 >/dev/null | grep -c "con_handler")
+check "a small stack with room to spare is not flagged" "0" "$out"
+
+# A daemon from before the flags word: the client must not ask, and must
+# still read the seven-field line rather than dropping every row.
+CAPS_NOFREE="ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry"
+./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+4)) --key "$KEY" \
+    --caps "$CAPS_NOFREE" >"$ROOT/mock-nofree.log" 2>&1 &
+MOCK4_PID=$!
+sleep 1
+WOLD="./wasabi --host 127.0.0.1 --port $((PORT+4)) --key $KEY"
+out=$($WOLD ps 2>/dev/null | grep -c "input.device")
+check "a daemon without 'psfree' still lists tasks" "1" "$out"
+out=$($WOLD ps 2>/dev/null | grep -c "FREE")
+check "and is not asked for a column it lacks" "0" "$out"
+kill "$MOCK4_PID" 2>/dev/null
 
 $W kill Wait >/dev/null 2>&1
 check "kill by command name succeeds" "0" "$?"

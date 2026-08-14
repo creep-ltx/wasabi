@@ -42,10 +42,10 @@
 
 #include "patches.h"                 /* everything that hijacks a vector */
 
-#define VERSION_STR "wasabid 0.2b11"
+#define VERSION_STR "wasabid 0.2b12"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.2b11 (14.8.2026)";
+    "$VER: wasabid 0.2b12 (14.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -66,7 +66,7 @@ static const char *verstag __attribute__((used)) =
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
-                 "grab,screen,hb,guru,snoopentry"
+                 "grab,screen,hb,guru,snoopentry,psfree"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -858,6 +858,7 @@ struct PsEnt {
     BYTE  pri;
     UBYTE state;                     /* 0 run, 1 ready, 2 wait */
     ULONG stack;
+    LONG  free;                      /* bytes of headroom, -1 unknown */
     LONG  cli;                       /* CLI number, -1 when none */
     char  name[48];
     char  cmd[48];                   /* CLI command in flight, if any */
@@ -867,7 +868,33 @@ struct PsEnt {
 
 static struct PsEnt g_ps[PS_MAX];
 
-static void ps_add(LONG *n, struct Task *t, UBYTE state)
+/*
+ * Headroom, which is the number that predicts a crash - capacity only
+ * tells you what the task was given, not what it has left. This daemon
+ * has been bitten four times by a large automatic on an 8 KB stack
+ * (audit2.md), and every one of those was found by reading source on
+ * the Linux box, because nothing on the wire could show it.
+ *
+ * Two ways to be wrong, both handled:
+ *
+ *  - tc_SPReg is only meaningful for a task the scheduler has parked.
+ *    For the RUNNING task it is whatever was saved last time, which is
+ *    stale by definition - so the caller passes the real stack pointer
+ *    for that one entry (see ps_collect) rather than a plausible lie.
+ *
+ *  - A CLI program may swap stacks, leaving sp outside the Task's own
+ *    bounds. That is not an error and not a measurement either: it is
+ *    reported as unknown rather than as a huge or negative number.
+ */
+static LONG stack_free(struct Task *t, APTR sp_now)
+{
+    APTR sp = sp_now ? sp_now : (APTR)t->tc_SPReg;
+    if (sp <= t->tc_SPLower || sp > t->tc_SPUpper)
+        return -1;
+    return (LONG)((char *)sp - (char *)t->tc_SPLower);
+}
+
+static void ps_add(LONG *n, struct Task *t, UBYTE state, APTR sp_now)
 {
     struct PsEnt *e;
     if (*n >= PS_MAX)
@@ -878,6 +905,7 @@ static void ps_add(LONG *n, struct Task *t, UBYTE state)
     e->pri   = t->tc_Node.ln_Pri;
     e->state = state;
     e->stack = (ULONG)((char *)t->tc_SPUpper - (char *)t->tc_SPLower);
+    e->free  = stack_free(t, sp_now);
     e->cli   = -1;
     e->cmd[0] = '\0';
     copystr(e->name, sizeof(e->name), t->tc_Node.ln_Name);
@@ -904,30 +932,54 @@ static LONG ps_collect(void)
 {
     LONG n = 0;
     struct Task *t;
+    char here;                       /* its address is this task's sp */
+
     Disable();
-    ps_add(&n, SysBase->ThisTask, 0);
+    /* ThisTask is always us - we are the one serving the request - and
+     * our own tc_SPReg is stale, so measure the stack we are standing
+     * on instead of reading the register the scheduler has not updated
+     * since we last gave up the CPU. */
+    ps_add(&n, SysBase->ThisTask, 0, (APTR)&here);
     for (t = (struct Task *)SysBase->TaskReady.lh_Head;
          t->tc_Node.ln_Succ; t = (struct Task *)t->tc_Node.ln_Succ)
-        ps_add(&n, t, 1);
+        ps_add(&n, t, 1, NULL);
     for (t = (struct Task *)SysBase->TaskWait.lh_Head;
          t->tc_Node.ln_Succ; t = (struct Task *)t->tc_Node.ln_Succ)
-        ps_add(&n, t, 2);
+        ps_add(&n, t, 2, NULL);
     Enable();
     return n;
 }
 
-static BOOL cmd_ps(int fd)
+/*
+ * PSF_FREE is asked for by the client, not decided here, and that is
+ * what keeps the wire compatible in both directions: an older daemon
+ * never reads the payload at all, and an older client never sends one,
+ * so it gets the seven-field line it has always parsed. A field added
+ * unconditionally would have shifted <name> and broken every client in
+ * the field - the line has no room to grow at the end either, because
+ * <cmd> is the tab-delimited remainder.
+ */
+#define PSF_FREE 1
+
+static BOOL cmd_ps(int fd, ULONG flags)
 {
     static const char * const statename[] = { "run", "ready", "wait" };
-    char line[160];
+    char line[176];
     LONG n = ps_collect(), i;
 
     for (i = 0; i < n; i++) {
         struct PsEnt *e = &g_ps[i];
-        LONG ln = sprintf(line, "0x%08lx %c %ld %s %lu %ld %s\t%s\n",
-                          (unsigned long)e->addr, e->kind, (long)e->pri,
-                          statename[e->state], (unsigned long)e->stack,
-                          (long)e->cli, e->name, e->cmd);
+        LONG ln;
+        if (flags & PSF_FREE)
+            ln = sprintf(line, "0x%08lx %c %ld %s %lu %ld %ld %s\t%s\n",
+                         (unsigned long)e->addr, e->kind, (long)e->pri,
+                         statename[e->state], (unsigned long)e->stack,
+                         (long)e->free, (long)e->cli, e->name, e->cmd);
+        else
+            ln = sprintf(line, "0x%08lx %c %ld %s %lu %ld %s\t%s\n",
+                         (unsigned long)e->addr, e->kind, (long)e->pri,
+                         statename[e->state], (unsigned long)e->stack,
+                         (long)e->cli, e->name, e->cmd);
         if (!send_frame(fd, T_DATA, line, ln))
             return FALSE;
     }
@@ -2062,7 +2114,7 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     }
 
     case T_PS:
-        return cmd_ps(fd);
+        return cmd_ps(fd, len >= 4 ? get_be32(p) : 0);
 
     case T_KILL: {
         char target[64];

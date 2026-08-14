@@ -19,6 +19,7 @@ Known divergences from the C daemon, all because this is Unix underneath:
 """
 
 import argparse
+import collections
 import os
 import re
 import select
@@ -52,7 +53,7 @@ BANNER = None
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
-        "hb,guru,snoopentry")
+        "hb,guru,snoopentry,psfree")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -87,6 +88,11 @@ def ver_of(path):
     end = blob.find(b"\0", i)
     tag = blob[i + 6:end if end > 0 else i + 120].decode("latin-1", "replace")
     return " ".join(tag.split()[:2])
+
+
+# One row of the daemon's PS output, in wire order.
+MockTask = collections.namedtuple(
+    "MockTask", "addr kind pri state stack free cli name cmd")
 
 
 def pack_str(s):
@@ -246,7 +252,7 @@ class Handler(socketserver.BaseRequestHandler):
         elif tag == SCREEN:
             self.do_screens(payload)
         elif tag == PS:
-            self.do_ps()
+            self.do_ps(payload)
         elif tag == KILL:
             self.do_kill(payload)
         elif tag in (DEBUG, SNOOP):
@@ -458,14 +464,29 @@ class Handler(socketserver.BaseRequestHandler):
         except (OSError, ValueError) as exc:
             self.err(str(exc), 205)
 
-    MOCK_TASKS = [  # addr, kind, pri, state, stack, cli, name, cmd - the
-                    # daemon's ps wire format; con_handler is deliberately
-                    # duplicated so the ambiguous-kill path is testable
-        ("0x0804f010", "p", 0, "run", 4096, 1, "wasabid", "c:wasabid"),
-        ("0x08051200", "p", 0, "wait", 4096, 2, "Background CLI", "Wait"),
-        ("0x08032400", "t", 5, "wait", 6144, -1, "input.device", ""),
-        ("0x08036000", "t", 5, "wait", 4096, -1, "con_handler", ""),
-        ("0x08037000", "t", 5, "wait", 4096, -1, "con_handler", ""),
+    # Fields are named because they are also positional on the wire:
+    # adding 'free' in the middle silently broke do_kill's r[6]/r[7]
+    # until the suite caught it. Named access cannot drift that way.
+    #
+    # con_handler is deliberately duplicated so the ambiguous-kill path
+    # is testable. 'free' is headroom: -1 means the daemon could not
+    # measure it honestly (a task that swapped stacks), and input.device
+    # is down to 380 bytes so the low-stack warning has something to find.
+    MOCK_TASKS = [
+        MockTask("0x0804f010", "p", 0, "run", 4096, 2200, 1,
+                 "wasabid", "c:wasabid"),
+        MockTask("0x08051200", "p", 0, "wait", 4096, 3100, 2,
+                 "Background CLI", "Wait"),
+        MockTask("0x08032400", "t", 5, "wait", 6144, 380, -1,
+                 "input.device", ""),
+        MockTask("0x08036000", "t", 5, "wait", 4096, -1, -1,
+                 "con_handler", ""),
+        MockTask("0x08037000", "t", 5, "wait", 4096, 3900, -1,
+                 "con_handler", ""),
+        # 512-byte stack at ~300 free: 59% clear, and the shape that
+        # made a flat byte threshold warn about idle system tasks.
+        MockTask("0x08039000", "t", 10, "wait", 512, 302, -1,
+                 "trackdisk.device", ""),
     ]
 
     def do_screens(self, payload):
@@ -495,22 +516,35 @@ class Handler(socketserver.BaseRequestHandler):
                 px += bytes(((x * 32) % 256, (y * 64) % 256, 128))
         self.send_data(struct.pack(">III", w, h, 3) + bytes(px))
 
-    def do_ps(self):
-        lines = ["%s %s %d %s %d %d %s\t%s" % r for r in self.MOCK_TASKS]
+    def do_ps(self, payload):
+        # Bit 0 of the flags word asks for the headroom column. An older
+        # client sends no payload at all, and must still get exactly the
+        # seven fields it has always parsed - that compatibility is the
+        # whole reason the field is requested rather than just added.
+        flags = struct.unpack_from(">I", payload, 0)[0] if len(payload) >= 4 \
+            else 0
+        if flags & 1:
+            lines = ["%s %s %d %s %d %d %d %s\t%s" % r
+                     for r in self.MOCK_TASKS]
+        else:
+            lines = ["%s %s %d %s %d %d %s\t%s"
+                     % (r.addr, r.kind, r.pri, r.state, r.stack, r.cli,
+                        r.name, r.cmd)
+                     for r in self.MOCK_TASKS]
         self.send_data(("\n".join(lines) + "\n").encode("latin-1"))
 
     def do_kill(self, payload):
         target, _ = unpack_str(payload, 4)
         tl = target.lower()
         hits = [r for r in self.MOCK_TASKS
-                if r[0].lower() == tl or r[6].lower() == tl or
-                (r[7] and r[7].lower() == tl)]
+                if r.addr.lower() == tl or r.name.lower() == tl or
+                (r.cmd and r.cmd.lower() == tl)]
         if not hits:
             return self.err("no task or process by that name", 205)
         if len(hits) > 1:
             return self.err(
                 "ambiguous - several tasks match; use the 0x address from ps")
-        if hits[0][6] == "wasabid":
+        if hits[0].name == "wasabid":
             return self.err("that is wasabid itself - use restart or reboot")
         self.send(OK)
 
