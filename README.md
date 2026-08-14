@@ -22,7 +22,7 @@ Two halves:
 
 ```
 $ wasabi discover
-192.168.68.109  :1234  a1200        wasabid 0.2b13
+192.168.68.109  :1234  a1200        wasabid 0.2
 
 $ wasabi deploy ccon-handler L:ccon-handler --reboot
 ccon-handler -> L:ccon-handler (106912 bytes)
@@ -345,7 +345,7 @@ where you will actually see it:
 $ wasabi ping
 wasabi: 673 connection(s) refused as off-LAN since you last looked
 (673 in total) - 'wasabi debug' shows them as they happen
-wasabid 0.2b13 - 3.2 ms
+wasabid 0.2 - 3.2 ms
 ```
 
 Accepted connections are announced on the `debug` stream too, so "who
@@ -424,7 +424,7 @@ announces the loss and then retries every couple of seconds, forever:
 
 ```
 [debug+snoop: connection lost (connection closed by the Amiga) - reconnecting until the Amiga returns; Ctrl-C to stop]
-[debug+snoop: reconnected after 34 s - wasabid 0.2b13]
+[debug+snoop: reconnected after 34 s - wasabid 0.2]
 ```
 
 then resubscribes and streams on. `--once` restores the old
@@ -436,7 +436,7 @@ every loss and reconnect, and how it ended — so a log read weeks later
 says for itself what was subscribed and when:
 
 ```
-2026-08-13 09:14:20.101 client | debug+snoop stream open to 192.168.68.109:1234 (wasabid 0.2b13) - Ctrl-C to stop
+2026-08-13 09:14:20.101 client | debug+snoop stream open to 192.168.68.109:1234 (wasabid 0.2) - Ctrl-C to stop
 ```
 
 ## The guru report
@@ -698,11 +698,11 @@ checks — cheapest first, each catching what the one before it cannot:
 
 ```
 $ wasabi update wasabid
-updating to wasabid 0.2b13
+updating to wasabid 0.2
 wasabid -> C:wasabid.new (44244 bytes)
-  identity   wasabid 0.2b13 (2026-08-14)
+  identity   wasabid 0.2 (2026-08-15)
   selftest   ok
-  live       wasabid 0.2b13 served a handshake and a ping on port 1235
+  live       wasabid 0.2 served a handshake and a ping on port 1235
 installed - the daemon is reloading itself
 ```
 
@@ -766,7 +766,7 @@ the daemon lists what it can do in its `WELCOME`, and `info` shows it:
 
 ```
 $ wasabi info
-wasabid 0.2b13, protocol v1
+wasabid 0.2, protocol v1
 exec.library 47.13
 chip free 2020 KB, fast free 1883101 KB
 volumes:
@@ -974,8 +974,8 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 
 ## What's next
 
-**0.2b13 is the current build.** The 0.2 line added the guru report and
-its black box, grew snoop from 14 patched calls to 30, added entry
+**0.2 is the second non-beta build.** The 0.2 line added the guru report
+and its black box, grew snoop from 14 patched calls to 30, added entry
 logging and three output modes, stack headroom in `ps` and `grab
 --diff`, and split every `SetFunction` hook out of `wasabid.c` into
 `patches.c` behind a deliberately narrow header.

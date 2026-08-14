@@ -42,10 +42,10 @@
 
 #include "patches.h"                 /* everything that hijacks a vector */
 
-#define VERSION_STR "wasabid 0.2b13"
+#define VERSION_STR "wasabid 0.2"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.2b13 (14.8.2026)";
+    "$VER: wasabid 0.2 (15.8.2026)";
 
 #define PROTO_VERSION   1
 
