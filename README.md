@@ -382,6 +382,12 @@ The cross-compiler is Bebbo's `m68k-amigaos-gcc`, at
 `$(HOME)/opt/amiga/bin` on this box. Override `CC` if yours lives
 elsewhere.
 
+**A release carries both halves, always.** `wasabid` and `wasabi` are
+attached to the same tag, and they are the pair that was tested
+together. Shipping a daemon on its own leaves whoever downloads it to
+find a client from wherever, which is the version skew the capability
+negotiation exists to survive rather than something to invite.
+
 ## The debug stream
 
 `wasabi debug` streams every `KPrintF`/serial-debug byte the machine
