@@ -95,13 +95,13 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x21 | STDOUT   | S→C | raw bytes |
 | 0x22 | STDERR   | S→C | raw bytes |
 | 0x23 | EXIT     | S→C | `u32 rc`, `u32 secondary` |
-| 0x30 | DEBUG    | C→S | `u32 flags` |
+| 0x30 | DEBUG    | C→S | `u32 flags` (reserved; the daemon does not read it) |
 | 0x31 | SNOOP    | C→S | `u32 flags`, `str taskfilter` |
 | 0x32 | LOG      | S→C | `u32 stream`, `u32 seq`, `str text` |
 | 0x40 | REBOOT   | C→S | `u32 flags` |
 | 0x41 | INFO     | C→S | — |
 | 0x42 | RESTART  | C→S | `[u32 flags]` (may be absent) |
-| 0x43 | PS       | C→S | — |
+| 0x43 | PS       | C→S | `[u32 flags]` (may be absent) |
 | 0x44 | KILL     | C→S | `u32 flags`, `str target` |
 | 0x45 | SPEED    | C→S | `u32 flags`, `u32 size`, `str target` |
 | 0x46 | QUIT     | C→S | `[u32 flags]` (may be absent) |
@@ -135,7 +135,8 @@ assuming silence means yes.
 
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
-`speed,speedfile,quit,install,grab,screen,hb,guru` for a current build. Self-update makes version skew
+`speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry,psfree` for
+a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -242,6 +243,10 @@ software has always put the messages it cannot afford to route through
 the display. This is what Sashimi captures, delivered over the wire
 instead of into a file.
 
+The leading `flags` word is reserved: the daemon accepts the frame and
+never reads it. It exists so this subscription can grow options the way
+`SNOOP`'s did, without a framing change. A client should send zero.
+
 The daemon patches `RawPutChar()` in exec's vector table with
 `SetFunction()` and appends to a ring buffer. The patch runs in whatever
 context the caller was in — **including interrupts and Supervisor mode** —
@@ -274,17 +279,12 @@ an alert, one visible line goes out on every subscribed stream:
 [wasabi: DEADEND ALERT #81000005 in task 'c:wasabid' (0x08298d08)]
 ```
 
-**Scope, measured rather than assumed.** This sees alerts raised
-through the `Alert()` vector — exec's own (`AN_MemCorrupt` and
-friends), and programs that call `Alert()` deliberately. It does **not**
-see a program faulting: a CPU exception goes to the task's
-`tc_TrapCode`, which for a Process is dos.library's "Software Failure"
-requester, and never touches `Alert()`. Verified under FS-UAE on a real
-68030 with the JIT off — a child that genuinely faulted produced zero
-hits on the patch. Catching those needs `tc_TrapCode` or CPU-vector
-hooking, i.e. what Enforcer does. On Emu68 the question is moot anyway:
-CPU exceptions take the whole machine down without reaching the guest
-OS at all.
+**Scope.** This sees alerts raised through the `Alert()` vector —
+exec's own (`AN_MemCorrupt` and friends), and programs that call
+`Alert()` deliberately. It does **not** see a program faulting: a CPU
+exception goes to the task's `tc_TrapCode`, which for a Process is
+dos.library's "Software Failure" requester, and never touches
+`Alert()`.
 
 (or `RECOVERABLE` for alerts without the deadend bit). The line escapes
 before the guru freezes the display whenever the alert is raised in
@@ -311,10 +311,7 @@ black box takes over as the surviving copy. (`LastAlert` would serve
 that role on hardware that preserves it across a reset; Emu68 does
 not.) On the Amiga itself, `Type T:lastguru` reads the same note.
 
-Nothing else in RAM keeps a copy, which was tested rather than
-assumed: raise a known alert, reboot, and scan every byte of every
-MemHeader for it. Chip RAM yields nothing; fast RAM yields only the
-stashes the daemon wrote itself. A guru cannot be recovered after the
+Nothing else in RAM keeps a copy. A guru cannot be recovered after the
 fact — it can only be recorded in advance, somewhere the boot will not
 reuse.
 
@@ -480,6 +477,28 @@ replies with `DATA` frames, one task per line, then `END`:
 the CLI number or `-1`, and `cmd` — after the tab, since both names may
 hold spaces — is the CLI command the process is running, empty otherwise.
 Filtering is the client's job.
+
+**`flags` bit 0 (`psfree`)** asks for a headroom field, inserted after
+`<stack>`:
+
+```
+<addr> <kind> <pri> <state> <stack> <free> <cli> <name>\t<cmd>
+```
+
+`stack` is the task's capacity (`tc_SPUpper - tc_SPLower`); `free` is how
+much of it is left. `-1` means the daemon declined to guess — either the
+task swapped stacks, so its `sp` is outside its own `Task` bounds, or the
+value would have been read from a `tc_SPReg` that is stale. (For the
+running task the daemon samples its own stack pointer directly, since
+`tc_SPReg` is by definition out of date for whoever is executing.)
+
+The field is **requested, not simply added**, and that is deliberate: the
+line has no room to grow. Inserting a field unconditionally would shift
+`<name>` for every client already deployed, and appending after `<cmd>`
+is impossible because `<cmd>` is the tab-delimited remainder. A daemon
+that predates the flags word never reads the payload, so an old client
+(which sends none) and a new client talking to an old daemon both get the
+seven-field line they expect.
 
 ### KILL — stop a task
 

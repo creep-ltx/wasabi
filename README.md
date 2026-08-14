@@ -22,7 +22,7 @@ Two halves:
 
 ```
 $ wasabi discover
-192.168.68.109  :1234  a1200        wasabid 0.1
+192.168.68.109  :1234  a1200        wasabid 0.2b13
 
 $ wasabi deploy ccon-handler L:ccon-handler --reboot
 ccon-handler -> L:ccon-handler (106912 bytes)
@@ -37,8 +37,9 @@ The point is the whole loop with the machine's inner voice inside it:
 stream and the SnoopDOS-style call trace pour into the development
 machine while your code executes on real silicon.** No SD card
 shuffling, no serial cable, no second tool: every `KPrintF()` byte the
-machine writes and fourteen patched dos/exec calls, each naming its
-caller and its real result, land in the terminal next to your editor:
+machine writes and thirty patched dos, exec, icon and diskfont calls,
+each naming its caller and its real result, land in the terminal next
+to your editor:
 
 ```
 $ wasabi debug --with-snoop
@@ -64,15 +65,15 @@ pulling in its libraries — captured live off the A1200.
 | `reboot` | **working on the real A1200** |
 | `debug` (KPrintF stream) | **working on the real A1200** — standalone, own RawPutChar patch |
 | `restart` / `update` (self-update) | **working on the real A1200** — `update` verifies four ways before it commits |
-| `snoop` (DOS call trace) | **working on the real A1200** — SnoopDOS-style patches on 14 dos/exec calls |
-| `ps` / `kill` | **working on the real A1200** — full task list; Ctrl-C or RemTask |
+| `snoop` (DOS call trace) | **working on the real A1200** — SnoopDOS-style patches on 30 dos, exec, icon and diskfont calls |
+| `ps` / `kill` | **working on the real A1200** — full task list with stack headroom; Ctrl-C or RemTask |
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
 | `grab` / `screen` | **working on the real A1200** — front screen to PNG in 0.1 s; RTG and native paths both |
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
 | stream heartbeat + farewell | **working on the real A1200** — a dead machine is noticed; a deliberate exit says goodbye first |
 | stream auto-reconnect | client-side — a lost stream retries forever and says why it dropped; `--once` restores stop-on-disconnect |
-| guru report | **working on the real A1200, for system alerts only** — the `Alert()` hook names the code and dying task on both streams, the note persists in `T:lastguru` and greets every stream attach, and a deadend survives the reboot in an owned top-of-RAM black box (proven end to end with live `#8035c0de` and `#8100000b` gurus). **It does not catch a program faulting**: those go to `tc_TrapCode`, not `Alert()` — verified under FS-UAE on a real 68030, where a genuinely faulting child produced zero hits. `LastAlert` is dead on Emu68 (proven by poke + reboot) |
-| guru PC capture | **built, unit-tested, dormant here** — the hook snapshots the supervisor stack and the frame is decoded by matching Exec's exception number to the CPU's vector offset; `tests/dectest.c` proves the decoder against frames from M68000PM Appendix B. It reports nothing on this machine because the alerts it can see are raised from user mode, where there is no trap frame — and because Emu68 does not deliver CPU exceptions to the guest at all |
+| guru report | **working on the real A1200, for system alerts only** — names the alert code and the dying task on both streams, keeps the note in `T:lastguru`, and carries a deadend across a reboot in a top-of-RAM black box. **Does not catch a program faulting**: those go to `tc_TrapCode`, not `Alert()` |
+| guru PC capture | **built, dormant on Emu68** — snapshots the supervisor stack at `Alert()` time and decodes the exception frame for a PC. Emu68 does not deliver CPU exceptions to the guest, so no frame arrives to decode |
 | exit guards + `--force` | **working on the real A1200** — no exit with a runner alive; `--force` Ctrl-Cs it and delivers its real exit code |
 
 First live run: 12 August 2026, against an A1200 + PiStorm32-lite/CM4 on
@@ -83,7 +84,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 50 tests, no Amiga required.
+host mock that speaks the same protocol — 100 tests, no Amiga required.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -149,15 +150,18 @@ wasabi update LOCAL          replace the daemon itself, verifying first
 wasabi quit --yes [--force]  stop the daemon (needs physical access after)
 wasabi debug [--with-snoop] [--log F]   live KPrintF stream
 wasabi snoop [--task PAT] [--log F]     live DOS call trace
-wasabi ps [PATTERN]          list every task; AmigaDOS wildcards filter
+wasabi ps [PATTERN]          list every task, with stack headroom;
+                             AmigaDOS wildcards filter
 wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
 wasabi speedtest [SIZE] [--target PATH]  latency and throughput both ways
-wasabi grab [FILE]           grab the front screen as a PNG
+wasabi grab [FILE] [--diff BASE.png]
+                             grab the front screen as a PNG; --diff
+                             reports what changed since BASE and exits 1
 wasabi screen [--cycle|--to-front T]    list screens, flip between them
 ```
 
-`--host` overrides discovery, `WASABI_HOST`/`WASABI_KEY` override the
-config file. The daemon takes `wasabid [port] [name ID] [allow
+`--host` overrides discovery, and `WASABI_HOST`/`WASABI_PORT`/`WASABI_KEY`
+override the config file. The daemon takes `wasabid [port] [name ID] [allow
 CIDR|any]`, and is LAN-only unless told otherwise. `name` is what
 discovery replies call the machine — two Amigas on one LAN stop being
 interchangeable "amiga"s — and it overrides `ENV:HOSTNAME`, which is
@@ -198,12 +202,11 @@ has no use for two concurrent builds. A second `run` gets a clear error,
 not a queue.
 
 **No blocking read or write is unbounded.** wasabid is one process with
-one loop, so a single wedged peer used to take the machine with it: send
-half a frame and stall, or subscribe to `debug` and stop reading, and the
-daemon blocked in `recv()` or `send()` forever — nothing else served, not
-even Ctrl-C honoured. Every blocking read and write now waits on
-`WaitSelect()` with a ten-second bound (and watches Ctrl-C while it
-does), then drops that client. Measured on the A1200: a client that sent
+one loop, so a single wedged peer would otherwise take the machine with
+it: send half a frame and stall, or subscribe to `debug` and stop
+reading, and nothing else gets served. Every blocking read and write
+waits on `WaitSelect()` with a ten-second bound, watches Ctrl-C while it
+does, and then drops that client. Measured on the A1200: a client that sent
 half a frame and went silent was cut off after 10.0 s, a `ping` issued
 one second into the stall was answered 9.0 s later — the remainder of the
 timeout — and everything after it was instant again. Ten seconds is
@@ -342,7 +345,7 @@ where you will actually see it:
 $ wasabi ping
 wasabi: 673 connection(s) refused as off-LAN since you last looked
 (673 in total) - 'wasabi debug' shows them as they happen
-wasabid 0.1 - 3.2 ms
+wasabid 0.2b13 - 3.2 ms
 ```
 
 Accepted connections are announced on the `debug` stream too, so "who
@@ -396,13 +399,9 @@ if another tool `SetFunction`'d on top, restoring the old pointer would
 unlink *their* patch and crash the machine minutes later, so wasabid puts
 its own patch back and stays installed rather than corrupt the chain.
 
-Proven on the real A1200 (12 Aug 2026): a test program emitting via
-`RawPutChar` streams through live, the patch installs and removes cleanly
-across repeated sessions, and the machine stays healthy afterward.
-
-**A stream can now tell a quiet machine from a dead one.** A reset or
-frozen Amiga sends no FIN, so a `wasabi debug` left open across a reboot
-used to sit forever looking connected. Two additions close that: the
+**A stream tells a quiet machine from a dead one.** A reset or frozen
+Amiga sends no FIN, so a `wasabi debug` left open across a reboot would
+otherwise sit forever looking connected. Two things prevent that: the
 daemon sends an invisible heartbeat — an empty `LOG` frame, rendering as
 nothing — on every subscribed stream every ~5 seconds, and a deliberate
 exit (reboot, restart, quit) says goodbye out loud first:
@@ -425,7 +424,7 @@ announces the loss and then retries every couple of seconds, forever:
 
 ```
 [debug+snoop: connection lost (connection closed by the Amiga) - reconnecting until the Amiga returns; Ctrl-C to stop]
-[debug+snoop: reconnected after 34 s - wasabid 0.1]
+[debug+snoop: reconnected after 34 s - wasabid 0.2b13]
 ```
 
 then resubscribes and streams on. `--once` restores the old
@@ -437,125 +436,84 @@ every loss and reconnect, and how it ended — so a log read weeks later
 says for itself what was subscribed and when:
 
 ```
-2026-08-13 09:14:20.101 client | debug+snoop stream open to 192.168.68.109:1234 (wasabid 0.1) - Ctrl-C to stop
+2026-08-13 09:14:20.101 client | debug+snoop stream open to 192.168.68.109:1234 (wasabid 0.2b13) - Ctrl-C to stop
 ```
 
 ## The guru report
 
-A guru used to be the one event these streams could not describe: the
-snoop trace just stops mid-thought, and which task died with which
-alert code stayed on the Amiga's frozen screen. Emu68 has no MMU, so
-Enforcer-style tooling is not an option — instead wasabid patches
-exec's `Alert()` (LVO -108) for its whole lifetime. When an alert fires
-in task context, the patch wakes the daemon (which runs at priority 1
-precisely so it wins this race) and one line reaches both streams
-before the original `Alert()` freezes the display:
+A guru is the one event a stream cannot describe by itself: the snoop
+trace stops mid-thought, and which task died with which alert code stays
+on the Amiga's frozen screen. `wasabid` patches exec's `Alert()` (LVO
+-108) for its whole lifetime, so an alert reaches both streams before the
+original freezes the display:
 
 ```
 snoop | c:wasabid            Rename("C:wasabid", "C:wasabid.bak") = ok
 snoop | [wasabi: DEADEND ALERT #81000005 in task 'c:wasabid' (0x08298d08)]
 ```
 
-**Read the scope below before relying on this.** `Alert()` is *not*
-"the call every crash path funnels through" — that was the assumption
-this was built on, and it is wrong. It catches the system's own alerts;
-it does not catch a program faulting.
+**Scope: this catches the system's own alerts, not a crashing
+application.** A program that takes a CPU exception goes to its task's
+`tc_TrapCode` — for a Process, dos.library's "Software Failure"
+requester — and never touches the `Alert()` vector. What the hook does
+see is exec raising an alert of its own (`AN_MemCorrupt` and friends)
+and any program that calls `Alert()` deliberately.
 
-An alert raised in supervisor mode or an interrupt cannot be escaped
-live — no task switch can happen before the freeze. Exec's own
-`ExecBase->LastAlert` would be the classic place to look after the
-reboot, but on Emu68 it does not survive one (poke a value in, reboot,
-it comes back `FFFFFFFF`) — while plain RAM content at the top of the
-fast pool does, proven the same way. So the daemon keeps a black box:
-at startup it `AllocAbs()`es 512 bytes just under `mh_Upper` of the
-highest fast-RAM MemHeader, and the patch stashes the report there
-(code, task name, address, a stack snapshot, checksum) for the next
-boot's daemon to find. **Owning that region is not optional**: free
-memory on AmigaOS holds the allocator's own `MemChunk` headers in its
-first eight bytes, so writing into memory you have not reserved
-corrupts the free list and gurus the machine later with `AN_MemCorrupt`
-somewhere unrelated. An earlier version did exactly that. `LastAlert`
-is still checked too, for hardware where exec cooperates.
+A deadend may take the machine down before the daemon can get the line
+onto the wire, so the report does not depend on the live stream. Exec's
+`ExecBase->LastAlert` does not survive a reboot on Emu68, but plain RAM
+at the top of the fast pool does — so at startup the daemon
+`AllocAbs()`es 512 bytes just under `mh_Upper` of the highest fast-RAM
+MemHeader, and the patch stashes the report there (code, task name,
+address, a stack snapshot, checksum) for the next boot to find.
+**Owning that region is not optional**: free memory on AmigaOS holds the
+allocator's own `MemChunk` headers in its first eight bytes, so writing
+into memory you have not reserved corrupts the free list and gurus the
+machine later at an unrelated `FreeMem`. `LastAlert` is still checked
+too, for hardware where exec preserves it.
 
-Searching for the code after the fact does *not* work, and was tested
-rather than assumed: raise a known alert, reboot, then scan every byte
-of RAM for it. Chip RAM, zero hits; fast RAM, two hits — both of them
-stashes this daemon wrote deliberately, one of them left over from an
-earlier build hours before. Nothing else in 2 GB kept a copy. You
-cannot recover a guru afterwards; you can only arrange in advance for
-it to be written somewhere the boot will not reuse.
-
-Either way, every captured alert also becomes one line of plain text in
-`T:lastguru`, stamped with when it was seen — and every new `wasabi
-debug` or `wasabi snoop` replays that note as its first line:
+Every captured alert also becomes one line of plain text in
+`T:lastguru`, stamped with when it was seen, and every new `wasabi
+debug` or `wasabi snoop` replays it as its first line:
 
 ```
 [wasabi: last guru: DEADEND ALERT #81000005 (exec: corrupt memory list detected in FreeMem) in task 'c:wasabid' (0x08298d08) - 13-Aug-26 19:27:12]
 ```
 
-The client puts a name to any real code it recognizes, straight from
-`exec/alerts.h` — `ALERT #80000004 (CPU: illegal instruction)`,
-`#8100000F (exec: bad address passed to FreeMem)` — the same way it
-dresses DOS error codes. A code it cannot parse (like alertemit's
-deliberately synthetic `8035C0DE`) stays bare rather than guessed at.
+The client names any code it recognizes from `exec/alerts.h` — `ALERT
+#80000004 (CPU: illegal instruction)`, `#8100000F (exec: bad address
+passed to FreeMem)` — the same way it dresses DOS error codes. One it
+cannot parse stays bare rather than guessed at.
 
 `T:` is RAM-backed, so the note survives daemon restarts and
-self-updates, and dies with the boot — exactly when the black box takes
-over as the surviving copy (`LastAlert` would, on hardware where it
-survives a reset; on Emu68 it does not). On the Amiga itself, `Type T:lastguru`
-reads the same note. Auto-reconnect closes the loop by itself: the
-machine gurus, reboots, wasabid comes back, the stream resubscribes,
-and the alert code arrives in the same terminal that watched the
-machine die.
+self-updates and dies with the boot, which is exactly when the black box
+takes over. `Type T:lastguru` reads the same note on the Amiga.
+Auto-reconnect closes the loop: the machine gurus, reboots, wasabid
+comes back, the stream resubscribes, and the alert arrives in the same
+terminal that watched the machine die.
 
-**Where it crashed** is captured too — though on this hardware it is
-dormant, for the reason in the first caveat below.
-Exec does trap handling in supervisor mode and pushes a longword
-exception number below the CPU's own frame, so at `Alert()` time the
-hook copies the supervisor stack verbatim and the frame is decoded
-later, in daemon context, by matching Exec's exception number against
-the CPU's vector offset — two independent fields agreeing, rather than
-a plausible-looking longword. SR and PC sit at the same offsets on
-every 68k from the 68000 up, so the PC costs no per-CPU knowledge; the
-fault address does, and is read for the six-word (`$2`), eight-word
-(`$4`, 68060) and 30-word (`$7`, 68040) frames.
+**Where it crashed** is captured too. Exec does trap handling in
+supervisor mode and pushes a longword exception number below the CPU's
+own frame, so the hook copies the supervisor stack verbatim and the
+frame is decoded later, in daemon context, by matching Exec's exception
+number against the CPU's vector offset — two independent fields agreeing
+rather than one plausible-looking longword. SR and PC sit at the same
+offsets on every 68k from the 68000 up; the fault address does not, and
+is read for the six-word (`$2`), eight-word (`$4`, 68060) and 30-word
+(`$7`, 68040) frames. **Dormant on Emu68**, which does not deliver CPU
+exceptions to the guest, so no frame arrives to decode.
 
-Two caveats, both measured rather than assumed. The first is the bigger
-one: **a crashing application never reaches `Alert()` at all.** A task
-that takes a CPU exception goes to its `tc_TrapCode` — for a Process,
-dos.library's "Software Failure — task held" requester — not to exec's
-`Alert()` vector. Tested under FS-UAE with a real 68030 and the JIT off:
-a child executed an `illegal` instruction compiled into its own code,
-genuinely faulted, and the `Alert()` patch recorded **zero** hits. So
-this capture fires for the system's own alerts (exec raising
-`AN_MemCorrupt`, or a program calling `Alert()` deliberately) and not
-for ordinary application crashes; catching those needs `tc_TrapCode` or
-CPU-vector hooking, which is what Enforcer and MuForce do.
-
-The second: **Emu68 does not deliver CPU exceptions to the guest OS.** An illegal instruction, a privilege
-violation and a divide-by-zero in ordinary compiled code were each
-tried on the PiStorm32 — all three took the machine down with no
-`Alert()` reaching the hook at all, no live line and no black box.
-Software alerts (`AN_MemCorrupt`, or a program calling `Alert()`) are
-caught there exactly as before. So this half is dormant on Emu68 and
-should fire on real silicon, or under emulation that models the CPU
-properly. Since the Amiga cannot test it, the host does:
-`tests/dectest.c` extracts the decoder from `patches.c` at test time
-and runs it against frames built by hand from M68000PM Appendix B,
-including a frame buried in junk, a mismatched vector that must be
-rejected, and pure garbage that must find nothing.
-
-The patch runs in the crashing context, which may own almost nothing:
-it copies the code and task name into globals, `Signal()`s the daemon
-(the one exec call documented interrupt-callable), and chains to the
-original so the alert still shows on the Amiga itself. Teardown follows
-the same rule as the other patches — the vector is only restored if it
-still points at ours.
+The patch runs in the crashing context, which may own almost nothing: it
+copies the code and task name into globals, `Signal()`s the daemon (the
+one exec call documented interrupt-callable), and chains to the original
+so the alert still shows on the Amiga itself. Teardown follows the same
+rule as the other patches — the vector is only restored if it still
+points at ours.
 
 ## The snoop stream
 
 `wasabi snoop` is the SnoopDOS trick delivered over the wire: the daemon
-`SetFunction()`s fourteen of the `dos.library` and `exec.library` calls a
+`SetFunction()`s thirty of the `dos.library` and `exec.library` calls a
 developer most wants to watch — `Open`, `Lock`, `LoadSeg`, `Execute`,
 `SystemTagList`, `GetVar`, `SetVar`, `DeleteFile`, `Rename`, `CreateDir`,
 `MakeLink`, `CurrentDir`, `SetComment`, `SetProtection`, `RunCommand`,
@@ -667,14 +625,9 @@ before the code segment can unload. Events ride the same `LOG` frame as
 debug output, on **stream 1** (debug is stream 0), so a monitor can tell
 serial debug and the call trace apart.
 
-Proven on the real A1200 (12 Aug 2026): `List SYS:C` traces its `Lock` /
-`LoadSeg` and the `OpenLibrary` storm that follows, a `--task` filter
-narrows the stream to one caller exactly, sessions open and close
-repeatedly, and the machine stays healthy after teardown. The event ring
-holds 512 entries (~107 KB) because a PiStorm-fast CPU can fire more than
-150 patched calls between two 50 ms drains — the first cut held 64 and
-`List SYS:C` alone overflowed it. A burst that still overflows is dropped
-and counted, never silently lost.
+The event ring holds 512 entries (~107 KB), because a PiStorm-fast CPU
+can fire more than 150 patched calls between two 50 ms drains. A burst
+that overflows it is dropped and counted, never silently lost.
 
 For the full picture, `wasabi debug --with-snoop` merges both streams
 into one terminal over a single connection — the daemon tags every `LOG`
@@ -686,6 +639,38 @@ what lets output captured in parallel terminals be lined up afterwards:
 ```
 2026-08-12 08:11:53.257 snoop | c:wasabid  Open("T:wasabi-run-2", readwrite) = ok
 ```
+
+## Stack headroom
+
+`wasabi ps` reports how much stack each task has **left**, not just how
+much it was given:
+
+```
+ADDR       KIND  PRI STATE    STACK    FREE  CLI  NAME
+0x08298d08 proc    1 run       8192    6104    5  Background CLI (c:wasabid)
+0x092633d0 proc    1 wait    131072  130216    9  Background CLI (C:Wait)
+0x08032400 task    5 wait      6144       -    -  input.device
+```
+
+Capacity says what a task was promised; headroom is the number that
+predicts a crash. A task running out is called out on stderr rather than
+left to be spotted in a column, and the threshold is a proportion — under
+15% left, with an absolute floor for the very small. A byte count would
+be wrong at both ends: 300 free of 512 is a healthy device task, 300 free
+of 131072 is about to take the machine down.
+
+`-` means the daemon declined to guess:
+
+- A CLI program may swap stacks, leaving `sp` outside its own `Task`
+  bounds — not an error, and not a measurement either.
+- `tc_SPReg` is only meaningful for a task the scheduler has parked; for
+  the running task it is stale by definition. The daemon samples its own
+  stack pointer directly for that one entry, so it never prints `-` for
+  itself.
+
+The field is requested rather than always sent — see `PROTOCOL.md`. The
+`PS` line had no room to grow, so adding a column unconditionally would
+have shifted `<name>` for every client already deployed.
 
 ## Updating the daemon
 
@@ -713,11 +698,11 @@ checks — cheapest first, each catching what the one before it cannot:
 
 ```
 $ wasabi update wasabid
-updating to wasabid 0.1
+updating to wasabid 0.2b13
 wasabid -> C:wasabid.new (44244 bytes)
-  identity   wasabid 0.1 (2026-08-12)
+  identity   wasabid 0.2b13 (2026-08-14)
   selftest   ok
-  live       wasabid 0.1 served a handshake and a ping on port 1235
+  live       wasabid 0.2b13 served a handshake and a ping on port 1235
 installed - the daemon is reloading itself
 ```
 
@@ -751,12 +736,11 @@ wasabi: it did not pass its own self-test (rc 10, said 'C:wasabid.new:
 file is not executable'). The running daemon is untouched
 ```
 
-Check 4 is the one that earns its keep, and it was proven on the A1200
-with a wasabid built to bind its port and then exit immediately. It is a
-genuine build: the right `$VER`, and a self-test that really does open
-`bsdsocket.library` and bind a socket. Checks 1, 2 and 3 **all passed
-it** — installing that binary would have taken the machine off the
-network at the next restart. Only connecting to it caught it:
+Check 4 is the one that earns its keep. A wasabid that binds its port
+and then exits immediately is a genuine build with the right `$VER` and a
+self-test that really does open `bsdsocket.library` — checks 1, 2 and 3
+**all pass it**, and installing it would take the machine off the network
+at the next restart. Only connecting to it catches that:
 
 ```
 $ wasabi update wasabid-broken
@@ -782,7 +766,7 @@ the daemon lists what it can do in its `WELCOME`, and `info` shows it:
 
 ```
 $ wasabi info
-wasabid 0.1, protocol v1
+wasabid 0.2b13, protocol v1
 exec.library 47.13
 chip free 2020 KB, fast free 1883101 KB
 volumes:
@@ -895,6 +879,24 @@ screen is properly locked and has no such window.
 The PNG encoder on the client is about fifteen lines around `zlib`,
 which is in the standard library — so this costs no dependency.
 
+### What changed on screen
+
+`--diff` compares a grab against an earlier one and reports what moved:
+
+```
+$ wasabi grab before.png
+$ wasabi run "MyApp"
+$ wasabi grab after.png --diff before.png
+1280x960 -> after.png (204 KB, 3.7 MB raw in 0.4 s)
+diff vs before.png: 18432 of 1228800 pixels changed (1.50%), bounding box 320,180 - 447,323
+```
+
+The exit status follows `diff(1)` — 0 identical, 1 changed — so "did that
+command touch the screen" is a shell conditional. The comparison is
+entirely client-side and the wire is unchanged. A baseline of a different
+size, or a PNG outside the 8-bit RGB subset this client writes, is
+refused rather than diffed against whatever happens to line up.
+
 ## Speedtest
 
 `wasabi speedtest 25MB` measures latency first — 200 `PING`/`PONG` round
@@ -916,9 +918,7 @@ each way — so the effect of a driver stack or MTU change is one command
 to measure. The daemon counts-and-discards on receive and
 generates on send: nothing is stored anywhere, a stock 2 MB machine runs
 the same test a PiStorm does, and the figure isolates the network path
-instead of blending in a filesystem. (A future `--via PATH` mode could
-measure through a real volume; it must first check `info`'s free-memory
-numbers and refuse a size that does not fit with a healthy margin.)
+instead of blending in a filesystem.
 
 `--target PATH` writes through a real volume instead of discarding, so
 the same command measures the filesystem rather than the network. It
@@ -974,24 +974,21 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 
 ## What's next
 
-**0.1 is the first non-beta build.** Thirty-one betas led here, and the
-last stretch was a full audit — `audit.md`, 12 August 2026 — that read
-every line of both halves and the tests. Everything it called a bug is
-fixed and verified on the machine: the out-of-bounds client-table
-write, the orphaned-runner race, reboot honouring its own
-documentation, timezone-straight `ls` dates, and the exit-with-a-live-
-runner Guru it found on the way out. What remains in it is choices,
-written down as such.
+**0.2b13 is the current build.** The 0.2 line added the guru report and
+its black box, grew snoop from 14 patched calls to 30, added entry
+logging and three output modes, stack headroom in `ps` and `grab
+--diff`, and split every `SetFunction` hook out of `wasabid.c` into
+`patches.c` behind a deliberately narrow header.
 
-The hardening list is done — snoop self-tests its own trampoline, the
-daemon can only be replaced through `update`, and no blocking read or
-write is unbounded.
+The hardening list is done — snoop self-tests its own trampoline before
+it patches, the daemon can only be replaced through `update`, no
+blocking read or write is unbounded, and a patch that cannot be removed
+keeps the binary resident rather than unloading into a guru.
 
-Deliberately on hold: **challenge-response auth**. HMAC over a server
-nonce would keep the key off the wire, but the session stays plaintext
-anyway — auth without confidentiality, the most code of the five, against
-a threat the trusted-LAN scope already declares out of bounds. The
-current key is accident prevention and says so; that is a choice, not an
-oversight.
+Deliberately on hold: **challenge-response auth**. It would keep the key
+off the wire, but the session stays plaintext either way, against a
+threat the trusted-LAN scope already puts out of bounds.
 
-`PROTOCOL.md` is the wire format, and the contract between the two halves.
+`audit.md`, `audit2.md` and `audit3.md` are the defect ledgers, one per
+line of development. `PROTOCOL.md` is the wire format, and the contract
+between the two halves.
