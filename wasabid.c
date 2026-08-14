@@ -42,10 +42,10 @@
 
 #include "patches.h"                 /* everything that hijacks a vector */
 
-#define VERSION_STR "wasabid 0.2b10"
+#define VERSION_STR "wasabid 0.2b11"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.2b10 (13.8.2026)";
+    "$VER: wasabid 0.2b11 (14.8.2026)";
 
 #define PROTO_VERSION   1
 
@@ -978,7 +978,12 @@ static BOOL cmd_kill(int fd, ULONG flags, const char *target)
     if (!matches)
         return send_perr(fd, "no task or process by that name");
     if (matches > 1)
-        return send_err(fd,
+        /* send_perr, not send_err: ps_collect() makes no DOS call, so
+         * IoErr() here still belongs to whatever this connection did
+         * last - a failed 'ls' three commands ago dresses this refusal
+         * as "(Error 205: Object not found)", which the client prints
+         * and the operator believes. Measured on the A1200. */
+        return send_perr(fd,
             "ambiguous - several tasks match; use the 0x address from ps");
     if (hit == FindTask(NULL))
         return send_perr(fd, "that is wasabid itself - use restart or reboot");
@@ -1652,7 +1657,12 @@ static BOOL cmd_speed(int fd, ULONG flags, ULONG size, const char *target)
                     break;              /* short file; END closes it honestly */
             }
             if (!send_frame(fd, T_DATA, buf, chunk)) {
-                if (fh) Close(fh);
+                /* Delete it here too, not just on the way out below: a
+                 * client that hangs up mid-read-back used to leave the
+                 * whole test file on the volume - 64 MB of Dump:,
+                 * measured - and the operator running a speedtest is by
+                 * definition someone watching that volume's space. */
+                if (fh) { Close(fh); DeleteFile(path); }
                 FreeMem(buf, MAX_PAYLOAD);
                 return FALSE;
             }
