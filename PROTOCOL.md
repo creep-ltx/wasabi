@@ -108,6 +108,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x47 | INSTALL  | C→S | `str sidecar` |
 | 0x48 | GRAB     | C→S | `str screenname` |
 | 0x49 | SCREEN   | C→S | `u32 flags`, `str title` |
+| 0x4A | MOUSE    | C→S | `u16 action`, `u16 button`, `u16 count`, `i16 x`, `i16 y` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -135,8 +136,8 @@ assuming silence means yes.
 
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
-`speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry,psfree` for
-a current build. Self-update makes version skew
+`speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry,psfree,`
+`mouse` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
