@@ -581,6 +581,28 @@ same thing Amiga+M does — and a non-empty `title` brings that screen to
 the front instead. Both are `ScreenToBack()`/`ScreenToFront()`; no
 keystrokes are synthesised into `input.device`.
 
+### MOUSE — move the pointer, click, doubleclick
+
+Payload: `u16 action, u16 button, u16 count, i16 x, i16 y`. Action 0
+moves only; action 1 clicks `count` times (2 = doubleclick). Button
+0/1/2 = left/right/middle. `x = y = -32768` means "no position":
+click where the pointer already is. Reply `OK`, or `ERR` if
+input.device cannot be opened.
+
+The daemon writes real `InputEvent`s with `IND_WRITEEVENT`:
+`IECLASS_POINTERPOS` with **absolute screen coordinates** for the
+move — the same pixel space `GRAB` delivers, which is the point:
+grab, look, click — then `IECLASS_RAWMOUSE` press/release pairs,
+button qualifier set on the press. Timestamps are filled with
+Intuition's `CurrentTime()` so double-click detection sees two
+clicks milliseconds apart and every event survives whatever
+downstream input handler inspects its age. Intuition routes the
+result exactly like physical mouse input: the window under the
+pointer is activated and gets the gadget hit, and a right-button
+press at a title bar really opens menus (menu *selection* needs
+press-move-release as one drag, which this verb set cannot express
+yet — a future `flags` bit, not a framing change).
+
 ## Teardown and the SetFunction rule
 
 Patches are removed in exact reverse order, and only after checking that

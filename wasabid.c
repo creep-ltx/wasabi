@@ -14,6 +14,8 @@
 
 #include <exec/types.h>
 #include <exec/memory.h>
+#include <devices/input.h>
+#include <devices/inputevent.h>
 #include <dos/dos.h>
 #include <dos/dostags.h>
 #include <dos/dosextens.h>
@@ -66,7 +68,7 @@ static const char *verstag __attribute__((used)) =
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
-                 "grab,screen,hb,guru,snoopentry,psfree"
+                 "grab,screen,hb,guru,snoopentry,psfree,mouse"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -112,6 +114,7 @@ typedef char welcome_fits_its_buffer[
 #define T_INSTALL 0x47
 #define T_GRAB    0x48
 #define T_SCREEN  0x49
+#define T_INPUT   0x4a
 
 struct Library *SocketBase;
 /*
@@ -1404,6 +1407,97 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
     return send_frame(fd, T_OK, NULL, 0);
 }
 
+/* --- remote mouse: move the pointer, click, doubleclick ------------ */
+
+/*
+ * Written into the input stream with IND_WRITEEVENT, so Intuition
+ * treats them exactly like real mouse input: the pointer moves, the
+ * window under it gets the click, double-click timing comes from the
+ * event timestamps. IECLASS_POINTERPOS carries absolute screen
+ * coordinates - the same pixel space GRAB delivers, which is the
+ * point: grab, look, click.
+ *
+ * The x/y value -32768 means "no position": click where the pointer
+ * already is.
+ */
+#define INPUT_NOPOS (-32768)
+
+static BOOL write_input_event(struct IOStdReq *io, struct InputEvent *ie)
+{
+    ULONG s, m;
+
+    CurrentTime(&s, &m);
+    ie->ie_TimeStamp.tv_secs = s;
+    ie->ie_TimeStamp.tv_micro = m;
+    ie->ie_NextEvent = NULL;
+    io->io_Command = IND_WRITEEVENT;
+    io->io_Data = ie;
+    io->io_Length = sizeof(struct InputEvent);
+    return DoIO((struct IORequest *)io) == 0;
+}
+
+static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
+                      WORD x, WORD y)
+{
+    struct MsgPort *mp;
+    struct IOStdReq *io = NULL;
+    struct InputEvent ie;
+    BOOL open = FALSE, ok = TRUE;
+    static const UWORD codes[3] = {
+        IECODE_LBUTTON, IECODE_RBUTTON, IECODE_MBUTTON
+    };
+    static const UWORD quals[3] = {
+        IEQUALIFIER_LEFTBUTTON, IEQUALIFIER_RBUTTON, IEQUALIFIER_MIDBUTTON
+    };
+    ULONG i;
+
+    if (button > 2 || count > 3 || action > 1)
+        return send_perr(fd, "bad INPUT parameters");
+
+    mp = CreateMsgPort();
+    io = mp ? (struct IOStdReq *)
+        CreateExtIO(mp, sizeof(struct IOStdReq)) : NULL;
+    if (io && OpenDevice("input.device", 0,
+                         (struct IORequest *)io, 0) == 0)
+        open = TRUE;
+    if (!open) {
+        if (io) DeleteExtIO((struct IORequest *)io);
+        if (mp) DeleteMsgPort(mp);
+        return send_err(fd, "cannot open input.device");
+    }
+
+    if (x != INPUT_NOPOS) {
+        memset(&ie, 0, sizeof(ie));
+        ie.ie_Class = IECLASS_POINTERPOS;
+        ie.ie_Code = IECODE_NOBUTTON;
+        ie.ie_X = x;
+        ie.ie_Y = y;
+        ok = write_input_event(io, &ie);
+    }
+
+    for (i = 0; ok && action == 1 && i < count; i++) {
+        memset(&ie, 0, sizeof(ie));
+        ie.ie_Class = IECLASS_RAWMOUSE;
+        ie.ie_Code = codes[button];
+        ie.ie_Qualifier = quals[button];
+        ok = write_input_event(io, &ie);
+        if (ok) {
+            memset(&ie, 0, sizeof(ie));
+            ie.ie_Class = IECLASS_RAWMOUSE;
+            ie.ie_Code = codes[button] | IECODE_UP_PREFIX;
+            ok = write_input_event(io, &ie);
+        }
+    }
+
+    CloseDevice((struct IORequest *)io);
+    DeleteExtIO((struct IORequest *)io);
+    DeleteMsgPort(mp);
+
+    if (!ok)
+        return send_err(fd, "input event write failed");
+    return send_frame(fd, T_OK, NULL, 0);
+}
+
 /*
  * Throughput measurement, deliberately storage-free: received bytes are
  * counted and dropped, sent bytes come from one static-pattern buffer.
@@ -2180,6 +2274,17 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         if (len < 2 || !get_str(p, len, 0, scr, sizeof(scr)))
             scr[0] = '\0';
         return cmd_grab(fd, scr);
+    }
+
+    case T_INPUT: {
+        if (len < 10)
+            return send_perr(fd, "bad INPUT header");
+        return cmd_input(fd,
+                         (p[0] << 8) | p[1],
+                         (p[2] << 8) | p[3],
+                         (p[4] << 8) | p[5],
+                         (WORD)((p[6] << 8) | p[7]),
+                         (WORD)((p[8] << 8) | p[9]));
     }
 
     case T_SPEED: {

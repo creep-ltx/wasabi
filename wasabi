@@ -30,7 +30,7 @@ PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
-QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
+QUIT, INSTALL, GRAB, SCREEN, MOUSE = 0x46, 0x47, 0x48, 0x49, 0x4A
 
 # Amiga DateStamp epoch.
 AMIGA_EPOCH = 252460800  # 1978-01-01 00:00:00 UTC as a Unix timestamp
@@ -1221,6 +1221,30 @@ def cmd_grab(conn, args):
         return 1
 
 
+def cmd_mouse(conn, args):
+    """Move the pointer and click - drive GUIs remotely.
+
+    The daemon writes real InputEvents with IND_WRITEEVENT, so
+    Intuition treats them exactly like the physical mouse: the window
+    under the pointer gets the click, double-click timing comes from
+    event timestamps. Coordinates are absolute screen pixels in the
+    same space `grab` delivers - grab, look, click.
+    """
+    NOPOS = -32768
+    if args.action == "move":
+        if args.x is None or args.y is None:
+            raise WasabiError("mouse move needs X and Y")
+        action, count = 0, 0
+    else:
+        action = 1
+        count = 2 if args.action == "doubleclick" else 1
+    x = NOPOS if args.x is None else args.x
+    y = NOPOS if args.y is None else args.y
+    button = 1 if args.right else (2 if args.middle else 0)
+    conn.send(MOUSE, struct.pack(">HHHhh", action, button, count, x, y))
+    conn.expect_ok()
+
+
 def cmd_screen(conn, args):
     """List the open screens, and optionally reorder them.
 
@@ -1773,6 +1797,17 @@ def main(argv=None):
                         "like diff(1), so it scripts as a regression check")
     s.set_defaults(fn=cmd_grab)
 
+    s = sub.add_parser("mouse", help="move the pointer, click, doubleclick")
+    s.add_argument("action", choices=["move", "click", "doubleclick"])
+    s.add_argument("x", nargs="?", type=int, default=None,
+                   help="absolute X in grab's pixel space; click without "
+                        "coordinates clicks where the pointer is")
+    s.add_argument("y", nargs="?", type=int, default=None)
+    s.add_argument("--right", action="store_true",
+                   help="right (menu) button instead of the left")
+    s.add_argument("--middle", action="store_true")
+    s.set_defaults(fn=cmd_mouse)
+
     s = sub.add_parser("screen", help="list screens; flip between them")
     s.add_argument("--list", action="store_true",
                    help="list the open screens (the default)")
@@ -1825,7 +1860,8 @@ def main(argv=None):
     needs = {"ps": "ps", "kill": "kill", "speedtest": "speed",
              "snoop": "snoop", "debug": "debug", "restart": "restart",
              "quit": "quit", "update": "install",
-             "grab": "grab", "screen": "screen"}.get(args.cmd)
+             "grab": "grab", "screen": "screen",
+             "mouse": "mouse"}.get(args.cmd)
 
     try:
         host, port = resolve_target(args)
