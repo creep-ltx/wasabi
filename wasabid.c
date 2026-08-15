@@ -664,6 +664,52 @@ static BOOL start_run(int cl, const char *cmd)
     return TRUE;
 }
 
+/*
+ * Read from the tail handle, seeing through ram-handler's blind spot.
+ *
+ * A ram-handler file handle anchors to the file's data at Open() time.
+ * Opened while the file is still empty, it stays blind forever: bytes
+ * another handle appends later never show - not after the writer's
+ * Flush(), not after its Close(), not even after Seek() on the reader.
+ * The tail handle is opened moments after the runner starts, so any
+ * command that took longer than that to produce its first byte -
+ * anything that sleeps before writing, or buffers stdio and flushes at
+ * exit - came back with its entire output missing. A handle opened on
+ * a file that already has data follows later growth fine (measured on
+ * OS 3.2), which is why fast starters always worked and the failures
+ * looked like they were about sleeping.
+ *
+ * ExamineFH() on the stale handle still reports the file's true size,
+ * so falling behind is detectable: more bytes in the file than we have
+ * forwarded. The cure is a fresh Open() - a new handle sees the
+ * current data - resumed where the old one left off. The fresh handle
+ * is anchored to real data, so one reopen heals the stream for good.
+ *
+ * Accounting lives here, not in the callers: g_run_sent is the resume
+ * point after a reopen, and a caller that forgot to add to it (the
+ * final sweep once did not) would make a reopen resend those bytes.
+ */
+static LONG tail_read(UBYTE *buf, LONG len)
+{
+    /* Longword aligned as ExamineFH demands; static because this runs
+     * on the daemon's 8 KB shell stack like everything around it. */
+    static struct FileInfoBlock fib __attribute__((aligned(4)));
+    LONG n = Read(g_run_read, buf, len);
+
+    if (n == 0 && ExamineFH(g_run_read, &fib) && fib.fib_Size > g_run_sent) {
+        BPTR fresh = Open(g_job.outname, MODE_OLDFILE);
+        if (fresh) {
+            Close(g_run_read);
+            g_run_read = fresh;
+            Seek(fresh, g_run_sent, OFFSET_BEGINNING);
+            n = Read(fresh, buf, len);
+        }
+    }
+    if (n > 0)
+        g_run_sent += n;
+    return n;
+}
+
 /* Forward whatever the child has flushed. Returns FALSE if the client died.
  * Also runs headless (g_run_client == -1) after the client hung up, so the
  * runner's temp file still gets cleaned up and the slot freed on done. */
@@ -679,8 +725,7 @@ static BOOL pump_run(void)
     LONG n;
 
     if (g_run_read && fd >= 0) {
-        while ((n = Read(g_run_read, buf, sizeof(buf))) > 0) {
-            g_run_sent += n;
+        while ((n = tail_read(buf, sizeof(buf))) > 0) {
             if (!send_frame(fd, T_STDOUT, buf, n))
                 return FALSE;
         }
@@ -690,7 +735,7 @@ static BOOL pump_run(void)
         /* One last sweep: the child may have flushed as it exited. */
         if (g_run_read) {
             if (fd >= 0) {
-                while ((n = Read(g_run_read, buf, sizeof(buf))) > 0)
+                while ((n = tail_read(buf, sizeof(buf))) > 0)
                     if (!send_frame(fd, T_STDOUT, buf, n))
                         return FALSE;
             }

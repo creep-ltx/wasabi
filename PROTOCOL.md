@@ -224,6 +224,19 @@ a C program writing through buffered stdio to something that is not a
 console will emit in block-sized lumps no matter what the daemon does.
 AmigaDOS commands that write with `Write()` stream immediately.
 
+**The tail sees through ram-handler's blind spot.** A ram-handler file
+handle anchors to the file's data at `Open()` time: opened while the
+file is still empty, it never sees bytes another handle appends later —
+not after `Flush()`, not after the writer closes, not after `Seek()`.
+The daemon's tail handle opens moments after the runner starts, so a
+command whose first byte arrived later than that — anything that slept
+first, or flushed buffered stdio only at exit — used to come back with
+its entire output missing, while fast starters worked and made the
+failures look sleep-related. The daemon detects the stale handle with
+`ExamineFH()` (which does report the true size) and reopens, resuming
+at the bytes already forwarded. `tests/latewrite.c` is the probe;
+`tests/slowwrite.c` proves the opposite property, live tailing.
+
 ### LS — directory listing
 
 Server replies with `DATA` frames holding one entry per line:
