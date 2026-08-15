@@ -1235,6 +1235,10 @@ def cmd_mouse(conn, args):
         if args.x is None or args.y is None:
             raise WasabiError("mouse move needs X and Y")
         action, count = 0, 0
+    elif args.action == "down":
+        action, count = 2, 0
+    elif args.action == "up":
+        action, count = 3, 0
     else:
         action = 1
         count = 2 if args.action == "doubleclick" else 1
@@ -1797,8 +1801,9 @@ def main(argv=None):
                         "like diff(1), so it scripts as a regression check")
     s.set_defaults(fn=cmd_grab)
 
-    s = sub.add_parser("mouse", help="move the pointer, click, doubleclick")
-    s.add_argument("action", choices=["move", "click", "doubleclick"])
+    s = sub.add_parser("mouse", help="move the pointer, click, drag menus")
+    s.add_argument("action",
+                   choices=["move", "click", "doubleclick", "down", "up"])
     s.add_argument("x", nargs="?", type=int, default=None,
                    help="absolute X in grab's pixel space; click without "
                         "coordinates clicks where the pointer is")

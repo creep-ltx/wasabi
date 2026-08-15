@@ -1419,8 +1419,20 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
  *
  * The x/y value -32768 means "no position": click where the pointer
  * already is.
+ *
+ * DOWN and UP are separate verbs because the press-hold-move-release
+ * gesture is how Intuition menus (and every drag) work: right button
+ * down, glide over the menu bar - grab shows the open pane, menus
+ * render into the screen bitmap like everything else - move to the
+ * item, release. The daemon remembers which buttons are held across
+ * connections so the moves in between carry the held buttons'
+ * qualifiers, which is what Intuition's menu tracking watches. A
+ * hold left dangling by a dead client is cleared by the next real
+ * mouse press, or an UP with the same button.
  */
 #define INPUT_NOPOS (-32768)
+
+static UWORD g_mouse_held;      /* qualifier bits of held buttons */
 
 static BOOL write_input_event(struct IOStdReq *io, struct InputEvent *ie)
 {
@@ -1451,7 +1463,7 @@ static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
     };
     ULONG i;
 
-    if (button > 2 || count > 3 || action > 1)
+    if (button > 2 || count > 3 || action > 3)
         return send_perr(fd, "bad INPUT parameters");
 
     mp = CreateMsgPort();
@@ -1470,6 +1482,7 @@ static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
         memset(&ie, 0, sizeof(ie));
         ie.ie_Class = IECLASS_POINTERPOS;
         ie.ie_Code = IECODE_NOBUTTON;
+        ie.ie_Qualifier = g_mouse_held;  /* a held drag stays a drag */
         ie.ie_X = x;
         ie.ie_Y = y;
         ok = write_input_event(io, &ie);
@@ -1479,14 +1492,34 @@ static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
         memset(&ie, 0, sizeof(ie));
         ie.ie_Class = IECLASS_RAWMOUSE;
         ie.ie_Code = codes[button];
-        ie.ie_Qualifier = quals[button];
+        ie.ie_Qualifier = quals[button] | g_mouse_held;
         ok = write_input_event(io, &ie);
         if (ok) {
             memset(&ie, 0, sizeof(ie));
             ie.ie_Class = IECLASS_RAWMOUSE;
             ie.ie_Code = codes[button] | IECODE_UP_PREFIX;
+            ie.ie_Qualifier = g_mouse_held;
             ok = write_input_event(io, &ie);
         }
+    }
+
+    if (ok && action == 2) {            /* press and hold */
+        memset(&ie, 0, sizeof(ie));
+        ie.ie_Class = IECLASS_RAWMOUSE;
+        ie.ie_Code = codes[button];
+        ie.ie_Qualifier = quals[button] | g_mouse_held;
+        ok = write_input_event(io, &ie);
+        if (ok)
+            g_mouse_held |= quals[button];
+    }
+
+    if (ok && action == 3) {            /* release */
+        g_mouse_held &= ~quals[button];
+        memset(&ie, 0, sizeof(ie));
+        ie.ie_Class = IECLASS_RAWMOUSE;
+        ie.ie_Code = codes[button] | IECODE_UP_PREFIX;
+        ie.ie_Qualifier = g_mouse_held;
+        ok = write_input_event(io, &ie);
     }
 
     CloseDevice((struct IORequest *)io);
