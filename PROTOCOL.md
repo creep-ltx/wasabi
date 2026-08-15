@@ -582,13 +582,13 @@ same thing Amiga+M does — and a non-empty `title` brings that screen to
 the front instead. Both are `ScreenToBack()`/`ScreenToFront()`; no
 keystrokes are synthesised into `input.device`.
 
-### MOUSE — move the pointer, click, doubleclick
+### MOUSE — move the pointer, click, drag menus
 
 Payload: `u16 action, u16 button, u16 count, i16 x, i16 y`. Action 0
-moves only; action 1 clicks `count` times (2 = doubleclick). Button
-0/1/2 = left/right/middle. `x = y = -32768` means "no position":
-click where the pointer already is. Reply `OK`, or `ERR` if
-input.device cannot be opened.
+moves only; 1 clicks `count` times (2 = doubleclick); 2 presses and
+**holds**; 3 releases. Button 0/1/2 = left/right/middle. `x = y =
+-32768` means "no position": act where the pointer already is. Reply
+`OK`, or `ERR` if input.device cannot be opened.
 
 The daemon writes real `InputEvent`s with `IND_WRITEEVENT`:
 `IECLASS_POINTERPOS` with **absolute screen coordinates** for the
@@ -599,10 +599,21 @@ Intuition's `CurrentTime()` so double-click detection sees two
 clicks milliseconds apart and every event survives whatever
 downstream input handler inspects its age. Intuition routes the
 result exactly like physical mouse input: the window under the
-pointer is activated and gets the gadget hit, and a right-button
-press at a title bar really opens menus (menu *selection* needs
-press-move-release as one drag, which this verb set cannot express
-yet — a future `flags` bit, not a framing change).
+pointer is activated and gets the gadget hit.
+
+Down/up are separate verbs because press-hold-move-release is how
+Intuition **menus** and every **drag** work. The daemon keeps the
+held buttons' qualifier bits in a single global and ORs them into
+every subsequent move and click, which is exactly what Intuition's
+menu tracking and drag gadgets watch. So a menu selection is:
+`mouse down --right`, `mouse move Xbar Ybar` onto the title (grab
+now shows the open pane — menus render into the screen bitmap like
+everything else), `mouse move Xitem Yitem`, `mouse up --right`;
+releasing off any item cancels. Proven on the real A1200 driving
+Emu68CP's Project menu. The held state is process-global and
+survives a client disconnect on purpose (a drag may span several
+commands); a dangling hold is cleared by the matching `up` or by
+the next real mouse press.
 
 ## Teardown and the SetFunction rule
 
