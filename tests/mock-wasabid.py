@@ -41,6 +41,7 @@ RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
+KEYIN, WINDOWS = 0x4B, 0x4C
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -53,7 +54,7 @@ BANNER = None
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
-        "hb,guru,snoopentry,psfree")
+        "hb,guru,snoopentry,psfree,key,windows")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -251,6 +252,10 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_grab()
         elif tag == SCREEN:
             self.do_screens(payload)
+        elif tag == KEYIN:
+            self.do_key(payload)
+        elif tag == WINDOWS:
+            self.do_windows()
         elif tag == PS:
             self.do_ps(payload)
         elif tag == KILL:
@@ -506,6 +511,22 @@ class Handler(socketserver.BaseRequestHandler):
         if want and want.lower() not in (t.lower() for t in titles):
             return self.err("no screen with that title")
         self.send(END)
+
+    def do_key(self, payload):
+        """Log what would have been typed, as hex, one line per KEY -
+        the tests read it back to check the client's encoding."""
+        with open(os.path.join(ROOT, "keys.log"), "a") as f:
+            f.write(payload.hex() + "\n")
+        self.send(OK)
+
+    def do_windows(self):
+        """One screen, two windows - the daemon's tab-separated shape."""
+        rows = ["S\t0x00001111\t0\t0\t640\t256\t2\tWorkbench Screen",
+                "W\t0x0000aaaa\t100\t100\t640\t200\t4\t11\t18\t2"
+                "\ta\t-\tAmigaShell",
+                "W\t0x0000bbbb\t0\t11\t640\t245\t0\t0\t0\t0"
+                "\tb\tWorkbench\t"]
+        self.send_data(("\n".join(rows) + "\n").encode("latin-1"))
 
     def do_grab(self):
         """A tiny synthetic screen: header then raw RGB rows."""

@@ -455,6 +455,25 @@ check "and marks the front one" "1" "$out"
 out=$($W screen --to-front NoSuchScreen 2>&1 | grep -c "no screen with that title")
 check "screen --to-front of a missing title errors" "1" "$out"
 
+# --- keyboard and the window list ---
+# The mock logs each KEY payload as hex: u16 mode, then raw (code,
+# qualifier) pairs or Latin-1 text.
+rm -f "$ROOT/keys.log"
+$W key press ramiga+w >/dev/null 2>&1
+out=$(tail -1 "$ROOT/keys.log" 2>/dev/null)
+check "key press sends modifier down, key, key up, modifier up" \
+      "0000006700800011008000910080""00e70000" "$out"
+$W key type 'å' --enter >/dev/null 2>&1
+out=$(tail -1 "$ROOT/keys.log" 2>/dev/null)
+check "key type sends Latin-1 text, Return as CR" "0001e50d" "$out"
+out=$($W key press nosuchkey 2>&1 | grep -c "unknown key")
+check "an unknown key name is refused here" "1" "$out"
+
+out=$($W windows 2>/dev/null | grep -c 'window "AmigaShell"  at 100,100  640x200  task -  \[active\]')
+check "windows lists a window with its place and state" "1" "$out"
+out=$($W windows --raw 2>/dev/null | grep -c "^W")
+check "windows --raw passes the daemon's lines through" "2" "$out"
+
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")
 check "ps lists tasks" "1" "$out"
@@ -498,6 +517,8 @@ out=$($WOLD ps 2>/dev/null | grep -c "input.device")
 check "a daemon without 'psfree' still lists tasks" "1" "$out"
 out=$($WOLD ps 2>/dev/null | grep -c "FREE")
 check "and is not asked for a column it lacks" "0" "$out"
+out=$($WOLD key press return 2>&1 | grep -c "update it")
+check "a daemon without 'key' is named as too old" "1" "$out"
 kill "$MOCK4_PID" 2>/dev/null
 
 $W kill Wait >/dev/null 2>&1

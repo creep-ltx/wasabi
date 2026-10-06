@@ -31,6 +31,7 @@ RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN, MOUSE = 0x46, 0x47, 0x48, 0x49, 0x4A
+KEY, WINDOWS = 0x4B, 0x4C
 
 # Amiga DateStamp epoch.
 AMIGA_EPOCH = 252460800  # 1978-01-01 00:00:00 UTC as a Unix timestamp
@@ -1249,6 +1250,128 @@ def cmd_mouse(conn, args):
     conn.expect_ok()
 
 
+# Amiga raw key codes - key *positions*, the same on every Amiga
+# keyboard whatever its keymap. `key press` names keys by these; for
+# text, `key type` lets the Amiga's own keymap pick the keys instead.
+RAWKEYS = {"`": 0x00, "-": 0x0B, "=": 0x0C, "\\": 0x0D,
+           "[": 0x1A, "]": 0x1B, ";": 0x29, "'": 0x2A,
+           ",": 0x38, ".": 0x39, "/": 0x3A,
+           "space": 0x40, "backspace": 0x41, "tab": 0x42, "enter": 0x43,
+           "return": 0x44, "esc": 0x45, "escape": 0x45, "del": 0x46,
+           "delete": 0x46, "up": 0x4C, "down": 0x4D, "right": 0x4E,
+           "left": 0x4F, "help": 0x5F}
+for _i, _c in enumerate("1234567890"):
+    RAWKEYS[_c] = 0x01 + _i
+for _row, _base in (("qwertyuiop", 0x10), ("asdfghjkl", 0x20),
+                    ("zxcvbnm", 0x31)):
+    for _i, _c in enumerate(_row):
+        RAWKEYS[_c] = _base + _i
+for _i in range(10):
+    RAWKEYS["f%d" % (_i + 1)] = 0x50 + _i
+
+# Modifier name -> (its own raw key, its qualifier bit).
+MODIFIERS = {"shift": (0x60, 0x01), "lshift": (0x60, 0x01),
+             "rshift": (0x61, 0x02), "ctrl": (0x63, 0x08),
+             "alt": (0x64, 0x10), "lalt": (0x64, 0x10),
+             "ralt": (0x65, 0x20), "lamiga": (0x66, 0x40),
+             "ramiga": (0x67, 0x80), "amiga": (0x67, 0x80)}
+KEY_UP = 0x80
+
+
+def key_combo_events(combo):
+    """'ramiga+shift+q' -> raw (code, qualifier) events, pressed in
+    order and released in reverse, the way fingers do it."""
+    *mods, key = combo.lower().split("+")
+    events, qual = [], 0
+    for m in mods:
+        if m not in MODIFIERS:
+            raise WasabiError("unknown modifier %r (known: %s)"
+                              % (m, ", ".join(sorted(MODIFIERS))))
+        code, bit = MODIFIERS[m]
+        qual |= bit
+        events.append((code, qual))
+    if key in MODIFIERS:
+        code = MODIFIERS[key][0]
+    elif key in RAWKEYS:
+        code = RAWKEYS[key]
+    else:
+        raise WasabiError("unknown key %r - use 'key type' for text"
+                          % key)
+    events.append((code, qual))
+    events.append((code | KEY_UP, qual))
+    for m in reversed(mods):
+        code, bit = MODIFIERS[m]
+        qual &= ~bit
+        events.append((code | KEY_UP, qual))
+    return events
+
+
+def cmd_key(conn, args):
+    """Type on the Amiga's keyboard from here.
+
+    `type` sends characters and the Amiga's own keymap decides which
+    keys make them, so a Swedish keymap types a Swedish 'å' correctly.
+    `press` sends key positions by name, with modifiers: return, esc,
+    f1, ramiga+w, ctrl+c.
+    """
+    if conn.caps and "key" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) has no keyboard - update it with "
+            "'wasabi update wasabid'" % conn.banner)
+    if args.action == "type":
+        text = " ".join(args.keys).replace("\r\n", "\n").replace("\n", "\r")
+        if args.enter:
+            text += "\r"
+        try:
+            data = text.encode("latin-1")
+        except UnicodeEncodeError as e:
+            raise WasabiError("the Amiga cannot type %r (not Latin-1)"
+                              % text[e.start])
+        if len(data) > 2048:
+            raise WasabiError("at most 2048 characters per 'key type'")
+        conn.send(KEY, struct.pack(">H", 1) + data)
+    else:
+        events = []
+        for combo in args.keys:
+            events += key_combo_events(combo)
+        conn.send(KEY, struct.pack(">H", 0) +
+                  b"".join(struct.pack(">HH", c, q) for c, q in events))
+    conn.expect_ok()
+
+
+def cmd_windows(conn, args):
+    """Every screen and its windows, front first.
+
+    Positions are relative to the screen - the same pixels `grab`
+    shows and `mouse` clicks - so a window's close gadget is at its
+    top-left corner plus a few pixels, from facts rather than guesses.
+    """
+    if conn.caps and "windows" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) cannot list windows - update it with "
+            "'wasabi update wasabid'" % conn.banner)
+    conn.send(WINDOWS)
+    text = []
+    drain_to_end(conn, text.append)
+    for line in b"".join(text).decode("latin-1").splitlines():
+        f = line.split("\t")
+        if args.raw:
+            print(line)
+        elif f[0] == "S" and len(f) >= 8:
+            print('screen "%s"  %sx%s, %s bit%s'
+                  % (f[7], f[4], f[5], f[6],
+                     "" if f[3] == "0" else ", pulled down to y=%s" % f[3]))
+        elif f[0] == "W" and len(f) >= 13:
+            flags = []
+            if "a" in f[10]:
+                flags.append("active")
+            if "b" in f[10]:
+                flags.append("backdrop")
+            print('  window "%s"  at %s,%s  %sx%s  task %s%s'
+                  % (f[12], f[2], f[3], f[4], f[5], f[11],
+                     "  [%s]" % ", ".join(flags) if flags else ""))
+
+
 def cmd_screen(conn, args):
     """List the open screens, and optionally reorder them.
 
@@ -1813,6 +1936,20 @@ def main(argv=None):
     s.add_argument("--middle", action="store_true")
     s.set_defaults(fn=cmd_mouse)
 
+    s = sub.add_parser("key", help="type text or press keys on the Amiga")
+    s.add_argument("action", choices=["type", "press"],
+                   help="type: text through the Amiga's own keymap; "
+                        "press: keys by name, e.g. return, f1, ramiga+w")
+    s.add_argument("keys", nargs="+")
+    s.add_argument("--enter", action="store_true",
+                   help="press Return after the text")
+    s.set_defaults(fn=cmd_key)
+
+    s = sub.add_parser("windows", help="list every screen and window")
+    s.add_argument("--raw", action="store_true",
+                   help="the daemon's tab-separated lines, for scripts")
+    s.set_defaults(fn=cmd_windows)
+
     s = sub.add_parser("screen", help="list screens; flip between them")
     s.add_argument("--list", action="store_true",
                    help="list the open screens (the default)")
@@ -1866,7 +2003,8 @@ def main(argv=None):
              "snoop": "snoop", "debug": "debug", "restart": "restart",
              "quit": "quit", "update": "install",
              "grab": "grab", "screen": "screen",
-             "mouse": "mouse"}.get(args.cmd)
+             "mouse": "mouse", "key": "key",
+             "windows": "windows"}.get(args.cmd)
 
     try:
         host, port = resolve_target(args)

@@ -69,6 +69,7 @@ pulling in its libraries — captured live off the A1200.
 | `ps` / `kill` | **working on the real A1200** — full task list with stack headroom; Ctrl-C or RemTask |
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
 | `grab` / `screen` | **working on the real A1200** — front screen to PNG in 0.1 s; RTG and native paths both |
+| `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
 | stream heartbeat + farewell | **working on the real A1200** — a dead machine is noticed; a deliberate exit says goodbye first |
 | stream auto-reconnect | client-side — a lost stream retries forever and says why it dropped; `--once` restores stop-on-disconnect |
@@ -158,6 +159,13 @@ wasabi grab [FILE] [--diff BASE.png]
                              grab the front screen as a PNG; --diff
                              reports what changed since BASE and exits 1
 wasabi screen [--cycle|--to-front T]    list screens, flip between them
+wasabi windows [--raw]       every screen and window: place, size, task
+wasabi mouse move|click|doubleclick|down|up [X Y] [--right|--middle]
+                             move the pointer, click, drag, drive menus
+wasabi key type TEXT [--enter]
+                             type text, through the Amiga's own keymap
+wasabi key press KEY...      press keys by name: return, esc, f1, up,
+                             ramiga+w, ctrl+c, lamiga+shift+a
 ```
 
 `--host` overrides discovery, and `WASABI_HOST`/`WASABI_PORT`/`WASABI_KEY`
@@ -902,6 +910,53 @@ command touch the screen" is a shell conditional. The comparison is
 entirely client-side and the wire is unchanged. A baseline of a different
 size, or a PNG outside the 8-bit RGB subset this client writes, is
 refused rather than diffed against whatever happens to line up.
+
+## Driving the GUI
+
+`windows`, `mouse` and `key` together drive the Amiga's desktop from
+here — look, click, type — for tests or to help when nobody is at the
+keyboard.
+
+```
+$ wasabi windows
+screen "Workbench Screen"  1280x960, 24 bit
+  window "WasabiKeyTest"  at 100,100  640x200  task -  [active]
+  window ""  at 0,18  1280x942  task Workbench  [backdrop]
+$ wasabi key type 'echo "Hej på dig!"' --enter
+$ wasabi key press up return          # the Shell's history: run it again
+$ wasabi key press ramiga+e           # Workbench's Execute Command
+```
+
+**`windows`** lists every screen front first, each followed by its
+windows front first. Positions are relative to the screen — the same
+pixels `grab` shows and `mouse` clicks — so a window is found and clicked
+from facts, not by guessing pixels in a picture. `task` is the program
+reading the window (its command name if it came from a Shell); a Shell
+window shows `-`, because console windows are read by the console
+device, not by a program. `--raw` prints the daemon's tab-separated lines
+for scripts (the format is in [PROTOCOL.md](PROTOCOL.md)). The list is
+made under Intuition's lock and sent after the lock is dropped, so a
+slow network never holds the Amiga's screen still.
+
+**`key type`** sends characters, and the Amiga's own keymap works out
+which keys make them (`MapANSI()`). So the PC needs no idea of the
+Amiga's layout: on a Swedish keymap å, ä, ö, @ and `{[]}` all came out
+byte for byte. The whole text is checked before the first key goes out,
+so a character the keymap cannot make fails the command instead of
+leaving half a line typed. Newlines become Return.
+
+**`key press`** sends key *positions* by name, the way the keyboard
+does: `return`, `esc`, `tab`, `del`, `backspace`, `help`, `up`/`down`/
+`left`/`right`, `f1`–`f10`, letters, digits and the US-position
+punctuation, with modifiers joined by `+` (`shift`, `ctrl`, `alt`,
+`lamiga`, `ramiga`/`amiga`, and the left/right variants). Modifiers go
+down first and up last, as fingers do it.
+
+Keys go to whichever window is active, exactly like the real keyboard.
+`windows` shows which one that is; click a window first to give it the
+keys. A dialog that has no text field selected ignores typing, and not
+every dialog closes on Esc — Workbench's Execute Command needs its
+underlined shortcut (`key press c` for Cancel).
 
 ## Speedtest
 

@@ -109,6 +109,8 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x48 | GRAB     | C→S | `str screenname` |
 | 0x49 | SCREEN   | C→S | `u32 flags`, `str title` |
 | 0x4A | MOUSE    | C→S | `u16 action`, `u16 button`, `u16 count`, `i16 x`, `i16 y` |
+| 0x4B | KEY      | C→S | `u16 mode`, then events or text (below) |
+| 0x4C | WINDOWS  | C→S | (empty) |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -137,7 +139,7 @@ assuming silence means yes.
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
 `speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry,psfree,`
-`mouse` for a current build. Self-update makes version skew
+`mouse,key,windows` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -614,6 +616,54 @@ Emu68CP's Project menu. The held state is process-global and
 survives a client disconnect on purpose (a drag may span several
 commands); a dangling hold is cleared by the matching `up` or by
 the next real mouse press.
+
+### KEY — key positions, or text
+
+Payload: `u16 mode`, then the rest of the frame. Reply `OK`, or `ERR`.
+
+**Mode 0, key positions:** the rest is a list of `u16 code, u16
+qualifier` pairs, each written as one `IECLASS_RAWKEY` event in order.
+`code` is the Amiga raw key code (bit 7 set = key up), `qualifier` the
+`IEQUALIFIER_*` bits. The client sends modifiers as their own key events
+too (Right Amiga is 0x67 down … 0xE7 up) with the qualifier bits
+accumulated, so programs that watch modifier keys see real presses. The
+Amiga's keymap turns positions into characters, exactly as at the
+keyboard. This is the road the live view will use.
+
+**Mode 1, text:** the rest is Latin-1 text, at most 2048 bytes (CR =
+Return). keymap.library's `MapANSI()` maps each character with the
+current default keymap; a character it cannot make fails the whole
+command with `ERR` **before any key is written**. A character reached
+through dead keys goes out the way the autodoc describes: one event,
+the dead keys in `ie_Prev1DownCode/Qual` and `ie_Prev2DownCode/Qual`.
+Every key is a press then a release.
+
+Held mouse buttons (see MOUSE) are ORed into every key event. Timestamps
+come from `CurrentTime()`, as for the mouse.
+
+### WINDOWS — every screen and window
+
+`DATA` frames of whole lines, then `END`. Fields are separated by tabs,
+because titles contain spaces:
+
+```
+S  addr  left  top  width  height  depth  title
+W  addr  left  top  width  height  bleft  btop  bright  bbottom  flags  task  title
+```
+
+Screens come front first, each followed by its windows front first.
+Screen `left`/`top` say where the screen sits on the display (a screen
+pulled down has `top > 0`); window `left`/`top` are relative to its
+screen — the pixel space of `GRAB` and `MOUSE`. `bleft`… are the window's
+border widths, so the inner box is easy to work out. `flags`: `a` the
+active window, `b` a backdrop, `-` neither. `task` is the task reading
+the window's IDCMP port — the CLI command name for a Shell program,
+otherwise the task name — or `-` when the window has no port (console
+windows). Tabs and newlines inside titles are sent as spaces.
+
+The walk runs under `LockIBase()` into a 16 KB buffer; frames go out
+after the lock is dropped. If the buffer fills, the lines so far are
+sent followed by `ERR` in place of `END`.
 
 ## Teardown and the SetFunction rule
 

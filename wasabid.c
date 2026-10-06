@@ -21,6 +21,7 @@
 #include <dos/dosextens.h>
 #include <dos/datetime.h>
 #include <proto/exec.h>
+#include <clib/alib_protos.h>       /* CreateExtIO, DeleteExtIO */
 #include <proto/dos.h>
 #include <intuition/screens.h>
 #include <graphics/gfxbase.h>
@@ -29,6 +30,10 @@
 #include <cybergraphx/cybergraphics.h>
 #define __NOLIBBASE__            /* see cmd_screen() */
 #include <proto/cybergraphics.h>
+#undef __NOLIBBASE__
+#define __NOLIBBASE__            /* see g_keymap */
+#define KEYMAP_BASE_NAME g_keymap
+#include <proto/keymap.h>
 #undef __NOLIBBASE__
 
 #include <sys/types.h>
@@ -44,10 +49,10 @@
 
 #include "patches.h"                 /* everything that hijacks a vector */
 
-#define VERSION_STR "wasabid 0.2"
+#define VERSION_STR "wasabid 0.3b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.2 (15.8.2026)";
+    "$VER: wasabid 0.3b1 (6.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -68,7 +73,8 @@ static const char *verstag __attribute__((used)) =
  */
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
-                 "grab,screen,hb,guru,snoopentry,psfree,mouse"
+                 "grab,screen,hb,guru,snoopentry,psfree,mouse," \
+                 "key,windows"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -115,6 +121,8 @@ typedef char welcome_fits_its_buffer[
 #define T_GRAB    0x48
 #define T_SCREEN  0x49
 #define T_INPUT   0x4a
+#define T_KEY     0x4b
+#define T_WINDOWS 0x4c
 
 struct Library *SocketBase;
 /*
@@ -129,6 +137,12 @@ struct Library *SocketBase;
  * and not a machine that needed the keyboard.
  */
 static struct Library *g_cgfx;
+/*
+ * Same rule for keymap.library, opened on the first `key` text: by hand,
+ * so a missing library is an ERR on one command, never a binary that
+ * will not start.
+ */
+static struct Library *g_keymap;
 
 /* --- the one running command -------------------------------------- */
 
@@ -1448,13 +1462,37 @@ static BOOL write_input_event(struct IOStdReq *io, struct InputEvent *ie)
     return DoIO((struct IORequest *)io) == 0;
 }
 
+/* input.device on a fresh port, or NULL. One per command: the daemon
+ * holds nothing open between commands it may never be sent. */
+static struct IOStdReq *open_input(void)
+{
+    struct MsgPort *mp = CreateMsgPort();
+    struct IOStdReq *io = mp ? (struct IOStdReq *)
+        CreateExtIO(mp, sizeof(struct IOStdReq)) : NULL;
+
+    if (io && OpenDevice("input.device", 0,
+                         (struct IORequest *)io, 0) == 0)
+        return io;
+    if (io) DeleteExtIO((struct IORequest *)io);
+    if (mp) DeleteMsgPort(mp);
+    return NULL;
+}
+
+static void close_input(struct IOStdReq *io)
+{
+    struct MsgPort *mp = io->io_Message.mn_ReplyPort;
+
+    CloseDevice((struct IORequest *)io);
+    DeleteExtIO((struct IORequest *)io);
+    DeleteMsgPort(mp);
+}
+
 static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
                       WORD x, WORD y)
 {
-    struct MsgPort *mp;
-    struct IOStdReq *io = NULL;
+    struct IOStdReq *io;
     struct InputEvent ie;
-    BOOL open = FALSE, ok = TRUE;
+    BOOL ok = TRUE;
     static const UWORD codes[3] = {
         IECODE_LBUTTON, IECODE_RBUTTON, IECODE_MBUTTON
     };
@@ -1466,17 +1504,8 @@ static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
     if (button > 2 || count > 3 || action > 3)
         return send_perr(fd, "bad INPUT parameters");
 
-    mp = CreateMsgPort();
-    io = mp ? (struct IOStdReq *)
-        CreateExtIO(mp, sizeof(struct IOStdReq)) : NULL;
-    if (io && OpenDevice("input.device", 0,
-                         (struct IORequest *)io, 0) == 0)
-        open = TRUE;
-    if (!open) {
-        if (io) DeleteExtIO((struct IORequest *)io);
-        if (mp) DeleteMsgPort(mp);
+    if (!(io = open_input()))
         return send_err(fd, "cannot open input.device");
-    }
 
     if (x != INPUT_NOPOS) {
         memset(&ie, 0, sizeof(ie));
@@ -1522,13 +1551,243 @@ static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
         ok = write_input_event(io, &ie);
     }
 
-    CloseDevice((struct IORequest *)io);
-    DeleteExtIO((struct IORequest *)io);
-    DeleteMsgPort(mp);
+    close_input(io);
 
     if (!ok)
         return send_err(fd, "input event write failed");
     return send_frame(fd, T_OK, NULL, 0);
+}
+
+/* --- remote keyboard: key positions, and text ---------------------- */
+
+/*
+ * Two ways in, both IECLASS_RAWKEY events through IND_WRITEEVENT, the
+ * same road as the mouse:
+ *
+ * KEY_RAW sends key *positions* - raw key codes with their qualifiers,
+ * exactly what the keyboard itself produces. The Amiga's own keymap
+ * then decides which character that is, so a Swedish keymap behaves
+ * as it does at the real keyboard. This is the live view's road.
+ *
+ * KEY_TEXT sends *characters* (Latin-1). keymap.library's MapANSI()
+ * turns each into the key presses the current default keymap needs
+ * to produce it - including the dead-key prefix for an accented
+ * letter the keymap only reaches that way, which goes out the way the
+ * autodoc describes: one event, the earlier keys in ie_Prev1Down/
+ * ie_Prev2Down. So `wasabi key type` gets the text right whatever the
+ * layout, and needs no key map on the PC side.
+ *
+ * Held mouse buttons stay held: their qualifier bits are ORed in, so a
+ * shift-drag is possible.
+ */
+#define KEY_RAW   0
+#define KEY_TEXT  1
+#define KEY_MAX_TEXT 2048
+
+static BOOL key_event(struct IOStdReq *io, UWORD code, UWORD qual,
+                      const UBYTE *prev, LONG nprev)
+{
+    struct InputEvent ie;
+
+    memset(&ie, 0, sizeof(ie));
+    ie.ie_Class = IECLASS_RAWKEY;
+    ie.ie_Code = code;
+    ie.ie_Qualifier = qual | g_mouse_held;
+    if (nprev == 2) {                   /* two dead keys, then this one */
+        ie.ie_Prev2DownCode = prev[0];
+        ie.ie_Prev2DownQual = prev[1];
+        ie.ie_Prev1DownCode = prev[2];
+        ie.ie_Prev1DownQual = prev[3];
+    } else if (nprev == 1) {
+        ie.ie_Prev1DownCode = prev[0];
+        ie.ie_Prev1DownQual = prev[1];
+    }
+    return write_input_event(io, &ie);
+}
+
+static BOOL cmd_key(int fd, ULONG mode, const UBYTE *p, LONG len)
+{
+    struct IOStdReq *io;
+    UBYTE pairs[6];                     /* up to two dead keys + the key */
+    LONG i, n;
+    BOOL ok = TRUE;
+
+    if (mode == KEY_RAW && (len % 4) != 0)
+        return send_perr(fd, "bad KEY event list");
+    if (mode == KEY_TEXT && len > KEY_MAX_TEXT)
+        return send_perr(fd, "KEY text too long");
+    if (mode > KEY_TEXT)
+        return send_perr(fd, "bad KEY mode");
+
+    if (mode == KEY_TEXT && !g_keymap)
+        g_keymap = OpenLibrary("keymap.library", 37);
+    if (mode == KEY_TEXT && !g_keymap)
+        return send_err(fd, "cannot open keymap.library");
+
+    /* Map everything before the first event goes out: a character the
+     * keymap cannot make must fail the command, not leave half a line
+     * typed into somebody's window. */
+    for (i = 0; mode == KEY_TEXT && i < len; i++) {
+        n = MapANSI((STRPTR)(p + i), 1, (STRPTR)pairs, 3, NULL);
+        if (n <= 0) {
+            char msg[64];
+            sprintf(msg, "the keymap cannot type character %u (0x%02x)",
+                    (unsigned)p[i], (unsigned)p[i]);
+            return send_err(fd, msg);
+        }
+    }
+
+    if (!(io = open_input()))
+        return send_err(fd, "cannot open input.device");
+
+    if (mode == KEY_RAW) {
+        for (i = 0; ok && i < len; i += 4)
+            ok = key_event(io, (UWORD)((p[i] << 8) | p[i + 1]),
+                           (UWORD)((p[i + 2] << 8) | p[i + 3]), NULL, 0);
+    } else {
+        for (i = 0; ok && i < len; i++) {
+            UWORD code, qual;
+            n = MapANSI((STRPTR)(p + i), 1, (STRPTR)pairs, 3, NULL);
+            if (n <= 0 || n > 3)
+                break;                  /* mapped a moment ago */
+            code = pairs[(n - 1) * 2];
+            qual = pairs[(n - 1) * 2 + 1];
+            ok = key_event(io, code, qual, pairs, n - 1);
+            if (ok)
+                ok = key_event(io, code | IECODE_UP_PREFIX, qual, NULL, 0);
+        }
+    }
+
+    close_input(io);
+
+    if (!ok)
+        return send_err(fd, "input event write failed");
+    return send_frame(fd, T_OK, NULL, 0);
+}
+
+/* --- every screen and window, as text ------------------------------ */
+
+/*
+ * The UI as facts rather than pixels: click a window's close gadget
+ * from its position, not by guessing where it is in a picture.
+ *
+ * One line per screen, front first, each followed by its windows,
+ * front first, fields separated by tabs (titles have spaces):
+ *
+ *   S <addr> <left> <top> <width> <height> <depth> <title>
+ *   W <addr> <left> <top> <width> <height>
+ *     <borderleft> <bordertop> <borderright> <borderbottom>
+ *     <flags> <task> <title>
+ *
+ * Window positions are relative to their screen - the same pixel space
+ * GRAB and MOUSE use. flags: 'a' the active window, 'b' a backdrop,
+ * '-' neither. <task> is who reads the window's IDCMP port: the
+ * command name for a CLI program, the task name otherwise; '-' when
+ * the window has no port.
+ *
+ * The walk runs under LockIBase(), into a buffer; the lines go to the
+ * socket only after the lock is dropped. A slow network must never
+ * hold Intuition still - that would freeze the very screen being
+ * looked at.
+ */
+#define WIN_BUF 16384
+
+static void win_task_name(struct Window *w, char *out, LONG outsz)
+{
+    struct Task *t;
+
+    out[0] = '\0';
+    if (!w->UserPort || !(t = (struct Task *)w->UserPort->mp_SigTask))
+        return;
+    if (t->tc_Node.ln_Type == NT_PROCESS) {
+        struct CommandLineInterface *cli = (struct CommandLineInterface *)
+            BADDR(((struct Process *)t)->pr_CLI);
+        UBYTE *b = cli ? (UBYTE *)BADDR(cli->cli_CommandName) : NULL;
+        if (b && b[0]) {                /* a BSTR: length, then bytes */
+            LONG bn = b[0] < outsz - 1 ? b[0] : outsz - 1;
+            memcpy(out, b + 1, bn);
+            out[bn] = '\0';
+            return;
+        }
+    }
+    copystr(out, outsz, t->tc_Node.ln_Name);
+}
+
+/* Tabs and newlines in a title would break the line format. */
+static void win_clean(char *s)
+{
+    for (; *s; s++)
+        if (*s == '\t' || *s == '\n' || *s == '\r')
+            *s = ' ';
+}
+
+static BOOL cmd_windows(int fd)
+{
+    struct Screen *sc;
+    struct Window *w, *active;
+    char *buf, *line;
+    char task[48], title[120];
+    LONG used = 0, n, i;
+    BOOL ok = TRUE, full = FALSE;
+    ULONG ib;
+
+    buf = AllocMem(WIN_BUF, MEMF_ANY);
+    if (!buf)
+        return send_err(fd, "out of memory");
+    line = buf;
+
+    ib = LockIBase(0);
+    active = IntuitionBase->ActiveWindow;
+    for (sc = IntuitionBase->FirstScreen; sc && !full; sc = sc->NextScreen) {
+        copystr(title, sizeof(title), sc->Title ? (char *)sc->Title : "");
+        win_clean(title);
+        if (used + 300 > WIN_BUF) { full = TRUE; break; }
+        used += sprintf(buf + used, "S\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%ld\t%s\n",
+                        (unsigned long)sc, (long)sc->LeftEdge,
+                        (long)sc->TopEdge, (long)sc->Width,
+                        (long)sc->Height,
+                        (long)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH),
+                        title);
+        for (w = sc->FirstWindow; w; w = w->NextWindow) {
+            char flags[3];
+            LONG f = 0;
+            if (used + 300 > WIN_BUF) { full = TRUE; break; }
+            if (w == active) flags[f++] = 'a';
+            if (w->Flags & WFLG_BACKDROP) flags[f++] = 'b';
+            if (!f) flags[f++] = '-';
+            flags[f] = '\0';
+            win_task_name(w, task, sizeof(task));
+            win_clean(task);
+            copystr(title, sizeof(title), w->Title ? (char *)w->Title : "");
+            win_clean(title);
+            used += sprintf(buf + used,
+                    "W\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld"
+                    "\t%s\t%s\t%s\n",
+                    (unsigned long)w, (long)w->LeftEdge, (long)w->TopEdge,
+                    (long)w->Width, (long)w->Height,
+                    (long)w->BorderLeft, (long)w->BorderTop,
+                    (long)w->BorderRight, (long)w->BorderBottom,
+                    flags, task[0] ? task : "-", title);
+        }
+    }
+    UnlockIBase(ib);
+
+    /* Whole lines per frame, so the client can split on newlines. */
+    for (i = 0; ok && i < used; i += n) {
+        n = used - i;
+        if (n > 8192) {
+            n = 8192;
+            while (n > 0 && line[i + n - 1] != '\n')
+                n--;
+        }
+        ok = send_frame(fd, T_DATA, line + i, n);
+    }
+    FreeMem(buf, WIN_BUF);
+    if (!ok)
+        return FALSE;
+    if (full)
+        return send_err(fd, "too many windows; the list is cut short");
+    return send_frame(fd, T_END, NULL, 0);
 }
 
 /*
@@ -2320,6 +2579,14 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
                          (WORD)((p[8] << 8) | p[9]));
     }
 
+    case T_KEY:
+        if (len < 2)
+            return send_perr(fd, "bad KEY header");
+        return cmd_key(fd, (p[0] << 8) | p[1], p + 2, len - 2);
+
+    case T_WINDOWS:
+        return cmd_windows(fd);
+
     case T_SPEED: {
         char target[200];
         if (len < 8)
@@ -2894,6 +3161,7 @@ out:
     if (listen_fd >= 0) CloseSocket(listen_fd);
     FreeMem(payload, MAX_PAYLOAD);
     if (g_cgfx) CloseLibrary(g_cgfx);
+    if (g_keymap) CloseLibrary(g_keymap);
     CloseLibrary(SocketBase);
 
     /*
