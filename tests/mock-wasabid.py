@@ -41,7 +41,7 @@ RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
-KEYIN, WINDOWS = 0x4B, 0x4C
+KEYIN, WINDOWS, HEALTH = 0x4B, 0x4C, 0x4D
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -54,7 +54,7 @@ BANNER = None
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
-        "hb,guru,snoopentry,psfree,key,windows")
+        "hb,guru,snoopentry,psfree,key,windows,health")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -256,6 +256,8 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_key(payload)
         elif tag == WINDOWS:
             self.do_windows()
+        elif tag == HEALTH:
+            self.do_health()
         elif tag == PS:
             self.do_ps(payload)
         elif tag == KILL:
@@ -521,6 +523,27 @@ class Handler(socketserver.BaseRequestHandler):
         with open(os.path.join(ROOT, "keys.log"), "a") as f:
             f.write(payload.hex() + "\n")
         self.send(OK)
+
+    def do_health(self):
+        """An Emu68 A1200 at a steady 100 68k MIPS, 51.5 C, which had
+        an under-voltage and a throttle once since boot but not now."""
+        t = time.time()
+        rows = ["mem.chip.free 1048576", "mem.chip.largest 524288",
+                "mem.chip.total 2097152", "mem.fast.free 134217728",
+                "mem.fast.largest 67108864", "mem.fast.total 268435456",
+                "emu68 yes", "emu68.version Emu68 1.1.0-mock",
+                "pi.model Mock Pi",
+                "emu68.cntfrq 54000000",
+                "emu68.cnt 0x%016x" % int(t * 54000000),
+                "emu68.insn 0x%016x" % int(t * 100e6),
+                "emu68.arminsn 0x%016x" % int(t * 50e6),
+                "emu68.jit.size 1000", "emu68.jit.free 250",
+                "emu68.jit.units 9", "emu68.jit.misses 7",
+                "mailbox yes", "pi.temp 51500", "pi.temp.max 85000",
+                "pi.throttled 0x50000", "pi.volt.core 880000",
+                "pi.clock.arm 1500000000",
+                "pi.clock.arm.measured 1500000000"]
+        self.send_data(("\n".join(rows) + "\n").encode("latin-1"))
 
     def do_windows(self):
         """One screen, two windows - the daemon's tab-separated shape."""

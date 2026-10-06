@@ -69,6 +69,7 @@ pulling in its libraries — captured live off the A1200.
 | `ps` / `kill` | **working on the real A1200** — full task list with stack headroom; Ctrl-C or RemTask |
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
 | `grab` / `screen` | **working on the real A1200** — front screen to PNG in 0.1 s; RTG and native paths both |
+| `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
 | stream heartbeat + farewell | **working on the real A1200** — a dead machine is noticed; a deliberate exit says goodbye first |
@@ -166,6 +167,8 @@ wasabi grab [FILE] [--window TITLE] [--diff BASE.png]
                              prints its path (no FILE: a new file each
                              time); --diff reports what changed, exits 1
 wasabi screen [--cycle|--to-front T]    list screens, flip between them
+wasabi health [--watch [S]]  the Pi's temperature, voltage and power
+                             history, Emu68's CPU meter, free memory
 wasabi windows [--raw]       every screen and window: place, size, task
 wasabi wait window|task|file|change|still|up [NAME] [--gone]
             [--contains TEXT] [--timeout S]
@@ -996,6 +999,34 @@ JSON instead of a table. Errors always go to stderr as one line.
 A1200, since `SYS:` is just another name for it). `reboot` needs `--yes`,
 as `quit` always has; `kill --force` (RemTask) was already explicit. A
 `run` is not checked — `wasabi run "Delete C:#?"` does what it says.
+
+## Health
+
+```
+$ wasabi health
+Pi (Raspberry Pi Compute Module 4 Rev 1.1): 42.8 °C (limit 85), core 1.01 V, ARM 2000 MHz
+power: OK - no under-voltage or throttling since boot
+Emu68 1.1.0-alpha.2 (28.07.2026) git:e23e328: Pi up 53 h 15 min, 68k 0.3 MIPS (ARM 53), JIT cache 30% used, 427849 misses
+memory: chip 2010 KB free (largest block 2010 KB), fast 1837 MB free (largest 909 MB)
+```
+
+The **power line is the one to watch.** The Pi's firmware remembers
+whether under-voltage, a capped clock, throttling or the soft
+temperature limit happened *at any moment since the Pi booted*, so a
+supply dip too short for any poll to catch still shows up. A problem
+happening right now makes `health` exit 1. "Pi up" is the Pi's own
+uptime: an Amiga reboot does not reset it, so neither does it reset the
+since-boot flags.
+
+The **68k MIPS** figure is a real CPU meter: Emu68 counts every 68k
+instruction it executes, and an idle Amiga sits in `Wait()` with the
+CPU genuinely stopped, so idle reads near 0 and a busy loop read
+1287 MIPS on the A1200. It needs two readings, so a one-shot `health`
+takes a second; `--watch` (every 2 s, or `--watch 1`) prints a reading
+each time until Ctrl-C. `--json` gives numbers; `--raw` the daemon's
+lines. On FS-UAE or a plain 68000 the Pi and Emu68 lines say *not
+available* and the memory line still works. How each value is read is
+in [PROTOCOL.md](PROTOCOL.md).
 
 ## Driving the GUI
 

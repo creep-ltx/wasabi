@@ -111,6 +111,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x4A | MOUSE    | C→S | `u16 action`, `u16 button`, `u16 count`, `i16 x`, `i16 y` |
 | 0x4B | KEY      | C→S | `u16 mode`, then events or text (below) |
 | 0x4C | WINDOWS  | C→S | (empty) |
+| 0x4D | HEALTH   | C→S | (empty) |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -139,7 +140,7 @@ assuming silence means yes.
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
 `speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry,psfree,`
-`mouse,key,windows` for a current build. Self-update makes version skew
+`mouse,key,windows,health` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -666,6 +667,36 @@ windows). Tabs and newlines inside titles are sent as spaces.
 The walk runs under `LockIBase()` into a 16 KB buffer; frames go out
 after the lock is dropped. If the buffer fills, the lines so far are
 sent followed by `ERR` in place of `END`.
+
+### HEALTH — the machine's vital signs
+
+`DATA` of `key value` lines, then `END`. A key the machine cannot
+provide is **absent**, so the same command answers on the A1200, in
+FS-UAE and on a plain 68000. Numbers are decimal, 64-bit counters hex.
+
+| Key | Value |
+|---|---|
+| `mem.{chip,fast}.{free,largest,total}` | bytes, from `AvailMem()` |
+| `emu68` | `yes`/`no` — devicetree.resource has an `/emu68` node |
+| `emu68.version`, `pi.model` | strings from the device tree |
+| `emu68.cntfrq` | Hz of Emu68's free-running counter (54 MHz on a CM4) |
+| `emu68.cnt`, `emu68.insn`, `emu68.arminsn` | 64-bit hex: counter ticks since the Pi booted, 68k instructions, ARM instructions |
+| `emu68.jit.{size,free,units,misses}` | the JIT cache |
+| `mailbox` | `yes`/`no` — mailbox.resource is present |
+| `pi.temp`, `pi.temp.max` | SoC temperature and its limit, milli-°C |
+| `pi.throttled` | firmware "get throttled" (tag 0x00030046): bits 0–3 now (under-voltage, ARM clock capped, throttled, soft temperature limit), bits 16–19 the same *since the Pi booted* |
+| `pi.volt.core`, `pi.volt.sdram_c` | µV |
+| `pi.clock.arm`, `.measured`, `.max`, `pi.clock.core` | Hz |
+
+The `emu68.*` registers are Emu68's custom MOVECs, read under
+`SuperState()` only after the `/emu68` check — they are an
+illegal-instruction guru on real 68k silicon and in FS-UAE — and
+hand-encoded, so the daemon itself stays 68000 code. The `pi.*` keys
+come only through **mailbox.resource**'s `MB_RawCommand()`, which holds
+the mailbox's semaphore for the round trip; there is no raw-MMIO
+fallback, so the daemon can never collide with Emu68 or VideoCore.card
+on the mailbox. Rates (MIPS) are the client's work: two readings, and
+the time between them taken from `emu68.cnt`, not the network.
 
 ## Teardown and the SetFunction rule
 

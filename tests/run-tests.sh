@@ -525,6 +525,8 @@ out=$($WOLD ps 2>/dev/null | grep -c "FREE")
 check "and is not asked for a column it lacks" "0" "$out"
 out=$($WOLD key press return 2>&1 | grep -c "update it")
 check "a daemon without 'key' is named as too old" "1" "$out"
+out=$($WOLD health 2>&1 | grep -c "update it")
+check "a daemon without 'health' is named as too old" "1" "$out"
 kill "$MOCK4_PID" 2>/dev/null
 
 $W kill Wait >/dev/null 2>&1
@@ -700,6 +702,18 @@ out=$($W snoop --until 'startup-sequence' --for 10 2>/dev/null | grep -c "Startu
 check "snoop --until stops at the line it waited for" "1" "$out"
 $W debug --until 'never said' --for 1 >/dev/null 2>&1
 check "--until that never comes is exit 124" "124" "$?"
+
+# --- health ---
+out=$($W --json health 2>/dev/null)
+check "health reads the temperature" "51.5" "$(echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["temp_c"])')"
+check "and works out the CPU meter from two readings" "1" \
+      "$(echo "$out" | python3 -c 'import json,sys; m=json.load(sys.stdin)["mips_68k"]; print(int(90 < m < 110))')"
+check "and names what happened since boot" "under-voltage,throttled" \
+      "$(echo "$out" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin)["problems_since_boot"]))')"
+out=$($W health 2>/dev/null | grep -c "since boot there was under-voltage, throttled")
+check "health says so in words" "1" "$out"
+$W health >/dev/null 2>&1
+check "a problem in the past only is exit 0" "0" "$?"
 
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")

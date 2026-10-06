@@ -33,7 +33,7 @@ RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN, MOUSE = 0x46, 0x47, 0x48, 0x49, 0x4A
-KEY, WINDOWS = 0x4B, 0x4C
+KEY, WINDOWS, HEALTH = 0x4B, 0x4C, 0x4D
 
 # Amiga DateStamp epoch.
 AMIGA_EPOCH = 252460800  # 1978-01-01 00:00:00 UTC as a Unix timestamp
@@ -1676,6 +1676,202 @@ def cmd_wait_up(args):
         time.sleep(1.0)
 
 
+# The firmware's "get throttled" bits: what is happening now (low
+# nibble), and what has happened at any time since the Pi booted
+# (bits 16-19) - the latter catches a dip too short for any poll.
+THROTTLE_BITS = ((0, "under-voltage"), (1, "ARM clock capped"),
+                 (2, "throttled"), (3, "soft temperature limit"))
+
+
+def health_read(conn):
+    """One HEALTH reading as a dict of the daemon's key -> value text,
+    stamped with this end's clock."""
+    conn.send(HEALTH)
+    text = []
+    drain_to_end(conn, text.append)
+    d = {}
+    for line in b"".join(text).decode("latin-1").splitlines():
+        k, _, v = line.partition(" ")
+        if k:
+            d[k] = v
+    d["_t"] = time.time()
+    return d
+
+
+def _num(d, k):
+    v = d.get(k)
+    if v is None:
+        return None
+    try:
+        return int(v, 0)
+    except ValueError:
+        return None
+
+
+def health_facts(cur, prev=None):
+    """The reading as numbers people use: degrees, volts, MHz, KB,
+    MIPS (from two readings), and the throttle flags as words."""
+    f = {}
+    for k in ("chip", "fast"):
+        for part in ("free", "largest", "total"):
+            v = _num(cur, "mem.%s.%s" % (k, part))
+            if v is not None:
+                f["%s_%s_kb" % (k, part)] = v // 1024
+    f["emu68"] = cur.get("emu68") == "yes"
+    if f["emu68"]:
+        ver = cur.get("emu68.version") or ""
+        f["emu68_version"] = ver[6:] if ver.startswith("Emu68 ") else ver
+        f["pi_model"] = cur.get("pi.model")
+        frq, cnt = _num(cur, "emu68.cntfrq"), _num(cur, "emu68.cnt")
+        if frq and cnt is not None:
+            f["uptime_s"] = cnt // frq
+        size, free = _num(cur, "emu68.jit.size"), _num(cur, "emu68.jit.free")
+        if size:
+            f["jit_used_pct"] = round(100.0 * (size - (free or 0)) / size, 1)
+        f["jit_misses"] = _num(cur, "emu68.jit.misses")
+        if prev and prev.get("emu68") == "yes":
+            # Seconds from Emu68's own counter, not this end's clock: the
+            # network's delay must not change the CPU meter.
+            dc = (cnt or 0) - (_num(prev, "emu68.cnt") or 0)
+            if frq and dc > 0:
+                secs = dc / float(frq)
+                f["mips_68k"] = round(((_num(cur, "emu68.insn") or 0) -
+                                       (_num(prev, "emu68.insn") or 0))
+                                      / secs / 1e6, 1)
+                f["mips_arm"] = round(((_num(cur, "emu68.arminsn") or 0) -
+                                       (_num(prev, "emu68.arminsn") or 0))
+                                      / secs / 1e6, 1)
+    f["mailbox"] = cur.get("mailbox") == "yes"
+    t = _num(cur, "pi.temp")
+    if t is not None:
+        f["temp_c"] = round(t / 1000.0, 1)
+    t = _num(cur, "pi.temp.max")
+    if t is not None:
+        f["temp_max_c"] = round(t / 1000.0, 1)
+    v = _num(cur, "pi.volt.core")
+    if v is not None:
+        f["core_v"] = round(v / 1e6, 3)
+    for k, name in (("pi.clock.arm", "arm_mhz"),
+                    ("pi.clock.arm.measured", "arm_measured_mhz"),
+                    ("pi.clock.arm.max", "arm_max_mhz"),
+                    ("pi.clock.core", "core_mhz")):
+        v = _num(cur, k)
+        if v is not None:
+            f[name] = int(round(v / 1e6))
+    th = _num(cur, "pi.throttled")
+    if th is not None:
+        f["throttled_raw"] = "0x%05x" % th
+        f["problems_now"] = [w for b, w in THROTTLE_BITS if th & (1 << b)]
+        f["problems_since_boot"] = [w for b, w in THROTTLE_BITS
+                                    if th & (1 << (b + 16))]
+    return f
+
+
+def _kb(k):
+    return "%d MB" % (k // 1024) if k >= 10240 else "%d KB" % k
+
+
+def health_text(f):
+    out = []
+    if "temp_c" in f:
+        pi = "Pi%s: %.1f °C" % (" (%s)" % f["pi_model"]
+                                if f.get("pi_model") else "", f["temp_c"])
+        if "temp_max_c" in f:
+            pi += " (limit %.0f)" % f["temp_max_c"]
+        if "core_v" in f:
+            pi += ", core %.2f V" % f["core_v"]
+        if "arm_mhz" in f:
+            pi += ", ARM %d MHz" % f["arm_mhz"]
+            if f.get("arm_measured_mhz") and \
+                    abs(f["arm_measured_mhz"] - f["arm_mhz"]) > 5:
+                pi += " (measured %d)" % f["arm_measured_mhz"]
+        out.append(pi)
+    if "problems_now" in f:
+        now, ever = f["problems_now"], f["problems_since_boot"]
+        if now:
+            out.append("power: PROBLEM NOW - %s" % ", ".join(now))
+        if ever:
+            out.append("power: since boot there was %s" % ", ".join(ever))
+        if not now and not ever:
+            out.append("power: OK - no under-voltage or throttling "
+                       "since boot")
+    elif not f.get("mailbox"):
+        out.append("Pi: not available (no mailbox.resource - not Emu68 "
+                   "on a Pi)")
+    if f.get("emu68"):
+        e = "Emu68 %s" % (f.get("emu68_version") or "")
+        if "uptime_s" in f:
+            u = f["uptime_s"]
+            e += ": Pi up %d h %02d min" % (u // 3600, u % 3600 // 60)
+        if "mips_68k" in f:
+            e += ", 68k %.1f MIPS (ARM %.0f)" % (f["mips_68k"],
+                                                f["mips_arm"])
+        if "jit_used_pct" in f:
+            e += ", JIT cache %.0f%% used" % f["jit_used_pct"]
+        if f.get("jit_misses") is not None:
+            e += ", %d misses" % f["jit_misses"]
+        out.append(e)
+    else:
+        out.append("Emu68: no (counters not available)")
+    if "chip_free_kb" in f:
+        out.append("memory: chip %s free (largest block %s), "
+                   "fast %s free (largest %s)"
+                   % (_kb(f["chip_free_kb"]), _kb(f["chip_largest_kb"]),
+                      _kb(f.get("fast_free_kb", 0)),
+                      _kb(f.get("fast_largest_kb", 0))))
+    if f.get("last_guru"):
+        out.append("last guru: %s" % f["last_guru"])
+    return out
+
+
+def last_guru(conn):
+    """The daemon's note of the last system alert (T:lastguru), first
+    line only, or None."""
+    data = fetch(conn, "T:lastguru")
+    if not data:
+        return None
+    lines = [ln.strip() for ln in data.decode("latin-1").splitlines()
+             if ln.strip()]
+    return lines[0] if lines else None
+
+
+def cmd_health(conn, args):
+    """The machine's vital signs: the Pi's temperature, voltage, clock
+    and power history; Emu68's uptime, CPU meter and JIT cache; free
+    memory. --watch repeats it until Ctrl-C."""
+    if conn.caps and "health" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) has no health readings - update it with "
+            "'wasabi update wasabid'" % conn.banner)
+    # The CPU meter is a rate, so it needs two readings. One second
+    # apart is the price of a one-shot; --watch gets it for free.
+    prev = health_read(conn)
+    interval = args.watch if args.watch else 1.0
+    try:
+        while True:
+            time.sleep(max(0.2, interval - (time.time() - prev["_t"])))
+            cur = health_read(conn)
+            f = health_facts(cur, prev)
+            f["last_guru"] = last_guru(conn)
+            if args.raw:
+                print("\n".join("%s %s" % kv for kv in cur.items()
+                                if kv[0] != "_t"))
+            elif args.json:
+                emit_json(f)
+            else:
+                if args.watch:
+                    print(time.strftime("%H:%M:%S"))
+                print("\n".join(health_text(f)))
+            sys.stdout.flush()
+            if not args.watch:
+                bad = f.get("problems_now")
+                return 1 if bad else 0
+            prev = cur
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 0
+
+
 def cmd_mouse(conn, args):
     """Move the pointer and click - drive GUIs remotely.
 
@@ -2368,7 +2564,7 @@ def main(argv=None):
                         % (SILENCE, EXIT_SILENT))
     p.add_argument("--json", action="store_true",
                    help="print results as JSON (ls, ps, screen, windows, "
-                        "ping, run, wait, grab)")
+                        "ping, run, wait, grab, health)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("discover", help="find Amigas on this network"
@@ -2578,6 +2774,15 @@ def main(argv=None):
                    help="still: how long nothing may change (default 1)")
     s.set_defaults(fn=cmd_wait)
 
+    s = sub.add_parser("health", help="the Pi's temperature, voltage and "
+                       "power history, Emu68's CPU meter, free memory")
+    s.add_argument("--watch", type=float, nargs="?", const=2.0,
+                   metavar="SECONDS",
+                   help="repeat every SECONDS (default 2) until Ctrl-C")
+    s.add_argument("--raw", action="store_true",
+                   help="the daemon's own key/value lines")
+    s.set_defaults(fn=cmd_health)
+
     s = sub.add_parser("windows", help="list every screen and window")
     s.add_argument("--raw", action="store_true",
                    help="the daemon's tab-separated lines, for scripts")
@@ -2659,7 +2864,7 @@ def main(argv=None):
              "quit": "quit", "update": "install",
              "grab": "grab", "screen": "screen",
              "mouse": "mouse", "key": "key",
-             "windows": "windows"}.get(args.cmd)
+             "windows": "windows", "health": "health"}.get(args.cmd)
     if args.cmd == "wait":
         needs = {"window": "windows", "change": "grab",
                  "still": "grab"}.get(args.what)

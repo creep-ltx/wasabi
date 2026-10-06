@@ -48,11 +48,12 @@
 #include <ctype.h>
 
 #include "patches.h"                 /* everything that hijacks a vector */
+#include "health.h"                  /* the machine's vital signs */
 
-#define VERSION_STR "wasabid 0.3b1"
+#define VERSION_STR "wasabid 0.3b2"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.3b1 (6.10.2026)";
+    "$VER: wasabid 0.3b2 (6.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -74,7 +75,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows"
+                 "key,windows,health"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -123,6 +124,7 @@ typedef char welcome_fits_its_buffer[
 #define T_INPUT   0x4a
 #define T_KEY     0x4b
 #define T_WINDOWS 0x4c
+#define T_HEALTH  0x4d
 
 struct Library *SocketBase;
 /*
@@ -2586,6 +2588,15 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
 
     case T_WINDOWS:
         return cmd_windows(fd);
+
+    case T_HEALTH: {
+        /* Static: 2 KB is a quarter of the shell's 8 KB stack. */
+        static char report[2048];
+        LONG n = health_report(report, sizeof(report));
+        if (!send_frame(fd, T_DATA, report, n))
+            return FALSE;
+        return send_frame(fd, T_END, NULL, 0);
+    }
 
     case T_SPEED: {
         char target[200];
