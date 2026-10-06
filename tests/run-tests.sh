@@ -665,13 +665,20 @@ check "wait task, as JSON" "1" "$(echo "$out" | grep -c '"met": true')"
 $W wait up --timeout 3 >/dev/null 2>&1
 check "wait up returns at once when the Amiga answers" "0" "$?"
 
-# look
-out=$($W look --out "$ROOT/look.png" 2>/dev/null)
-check "look prints the path it wrote" "$ROOT/look.png" "$out"
-[ -s "$ROOT/look.png" ] && ok "and the picture is there" \
-                        || no "and the picture is there"
-out=$($W look --window nosuch 2>&1 | grep -c "no window")
-check "look --window on a missing window says so" "1" "$out"
+# grab: a new file each time when none is named, the path on stdout,
+# one window by title
+out=$(TMPDIR="$ROOT" $W grab 2>/dev/null)
+case "$out" in "$ROOT"/wasabi-grab/grab-*.png) ok "grab with no file picks a new one and prints it";;
+    *) no "grab with no file picks a new one and prints it"; echo "        got: $out";; esac
+[ -s "$out" ] && ok "and the picture is there" || no "and the picture is there"
+out=$($W grab "$ROOT/named.png" 2>/dev/null)
+check "grab FILE prints that path" "$ROOT/named.png" "$out"
+out=$($W grab --window nosuch 2>&1 | grep -c "no window")
+check "grab --window on a missing window says so" "1" "$out"
+out=$($W grab --window amigashell 2>&1 | grep -c "off the screen")
+check "a window outside the picture is refused, not cut to nothing" "1" "$out"
+out=$($W --json grab "$ROOT/j.png" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["path"], d["width"])')
+check "grab --json gives the path and size" "$ROOT/j.png 8" "$out"
 
 # JSON
 out=$($W --json ping | python3 -c 'import json,sys; print("key" in json.load(sys.stdin)["caps"])')

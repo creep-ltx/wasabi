@@ -159,14 +159,12 @@ wasabi ps [PATTERN]          list every task, with stack headroom;
                              AmigaDOS wildcards filter
 wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
 wasabi speedtest [SIZE] [--target PATH]  latency and throughput both ways
-wasabi grab [FILE] [--diff BASE.png]
-                             grab the front screen as a PNG; --diff
-                             reports what changed since BASE and exits 1
+wasabi grab [FILE] [--window TITLE] [--diff BASE.png]
+                             the front screen, or one window, as a PNG;
+                             prints its path (no FILE: a new file each
+                             time); --diff reports what changed, exits 1
 wasabi screen [--cycle|--to-front T]    list screens, flip between them
 wasabi windows [--raw]       every screen and window: place, size, task
-wasabi look [--window TITLE] [--out FILE]
-                             grab the front screen, or one window, to a
-                             PNG and print its path
 wasabi wait window|task|file|change|still|up [NAME] [--gone]
             [--contains TEXT] [--timeout S]
                              wait for something instead of sleeping
@@ -823,13 +821,25 @@ it.
 `grab` is the verb, `screen` is the thing you operate on.
 
 `wasabi grab shot.png` grabs the frontmost screen and writes a PNG
-locally. 1280x960 in **0.1 seconds**, which is a design decision rather
-than luck:
+locally; with no file name each grab gets a new file in
+`$TMPDIR/wasabi-grab/`, so nothing is overwritten. The path is printed
+on stdout, the details on stderr. 1280x960 in **0.1 seconds**, which is
+a design decision rather than luck:
 
 ```
 $ wasabi grab shot.png
 1280x960 -> shot.png (1362 KB, 3.7 MB raw in 0.1 s)
+shot.png
+$ wasabi grab --window "GrabTest"
+window "GrabTest", 400x120 -> /tmp/wasabi-grab/grab-20261006-192848-516.png (1 KB, 3.7 MB raw in 0.2 s)
+/tmp/wasabi-grab/grab-20261006-192848-516.png
 ```
+
+`--window TITLE` crops to the frontmost window whose title contains
+TITLE, using the same window list as `wasabi windows`; it must be on the
+front screen (`wasabi screen --to-front` brings it). `--screen NAME`
+grabs a public screen that is not in front instead; the two do not
+combine.
 
 **The Amiga sends raw pixels and does no compression at all.** Every
 measurement in this file says the same thing — the wire is the fastest
@@ -958,11 +968,13 @@ wasabi debug --until "ready" --for 20 # a program says something
 `wasabi reboot --yes --wait` reboots and returns when the daemon answers
 again.
 
-**See and read, briefly.** `wasabi look` grabs the front screen — or,
+**See and read, briefly.** `wasabi grab` grabs the front screen — or,
 with `--window TITLE`, just that window — writes a PNG and prints only
-its path (into `$TMPDIR/wasabi-look/` unless `--out` says where), so a
-program that reads pictures can open it. `--json` on `ls`, `ps`,
-`screen`, `windows`, `ping`, `run`, `wait` and `look` prints one line of
+its path on stdout (a new file in `$TMPDIR/wasabi-grab/` each time,
+unless you name one), so a program that reads pictures can open it.
+`--window` and `--diff` combine: "did my click change this window?"
+`--json` on `ls`, `ps`, `screen`, `windows`, `ping`, `run`, `wait` and
+`grab` prints one line of
 JSON instead of a table. Errors always go to stderr as one line.
 
 **Exit codes mean one thing each:**

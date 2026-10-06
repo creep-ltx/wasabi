@@ -1418,47 +1418,24 @@ def crop_rgb(pixels, w, box):
                     for y in range(y0, y1))
 
 
+GRAB_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "wasabi-grab")
+
+
 def cmd_grab(conn, args):
-    w, h, out_h, pixels, want, grabbed = grab_pixels(
-        conn, args.screen, args.raw)
-    size = write_png(args.file, w, out_h, pixels)
-    scaled = " (rows doubled to %dx%d)" % (w, out_h) if out_h != h else ""
-    print("%dx%d%s -> %s (%d KB, %.1f MB raw in %.1f s)"
-          % (w, h, scaled, args.file, size // 1024, want / 1e6, grabbed),
-          file=sys.stderr)
+    """Grab a screen - or one window on it - to a PNG.
 
-    # Comparing against a baseline is entirely this end's work: the Amiga
-    # already sent raw pixels precisely so the fast idle machine does the
-    # thinking. Exit status follows diff(1) - 0 identical, 1 changed - so
-    # "did that command touch the screen" is answerable from a script.
-    if args.diff:
-        bw, bh, base = read_png(args.diff)
-        if (bw, bh) != (w, out_h):
-            raise WasabiError(
-                "%s is %dx%d and this grab is %dx%d - a diff needs the same "
-                "screen mode on both sides" % (args.diff, bw, bh, w, out_h))
-        changed, box = rgb_diff(base, pixels, w, out_h)
-        total = w * out_h
-        if not changed:
-            print("diff vs %s: identical" % args.diff, file=sys.stderr)
-            return 0
-        print("diff vs %s: %d of %d pixels changed (%.2f%%), "
-              "bounding box %d,%d - %d,%d"
-              % (args.diff, changed, total, 100.0 * changed / total,
-                 box[0], box[1], box[2], box[3]), file=sys.stderr)
-        return 1
-
-
-LOOK_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "wasabi-look")
-
-
-def cmd_look(conn, args):
-    """Grab the front screen to a file and print where it went - the
-    one-step "let me see" for a person or a program that reads images.
-    --window crops to one window, found by its title."""
-    box = None
-    label = "screen"
+    With no file named, each grab goes to a new file in GRAB_DIR, so
+    nothing is overwritten. The path is the one line on stdout (or
+    --json), so a script or a program that reads pictures can open it;
+    the details go to stderr.
+    """
+    box, label, k = None, "screen", 1
     if args.window is not None:
+        if args.screen:
+            raise WasabiError(
+                "--window finds its own screen - drop --screen (and if "
+                "that screen is not in front, bring it with "
+                "'wasabi screen --to-front')")
         screens, _ = list_windows(conn)
         sc, win = find_window(screens, args.window)
         if not win:
@@ -1469,10 +1446,15 @@ def cmd_look(conn, args):
                 "'%s' is on the screen \"%s\", which is not in front - "
                 "bring it with: wasabi screen --to-front \"%s\""
                 % (win["title"], sc["title"], sc["title"]))
-        box = (win["left"], win["top"], win["left"] + win["width"],
-               win["top"] + win["height"])
+        # The window list is in the picture's pixels; --raw keeps the
+        # screen's own rows, so undo the doubling for the crop.
+        k = sc["row_scale"] if args.raw else 1
+        box = (win["left"], win["top"] // k, win["left"] + win["width"],
+               (win["top"] + win["height"]) // k)
         label = 'window "%s"' % win["title"]
-    w, h, out_h, pixels, _, _ = grab_pixels(conn)
+
+    w, h, out_h, pixels, want, grabbed = grab_pixels(
+        conn, args.screen, args.raw)
     if box:
         x0, y0 = max(0, box[0]), max(0, box[1])
         x1, y1 = min(w, box[2]), min(out_h, box[3])
@@ -1480,17 +1462,52 @@ def cmd_look(conn, args):
             raise WasabiError("%s is off the screen" % label)
         pixels = crop_rgb(pixels, w, (x0, y0, x1, y1))
         w, out_h = x1 - x0, y1 - y0
-    path = args.out
+
+    path = args.file
     if not path:
-        os.makedirs(LOOK_DIR, exist_ok=True)
-        path = os.path.join(LOOK_DIR, "look-%s-%03d.png" % (
+        os.makedirs(GRAB_DIR, exist_ok=True)
+        path = os.path.join(GRAB_DIR, "grab-%s-%03d.png" % (
             time.strftime("%Y%m%d-%H%M%S"), int(time.time() % 1 * 1000)))
-    write_png(path, w, out_h, pixels)
+    size = write_png(path, w, out_h, pixels)
+    if box:
+        what = "%s, %dx%d" % (label, w, out_h)
+    else:
+        what = "%dx%d" % (w, h) + (" (rows doubled to %dx%d)" % (w, out_h)
+                                    if out_h != h else "")
+    print("%s -> %s (%d KB, %.1f MB raw in %.1f s)"
+          % (what, path, size // 1024, want / 1e6, grabbed),
+          file=sys.stderr)
+
+    # Comparing against a baseline is entirely this end's work: the Amiga
+    # already sent raw pixels precisely so the fast idle machine does the
+    # thinking. Exit status follows diff(1) - 0 identical, 1 changed - so
+    # "did that command touch the screen" is answerable from a script.
+    result = {"path": path, "width": w, "height": out_h, "what": label}
+    rc = 0
+    if args.diff:
+        bw, bh, base = read_png(args.diff)
+        if (bw, bh) != (w, out_h):
+            raise WasabiError(
+                "%s is %dx%d and this grab is %dx%d - a diff needs the same "
+                "size on both sides (the same screen mode, the same window "
+                "size)" % (args.diff, bw, bh, w, out_h))
+        changed, dbox = rgb_diff(base, pixels, w, out_h)
+        total = w * out_h
+        result["changed_pixels"] = changed
+        if not changed:
+            print("diff vs %s: identical" % args.diff, file=sys.stderr)
+        else:
+            result["changed_box"] = list(dbox)
+            print("diff vs %s: %d of %d pixels changed (%.2f%%), "
+                  "bounding box %d,%d - %d,%d"
+                  % (args.diff, changed, total, 100.0 * changed / total,
+                     dbox[0], dbox[1], dbox[2], dbox[3]), file=sys.stderr)
+            rc = 1
     if args.json:
-        emit_json({"path": path, "width": w, "height": out_h,
-                   "what": label})
+        emit_json(result)
     else:
         print(path)
+    return rc
 
 
 def fetch(conn, path):
@@ -1778,7 +1795,7 @@ def cmd_key(conn, args):
 
 def row_scale(w, h):
     """How many times `grab` doubles a screen's rows - the rule lives
-    here so the window list and look crop agree with the picture. 1 for
+    here so the window list and a window grab agree with the picture. 1 for
     every square-pixel (RTG) mode; 2 for 640x256; 4 for 1280x256."""
     k = 1
     while h and w >= 2 * h * k:
@@ -1790,7 +1807,7 @@ def list_windows(conn):
     """Every screen, front first, each with its windows, front first.
 
     Window y and height are in the picture's space - multiplied by the
-    screen's row_scale - so they match `grab`, `look` and `mouse`.
+    screen's row_scale - so they match `grab` and `mouse`.
     `raw` keeps the daemon's own lines."""
     if conn.caps and "windows" not in conn.caps:
         raise WasabiError(
@@ -2319,7 +2336,7 @@ def main(argv=None):
                         % (SILENCE, EXIT_SILENT))
     p.add_argument("--json", action="store_true",
                    help="print results as JSON (ls, ps, screen, windows, "
-                        "ping, run, wait, look)")
+                        "ping, run, wait, grab)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("discover", help="find Amigas on this network"
@@ -2466,8 +2483,14 @@ def main(argv=None):
                         "discarding - measures the filesystem, not the wire")
     s.set_defaults(fn=cmd_speedtest)
 
-    s = sub.add_parser("grab", help="grab the front screen as a PNG")
-    s.add_argument("file", nargs="?", default="screen.png")
+    s = sub.add_parser("grab", help="grab the front screen, or one "
+                       "window, as a PNG; prints the file's path")
+    s.add_argument("file", nargs="?", default=None,
+                   help="where to write it (default: a new file in %s)"
+                        % GRAB_DIR)
+    s.add_argument("--window", metavar="TITLE",
+                   help="just the frontmost window whose title contains "
+                        "TITLE (any case)")
     s.add_argument("--screen", metavar="NAME",
                    help="public screen to grab (default: the front one)")
     s.add_argument("--raw", action="store_true",
@@ -2522,16 +2545,6 @@ def main(argv=None):
     s.add_argument("--quiet", type=float, default=1.0, metavar="SECONDS",
                    help="still: how long nothing may change (default 1)")
     s.set_defaults(fn=cmd_wait)
-
-    s = sub.add_parser("look", help="grab the front screen (or one "
-                       "window) to a PNG and print its path")
-    s.add_argument("--window", metavar="TITLE",
-                   help="crop to the frontmost window whose title "
-                        "contains TITLE (any case)")
-    s.add_argument("--out", metavar="FILE",
-                   help="where to write it (default: a new file in %s)"
-                        % LOOK_DIR)
-    s.set_defaults(fn=cmd_look)
 
     s = sub.add_parser("windows", help="list every screen and window")
     s.add_argument("--raw", action="store_true",
@@ -2614,7 +2627,7 @@ def main(argv=None):
              "quit": "quit", "update": "install",
              "grab": "grab", "screen": "screen",
              "mouse": "mouse", "key": "key",
-             "windows": "windows", "look": "grab"}.get(args.cmd)
+             "windows": "windows"}.get(args.cmd)
     if args.cmd == "wait":
         needs = {"window": "windows", "change": "grab",
                  "still": "grab"}.get(args.what)
