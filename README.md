@@ -139,18 +139,22 @@ wasabi discover              find Amigas on this network
 wasabi ping                  round-trip time and daemon banner
 wasabi info                  version, RAM, volumes, and what it can do
 wasabi ls [PATH]             list a drawer; no path lists the volumes
-wasabi put LOCAL REMOTE      upload a file
+wasabi put LOCAL REMOTE      upload a file (--force in a system place)
 wasabi get REMOTE LOCAL      download a file ('-' for stdout)
-wasabi run "CMD"             execute, stream output, return its exit code
-wasabi deploy L R [--run C] [--reboot | --restart]
-wasabi del PATH / mkdir PATH
-wasabi reboot [--cold]
+wasabi run "CMD" [--max-time S]
+                             execute, stream output, return its exit code;
+                             Ctrl-C it if it runs past S seconds
+wasabi deploy L R [--run C] [--reboot | --restart] [--force]
+wasabi del PATH [--force] / mkdir PATH
+wasabi reboot --yes [--wait [S]]  reboot; --wait until it answers again
 wasabi restart [--force]     reload the daemon in place (a debug tool -
                              'update' is the verified path)
 wasabi update LOCAL          replace the daemon itself, verifying first
 wasabi quit --yes [--force]  stop the daemon (needs physical access after)
-wasabi debug [--with-snoop] [--log F]   live KPrintF stream
-wasabi snoop [--task PAT] [--log F]     live DOS call trace
+wasabi debug [--with-snoop] [--log F] [--for S] [--until TEXT]
+                             live KPrintF stream
+wasabi snoop [--task PAT] [--log F] [--for S] [--until TEXT]
+                             live DOS call trace
 wasabi ps [PATTERN]          list every task, with stack headroom;
                              AmigaDOS wildcards filter
 wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
@@ -160,6 +164,12 @@ wasabi grab [FILE] [--diff BASE.png]
                              reports what changed since BASE and exits 1
 wasabi screen [--cycle|--to-front T]    list screens, flip between them
 wasabi windows [--raw]       every screen and window: place, size, task
+wasabi look [--window TITLE] [--out FILE]
+                             grab the front screen, or one window, to a
+                             PNG and print its path
+wasabi wait window|task|file|change|still|up [NAME] [--gone]
+            [--contains TEXT] [--timeout S]
+                             wait for something instead of sleeping
 wasabi mouse move|click|doubleclick|down|up [X Y] [--right|--middle]
                              move the pointer, click, drag, drive menus
 wasabi key type TEXT [--enter]
@@ -168,8 +178,10 @@ wasabi key press KEY...      press keys by name: return, esc, f1, up,
                              ramiga+w, ctrl+c, lamiga+shift+a
 ```
 
-`--host` overrides discovery, and `WASABI_HOST`/`WASABI_PORT`/`WASABI_KEY`
-override the config file. The daemon takes `wasabid [port] [name ID] [allow
+Every command also takes `--json` (where it lists something) and
+`--silence S` — see [Made for scripts](#made-for-scripts-and-for-claude).
+`--host` overrides discovery, and `WASABI_HOST`/`WASABI_PORT`/`WASABI_KEY`/
+`WASABI_SILENCE` override the config file. The daemon takes `wasabid [port] [name ID] [allow
 CIDR|any]`, and is LAN-only unless told otherwise. `name` is what
 discovery replies call the machine — two Amigas on one LAN stop being
 interchangeable "amiga"s — and it overrides `ENV:HOSTNAME`, which is
@@ -911,6 +923,66 @@ entirely client-side and the wire is unchanged. A baseline of a different
 size, or a PNG outside the 8-bit RGB subset this client writes, is
 refused rather than diffed against whatever happens to line up.
 
+## Made for scripts, and for Claude
+
+Wasabi is meant to be a tool a script — or Claude — can reach for
+without a person watching. That needs four promises.
+
+**Nothing hangs.** Every reply has a deadline: if the Amiga takes a
+connection and then says nothing for `--silence` seconds (default 15),
+the command stops with *"the Amiga stopped answering"* and exit code
+125. `run` is the hard case, because a command may rightly say nothing
+for minutes (a compile, a `Wait`): after every 10 quiet seconds it pings
+the daemon on a second connection, so a quiet program keeps running and
+a frozen machine is reported. `run --max-time S` is the other limit,
+the one *you* set: past it the command gets a Ctrl-C, ten seconds to
+finish, and `run` ends with exit 124 either way, saying whether it
+stopped. A command that ignores Ctrl-C keeps running on the Amiga —
+the message says so, and how to remove it.
+
+**Wait for things instead of guessing.** `wasabi wait` checks every half
+second and returns the moment it happens (exit 0), or gives up after
+`--timeout` (default 30 s, exit 124):
+
+```
+wasabi wait window "Prefs"            # a window whose title contains it
+wasabi wait window "Prefs" --gone     # ...until it closes
+wasabi wait task 'MyProg#?' --gone    # a task ends (AmigaDOS pattern)
+wasabi wait file RAM:log --contains done
+wasabi wait change                    # the front screen changes
+wasabi wait still "Prefs"             # a window stops changing (1 s)
+wasabi wait up --timeout 120          # the Amiga answers again
+wasabi debug --until "ready" --for 20 # a program says something
+```
+
+`wasabi reboot --yes --wait` reboots and returns when the daemon answers
+again.
+
+**See and read, briefly.** `wasabi look` grabs the front screen — or,
+with `--window TITLE`, just that window — writes a PNG and prints only
+its path (into `$TMPDIR/wasabi-look/` unless `--out` says where), so a
+program that reads pictures can open it. `--json` on `ls`, `ps`,
+`screen`, `windows`, `ping`, `run`, `wait` and `look` prints one line of
+JSON instead of a table. Errors always go to stderr as one line.
+
+**Exit codes mean one thing each:**
+
+| Code | Meaning |
+|---|---|
+| 0 | it worked (for `run`: the Amiga command's own code — 0, 5, 10, 20) |
+| 1 | the command failed, or the Amiga said no |
+| 2 | the Amiga could not be reached, or the command line was wrong |
+| 124 | a time limit you set ran out (`--max-time`, `--timeout`, `--for` with `--until`) |
+| 125 | the Amiga stopped answering |
+
+**A safety catch.** Deleting or writing in a system place needs
+`--force`: `SYS:` `C:` `L:` `LIBS:` `DEVS:` `S:` `FONTS:` `LOCALE:`
+`ENVARC:`, plus any volume named in the config file's `protect =` line
+(the boot volume's own name belongs there — `protect = AmigaOS` on the
+A1200, since `SYS:` is just another name for it). `reboot` needs `--yes`,
+as `quit` always has; `kill --force` (RemTask) was already explicit. A
+`run` is not checked — `wasabi run "Delete C:#?"` does what it says.
+
 ## Driving the GUI
 
 `windows`, `mouse` and `key` together drive the Amiga's desktop from
@@ -930,11 +1002,13 @@ $ wasabi key press ramiga+e           # Workbench's Execute Command
 **`windows`** lists every screen front first, each followed by its
 windows front first. Positions are relative to the screen — the same
 pixels `grab` shows and `mouse` clicks — so a window is found and clicked
-from facts, not by guessing pixels in a picture. `task` is the program
+from facts, not by guessing pixels in a picture. On a native
+non-interlaced screen `grab` doubles the rows, so `windows` doubles y and
+heights too and the numbers still match the picture. `task` is the program
 reading the window (its command name if it came from a Shell); a Shell
 window shows `-`, because console windows are read by the console
-device, not by a program. `--raw` prints the daemon's tab-separated lines
-for scripts (the format is in [PROTOCOL.md](PROTOCOL.md)). The list is
+device, not by a program. `--raw` prints the daemon's tab-separated lines,
+in the screen's own unscaled pixels, (the format is in [PROTOCOL.md](PROTOCOL.md)). The list is
 made under Intuition's lock and sent after the lock is dropped, so a
 slow network never holds the Amiga's screen still.
 

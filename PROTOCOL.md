@@ -654,7 +654,9 @@ W  addr  left  top  width  height  bleft  btop  bright  bbottom  flags  task  ti
 Screens come front first, each followed by its windows front first.
 Screen `left`/`top` say where the screen sits on the display (a screen
 pulled down has `top > 0`); window `left`/`top` are relative to its
-screen — the pixel space of `GRAB` and `MOUSE`. `bleft`… are the window's
+screen, in the screen's own pixels. (The client multiplies y and heights
+by the row doubling it applies to a native non-interlaced grab, so its
+numbers match the picture and `MOUSE`.) `bleft`… are the window's
 border widths, so the inner box is easy to work out. `flags`: `a` the
 active window, `b` a backdrop, `-` neither. `task` is the task reading
 the window's IDCMP port — the CLI command name for a Shell program,

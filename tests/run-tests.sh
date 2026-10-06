@@ -73,7 +73,7 @@ check "ls dates are wall time, verbatim" "1" "$out"
 
 # --- round trip, multi-frame ---
 head -c 200000 /dev/urandom > "$ROOT/../wasabi-big.$$"
-$W put "$ROOT/../wasabi-big.$$" L:big >/dev/null 2>&1
+$W put --force "$ROOT/../wasabi-big.$$" L:big >/dev/null 2>&1
 $W get L:big "$ROOT/../wasabi-back.$$" >/dev/null 2>&1
 if cmp -s "$ROOT/../wasabi-big.$$" "$ROOT/../wasabi-back.$$"; then
     ok "200000-byte put/get round trip is byte-identical"
@@ -108,7 +108,7 @@ check "mkdir creates a drawer" "0" "$?"
 [ -d "$ROOT/L/newdrawer" ] && ok "the drawer really exists" \
                            || no "the drawer really exists"
 
-$W del L:big >/dev/null 2>&1
+$W del --force L:big >/dev/null 2>&1
 [ ! -f "$ROOT/L/big" ] && ok "del removes a file" || no "del removes a file"
 
 # --- streams ---
@@ -274,7 +274,7 @@ kill $MOCK2_PID 2>/dev/null; MOCK2_PID=
 
 # --- deploy --restart: upload then reload the daemon in one shot ---
 echo restarter > "$ROOT/../wasabi-restart.$$"
-out=$($W deploy "$ROOT/../wasabi-restart.$$" C:wasabid.new --restart 2>&1 | \
+out=$($W deploy --force "$ROOT/../wasabi-restart.$$" C:wasabid.new --restart 2>&1 | \
       grep -c "reloading itself")
 check "deploy --restart uploads and reloads" "1" "$out"
 rm -f "$ROOT/../wasabi-restart.$$"
@@ -305,7 +305,7 @@ NEWD=$ROOT/../wasabi-newd.$$
 printf 'binary\0$VER: wasabid 9.9test (1.1.2026)\0rest\n' > "$NEWD"
 printf 'old daemon\n' > "$ROOT/C/wasabid"
 
-out=$($W put "$NEWD" C:wasabid 2>&1 | grep -c "wasabi update")
+out=$($W put --force "$NEWD" C:wasabid 2>&1 | grep -c "wasabi update")
 check "put refuses to overwrite the running daemon" "1" "$out"
 check "and leaves it alone" "old daemon" "$(cat "$ROOT/C/wasabid")"
 
@@ -469,8 +469,14 @@ check "key type sends Latin-1 text, Return as CR" "0001e50d" "$out"
 out=$($W key press nosuchkey 2>&1 | grep -c "unknown key")
 check "an unknown key name is refused here" "1" "$out"
 
-out=$($W windows 2>/dev/null | grep -c 'window "AmigaShell"  at 100,100  640x200  task -  \[active\]')
-check "windows lists a window with its place and state" "1" "$out"
+# The mock's screen is 640x256, which grab shows with its rows doubled -
+# so the window list doubles y and height to match the picture.
+out=$($W windows 2>/dev/null | grep -c 'window "AmigaShell"  at 100,200  640x400  task -  \[active\]')
+check "windows lists a window in the picture's pixels" "1" "$out"
+out=$($W windows --raw 2>/dev/null | grep -c "AmigaShell" )
+check "and --raw keeps the daemon's own numbers" "1" "$out"
+out=$($W windows --raw 2>/dev/null | grep "AmigaShell" | cut -f4)
+check "unscaled" "100" "$out"
 out=$($W windows --raw 2>/dev/null | grep -c "^W")
 check "windows --raw passes the daemon's lines through" "2" "$out"
 
@@ -589,6 +595,100 @@ out=$($R info 2>/dev/null | grep -c "^refused: 673")
 check "info always shows the total" "1" "$out"
 kill $REF_PID 2>/dev/null
 rm -f "$XDG_CACHE_HOME/wasabi/refused-127.0.0.1"
+
+# --- step 2: made for scripts - limits, wait, look, JSON, safety ---
+
+# The safety catch: system places need --force, and nothing is sent
+# without it.
+echo "precious" > "$ROOT/C/precious"
+out=$($W del C:precious 2>&1 | grep -c "system place")
+check "del in C: without --force is refused" "1" "$out"
+check "and the file is untouched" "precious" "$(cat "$ROOT/C/precious")"
+out=$($W put LICENSE S:Startup-Sequence 2>&1 | grep -c "system place")
+check "put into S: without --force is refused" "1" "$out"
+[ ! -f "$ROOT/S/Startup-Sequence" ] && ok "and nothing was written" \
+                                     || no "and nothing was written"
+out=$($W put LICENSE Work:x >/dev/null 2>&1; echo $?)
+check "an ordinary place needs no --force" "0" "$out"
+mkdir -p "$XDG_CONFIG_HOME/wasabi"
+echo "protect = Work" > "$XDG_CONFIG_HOME/wasabi/config"
+out=$($W del Work:x 2>&1 | grep -c "system place")
+check "a 'protect =' volume in the config is guarded too" "1" "$out"
+rm -f "$XDG_CONFIG_HOME/wasabi/config"
+out=$($W reboot 2>&1 | grep -c "Pass --yes")
+check "reboot needs --yes" "1" "$out"
+
+# run --max-time: the mock knows no task called 'sleep', so the Ctrl-C
+# cannot land - the limit must still end the wait, with exit 124.
+s0=$(date +%s)
+$W run --max-time 1 "sleep 8" >/dev/null 2>&1
+rc=$?
+check "run --max-time ends a long command with exit 124" "124" "$rc"
+check "and does so on time" "1" "$(( $(date +%s) - s0 < 5 ))"
+
+out=$($W --json run "echo hi")
+check "run --json gives the output and the code" \
+      '{"rc": 0, "output": "hi\n"}' "$out"
+
+# A frozen daemon: stopped, it still has a listening socket, so the
+# connection is taken and then nothing answers. That is exit 125, not
+# "cannot reach" (2) and never a hang.
+kill -STOP $MOCK_PID
+$W --silence 2 ping >/dev/null 2>&1
+rc=$?
+kill -CONT $MOCK_PID
+check "a daemon that takes the connection but never answers is 125" "125" "$rc"
+
+# ...and one that freezes in the middle of a run.
+( sleep 1.5; kill -STOP $MOCK_PID ) &
+WASABI_RUN_CHECK=1 $W --silence 2 run "sleep 20" >/dev/null 2>&1
+rc=$?
+kill -CONT $MOCK_PID
+check "an Amiga that freezes during run is noticed: 125" "125" "$rc"
+sleep 0.5
+
+# wait
+out=$($W wait window amigashell --timeout 3 2>/dev/null | grep -c "appeared")
+check "wait window finds an open window" "1" "$out"
+$W wait window NoSuchWindow --timeout 1 >/dev/null 2>&1
+check "wait gives up with exit 124" "124" "$?"
+$W wait window amigashell --gone --timeout 1 >/dev/null 2>&1
+check "wait --gone on a window that stays open times out" "124" "$?"
+out=$($W wait file C:greet.txt --contains HELLO --timeout 3 2>/dev/null \
+      | grep -c "hello from the amiga")
+check "wait file --contains matches any case and shows the line" "1" "$out"
+( sleep 1; echo "late line" > "$ROOT/T-late.txt" ) &
+$W wait file T-late.txt --timeout 5 >/dev/null 2>&1
+check "wait file sees a file that turns up later" "0" "$?"
+out=$($W --json wait task 'input#?' --timeout 3)
+check "wait task, as JSON" "1" "$(echo "$out" | grep -c '"met": true')"
+$W wait up --timeout 3 >/dev/null 2>&1
+check "wait up returns at once when the Amiga answers" "0" "$?"
+
+# look
+out=$($W look --out "$ROOT/look.png" 2>/dev/null)
+check "look prints the path it wrote" "$ROOT/look.png" "$out"
+[ -s "$ROOT/look.png" ] && ok "and the picture is there" \
+                        || no "and the picture is there"
+out=$($W look --window nosuch 2>&1 | grep -c "no window")
+check "look --window on a missing window says so" "1" "$out"
+
+# JSON
+out=$($W --json ping | python3 -c 'import json,sys; print("key" in json.load(sys.stdin)["caps"])')
+check "ping --json carries the caps" "True" "$out"
+out=$($W --json ls C: | python3 -c 'import json,sys; print(any(e["name"]=="greet.txt" for e in json.load(sys.stdin)))')
+check "ls --json lists the files" "True" "$out"
+
+# Streams that end by themselves
+s0=$(date +%s)
+$W debug --for 1 >/dev/null 2>&1
+rc=$?
+check "debug --for ends by itself with exit 0" "0" "$rc"
+check "and on time" "1" "$(( $(date +%s) - s0 < 4 ))"
+out=$($W snoop --until 'startup-sequence' --for 10 2>/dev/null | grep -c "Startup-Sequence")
+check "snoop --until stops at the line it waited for" "1" "$out"
+$W debug --until 'never said' --for 1 >/dev/null 2>&1
+check "--until that never comes is exit 124" "124" "$?"
 
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")

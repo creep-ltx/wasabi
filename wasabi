@@ -4,16 +4,18 @@
 Talks to wasabid on the Amiga side. See PROTOCOL.md for the wire format.
 
     wasabi run "Version FULL"
-    wasabi put ccon-handler L:ccon-handler
-    wasabi deploy ccon-handler L:ccon-handler --reboot
+    wasabi put ccon-handler L:ccon-handler --force
+    wasabi deploy ccon-handler L:ccon-handler --force --reboot
     wasabi debug
     wasabi snoop --task cfile
 """
 
 import argparse
+import json
 import os
 import random
 import re
+import signal
 import zlib
 import socket
 import struct
@@ -42,6 +44,58 @@ PROT_DEFAULT = 0xFFFFFFFF
 
 class WasabiError(Exception):
     pass
+
+
+# Exit codes, so a script (or Claude) can tell the failures apart
+# without reading the words. 1 = the command failed or the Amiga said
+# no; 2 = the Amiga could not be reached, or the command line was
+# wrong; the two below are borrowed from GNU timeout, high enough never
+# to be mistaken for an AmigaDOS return code (0, 5, 10, 20).
+EXIT_TIME_LIMIT = 124       # a --max-time / --timeout ran out
+EXIT_SILENT = 125           # the Amiga stopped answering
+
+
+class TimeLimit(WasabiError):
+    """A limit the caller set ran out - not a fault."""
+
+
+class AmigaSilent(WasabiError):
+    """Connected, then nothing came back for too long."""
+
+
+# How long any one reply may take before the Amiga counts as not
+# answering. --silence and WASABI_SILENCE override it.
+SILENCE = 15.0
+
+# Volumes and assigns where a wrong delete or overwrite costs a boot.
+# `put`, `deploy` and `del` there need --force. More names (the boot
+# volume's own name, say) go in the config file: protect = AmigaOS,Work
+SYSTEM_PLACES = {"sys", "c", "l", "libs", "devs", "s", "fonts", "locale",
+                 "envarc", "kickstart"}
+
+
+def system_place(path, extra=()):
+    """The volume or assign a path is on, if that is a protected one."""
+    vol, colon, _ = path.partition(":")
+    if not colon:
+        return None                     # relative: wherever the daemon is
+    v = vol.strip().lower()
+    if v in SYSTEM_PLACES or v in extra:
+        return vol + ":"
+    return None
+
+
+def check_system_place(args, path, verb):
+    place = system_place(path, getattr(args, "protect", ()))
+    if place and not getattr(args, "force", False):
+        raise WasabiError(
+            "%s is in %s, a system place - a mistake there can stop the "
+            "Amiga booting. Pass --force to %s it anyway"
+            % (path, place, verb))
+
+
+def emit_json(obj):
+    print(json.dumps(obj, ensure_ascii=False))
 
 
 # --- wire -------------------------------------------------------------
@@ -243,7 +297,9 @@ def dress_errors(text):
 
 
 class Conn:
-    def __init__(self, host, port, key, timeout=15.0):
+    def __init__(self, host, port, key, timeout=None):
+        if timeout is None:
+            timeout = SILENCE
         self.host, self.port = host, port
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -265,7 +321,14 @@ class Conn:
         self.buf = b""
         self.key = key                  # kept so a stream can reconnect
         self.send(HELLO, struct.pack(">H", VERSION) + pack_str(key))
-        tag, payload = self.recv()
+        try:
+            tag, payload = self.recv()
+        except socket.timeout:
+            self.sock.close()
+            raise AmigaSilent(
+                "the Amiga took the connection but its daemon did not "
+                "answer for %d s - frozen, or stuck on something"
+                % timeout)
         if tag == ERR:
             raise WasabiError(self._errtext(payload))
         if tag != WELCOME:
@@ -395,7 +458,12 @@ def cmd_ping(conn, args):
     tag, _ = conn.recv()
     if tag != PONG:
         raise WasabiError("no PONG")
-    print("%s - %.1f ms" % (conn.banner, (time.time() - t0) * 1000))
+    ms = (time.time() - t0) * 1000
+    if args.json:
+        emit_json({"banner": conn.banner, "ms": round(ms, 1),
+                   "caps": sorted(conn.caps)})
+        return
+    print("%s - %.1f ms" % (conn.banner, ms))
 
 
 def cmd_info(conn, args):
@@ -424,6 +492,12 @@ def cmd_ls(conn, args):
         entries.append((kind, int(size), int(bits), amiga_date(
             int(days), int(mins), int(ticks)), name))
     entries.sort(key=lambda e: (e[0] != "d", e[4].lower()))
+    if args.json:
+        emit_json([{"name": name, "dir": kind == "d",
+                    "size": None if kind == "d" else size,
+                    "protection": protstr(bits), "date": when}
+                   for kind, size, bits, when, name in entries])
+        return
     for kind, size, bits, when, name in entries:
         print("%s %8s %s  %s  %s" % (
             "d" if kind == "d" else "-",
@@ -435,6 +509,7 @@ def cmd_ls(conn, args):
 
 
 def cmd_put(conn, args):
+    check_system_place(args, args.remote, "write")
     do_put(conn, args.local, args.remote, quiet=args.quiet)
 
 
@@ -505,10 +580,73 @@ def cmd_get(conn, args):
 
 
 def cmd_run(conn, args):
-    return do_run(conn, args.command, merge=args.merge, detach=args.detach)
+    out = [] if args.json else None
+    try:
+        rc = do_run(conn, args.command, merge=args.merge,
+                    detach=args.detach, sink=out.append if args.json
+                    else None, max_time=args.max_time)
+    except TimeLimit as exc:
+        if args.json:
+            emit_json({"rc": None, "output": "".join(out),
+                       "error": str(exc)})
+        raise
+    if args.json:
+        emit_json({"rc": rc, "output": "".join(out)})
+    return rc
 
 
-def do_run(conn, command, merge=False, detach=False, sink=None):
+# How long `run` lets a command say nothing before it checks, on a
+# second connection, that the daemon is still alive. A quiet command
+# is normal (a compile, a Wait); a quiet *machine* is not.
+RUN_CHECK = float(os.environ.get("WASABI_RUN_CHECK", 10.0))
+
+
+def command_word(command, path=False):
+    """The command's first word: 'C:Wait 5' -> 'Wait', or 'C:Wait' with
+    path=True - which is what the daemon's KILL matches, because a
+    Shell's cli_CommandName is the command as it was typed."""
+    command = command.strip()
+    if command.startswith('"'):
+        word = command[1:].split('"', 1)[0]
+    else:
+        word = command.split(" ", 1)[0]
+    return word if path else re.split(r"[:/]", word)[-1]
+
+
+def still_answering(conn):
+    """Ping the daemon on a side connection. TRUE if it answers."""
+    try:
+        side = Conn(conn.host, conn.port, conn.key, timeout=SILENCE)
+    except (OSError, WasabiError):
+        return False
+    try:
+        side.send(PING)
+        tag, _ = side.recv()
+        return tag == PONG
+    except (OSError, WasabiError):
+        return False
+    finally:
+        side.close()
+
+
+def stop_command(conn, command):
+    """Ctrl-C the running command by name, on a side connection - the
+    main one is busy carrying its output."""
+    try:
+        side = Conn(conn.host, conn.port, conn.key, timeout=SILENCE)
+        try:
+            side.send(KILL, struct.pack(">I", 0) +
+                      pack_str(command_word(command, path=True)))
+            side.expect_ok()
+        finally:
+            side.close()
+        return True
+    except (OSError, WasabiError):
+        return False
+
+
+def do_run(conn, command, merge=False, detach=False, sink=None,
+           max_time=None):
     # The daemon holds a command in a 512-byte buffer and strncpy would
     # truncate silently - running half a command is worse than refusing.
     nbytes = len(command.encode("latin-1", "replace"))
@@ -520,20 +658,56 @@ def do_run(conn, command, merge=False, detach=False, sink=None):
     conn.send(RUN, struct.pack(">I", flags) + pack_str(command))
     # A command may legitimately think for a long time before it says
     # anything - a compile, or just loading a 760 KB binary off disk -
-    # so the connect timeout must not apply to waiting on its output.
-    # A daemon that dies mid-run closes the socket, which reads as EOF
-    # rather than a hang, so there is nothing left for a timer to save.
+    # so silence alone proves nothing. Every RUN_CHECK seconds of it,
+    # a side connection pings the daemon: an answer means the command
+    # is merely quiet, no answer means the Amiga has stopped. Without
+    # this a frozen machine held `run` forever: no FIN ever comes, and
+    # keepalive only proves the network stack is alive.
     old_timeout = conn.sock.gettimeout()
-    conn.sock.settimeout(None)
+    deadline = time.time() + max_time if max_time else None
     try:
-        return _run_loop(conn, sink)
+        return _run_loop(conn, sink, command, deadline, max_time)
     finally:
         conn.sock.settimeout(old_timeout)
 
 
-def _run_loop(conn, sink):
+def _run_loop(conn, sink, command, deadline, max_time):
+    stopping = None                     # when the Ctrl-C went out
     while True:
-        tag, payload = conn.recv()
+        wait = RUN_CHECK
+        if deadline is not None:
+            wait = max(0.05, min(wait, deadline - time.time()))
+        conn.sock.settimeout(wait)
+        try:
+            tag, payload = conn.recv()
+        except socket.timeout:
+            now = time.time()
+            if deadline is not None and now >= deadline:
+                if stopping is None:
+                    # Time is up: Ctrl-C it, then give it a grace period
+                    # to wind down and report its exit like any other.
+                    sent = stop_command(conn, command)
+                    stopping = now
+                    deadline = now + 10.0
+                    if not sent:
+                        raise TimeLimit(
+                            "%s is still running after %g s, and the "
+                            "Ctrl-C could not be sent - it keeps running "
+                            "on the Amiga" % (command_word(command),
+                                              max_time))
+                    continue
+                raise TimeLimit(
+                    "%s is still running after %g s and ignored Ctrl-C - "
+                    "it keeps running on the Amiga, and the next 'run' "
+                    "waits until it ends. 'wasabi kill --force %s' "
+                    "removes it" % (command_word(command), max_time,
+                                    command_word(command)))
+            if not still_answering(conn):
+                raise AmigaSilent(
+                    "the Amiga stopped answering while %s was running "
+                    "(nothing for %d s, and a ping got no reply)"
+                    % (command_word(command), RUN_CHECK + SILENCE))
+            continue
         if tag == STDOUT:
             if sink is not None:
                 sink(payload.decode("latin-1"))
@@ -548,6 +722,10 @@ def _run_loop(conn, sink):
                 sys.stderr.flush()
         elif tag == EXIT:
             rc, secondary = struct.unpack(">II", payload)
+            if stopping is not None:
+                raise TimeLimit("%s ran past %g s and was stopped with "
+                                "Ctrl-C (it returned %d)"
+                                % (command_word(command), max_time, rc))
             return rc
         elif tag == ERR:
             raise WasabiError(conn._errtext(payload))
@@ -713,6 +891,7 @@ def cmd_quit(conn, args):
 
 
 def cmd_deploy(conn, args):
+    check_system_place(args, args.remote, "write")
     do_put(conn, args.local, args.remote, quiet=False)
     rc = 0
     if args.run:
@@ -724,6 +903,13 @@ def cmd_deploy(conn, args):
         do_restart(conn)
         print("the daemon is reloading itself", file=sys.stderr)
     return rc
+
+
+class StreamStop(Exception):
+    """--for ran out, or --until saw its text: end the stream cleanly."""
+    def __init__(self, code, why):
+        Exception.__init__(self, why)
+        self.code, self.why = code, why
 
 
 def cmd_stream(conn, args):
@@ -781,6 +967,7 @@ def cmd_stream(conn, args):
     subscribe(conn)
 
     logf = open(args.log, "a") if args.log else None
+    until = (getattr(args, "until", None) or "").lower()
     names = {0: "debug", 1: "snoop"}
     partial = {}
     mode = getattr(args, "output", "normal")
@@ -840,6 +1027,7 @@ def cmd_stream(conn, args):
                                          # not poll noise
             if hide_self and out.strip() and WASABI_SELF_RE.search(out):
                 continue
+            hit = until and until in out.lower()
             if mode != "full":
                 if out == last_line.get(stream):
                     repeats[stream] = repeats.get(stream, 0) + 1
@@ -847,6 +1035,8 @@ def cmd_stream(conn, args):
                 flush_repeats(stream)
                 last_line[stream] = out
             write_line(stream, out, to_stdout=not raw)
+            if hit:
+                raise StreamStop(0, "'%s' seen" % args.until)
         sys.stdout.flush()
         if logf:
             logf.flush()
@@ -928,6 +1118,18 @@ def cmd_stream(conn, args):
         opts += ", identical repeats folded"
     if getattr(args, "once", False):
         opts += ", --once"
+    if until:
+        opts += ", until '%s'" % args.until
+    limit = getattr(args, "for_", None)
+    if limit:
+        opts += ", for %g s" % limit
+
+        def time_up(signum, frame):
+            raise StreamStop(EXIT_TIME_LIMIT if until else 0,
+                             "%g s are up%s" % (limit, ", '%s' never seen"
+                                               % args.until if until else ""))
+        signal.signal(signal.SIGALRM, time_up)
+        signal.setitimer(signal.ITIMER_REAL, limit)
     status("%s stream open to %s:%d (%s)%s - Ctrl-C to stop"
            % (label, host, port, conn.banner, opts))
     try:
@@ -957,6 +1159,14 @@ def cmd_stream(conn, args):
                     time.sleep(2.0)
             status("%s: reconnected after %d s - %s"
                    % (label, int(time.time() - gone), conn.banner))
+    except StreamStop as stop:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        for stream in sorted(partial):
+            if partial[stream]:
+                write_line(stream, partial.pop(stream))
+        flush_repeats()
+        status("%s stream closed: %s" % (label, stop.why))
+        return stop.code
     except KeyboardInterrupt:
         for stream in sorted(partial):
             if partial[stream]:
@@ -964,6 +1174,7 @@ def cmd_stream(conn, args):
         print(file=sys.stderr)           # step past the ^C on the tty
         status("%s stream closed" % label)
     finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
         conn.close()
         if logf:
             logf.close()
@@ -1155,13 +1366,16 @@ def rgb_diff(a, b, w, h):
     return changed, (x0, y0, x1, y1) if changed else None
 
 
-def cmd_grab(conn, args):
+def grab_pixels(conn, screen="", raw=False):
+    """Grab a screen: (width, daemon height, picture height, RGB bytes,
+    bytes on the wire, seconds). The picture height has the rows
+    doubled for native non-interlaced modes unless raw."""
     if conn.caps and "grab" not in conn.caps:
         raise WasabiError(
             "this daemon (%s) cannot grab the screen - update it with "
             "'wasabi update wasabid'" % conn.banner)
     t0 = time.time()
-    conn.send(GRAB, pack_str(args.screen or ""))
+    conn.send(GRAB, pack_str(screen or ""))
     blob = []
     drain_to_end(conn, blob.append)
     data = b"".join(blob)
@@ -1186,14 +1400,27 @@ def cmd_grab(conn, args):
     # ever 2:1 or wider, so an RTG screen is never touched. --raw keeps
     # the pixels exactly as the daemon read them.
     out_h = h
-    if not args.raw:
+    if not raw:
         rowbytes = w * 3
         while out_h and w >= 2 * out_h:
             pixels = b"".join(
                 pixels[y * rowbytes:(y + 1) * rowbytes] * 2
                 for y in range(out_h))
             out_h *= 2
+    return w, h, out_h, pixels, want, grabbed
 
+
+def crop_rgb(pixels, w, box):
+    """Cut (x0, y0, x1, y1), exclusive ends, out of RGB rows w wide."""
+    x0, y0, x1, y1 = box
+    rowbytes = w * 3
+    return b"".join(pixels[y * rowbytes + x0 * 3:y * rowbytes + x1 * 3]
+                    for y in range(y0, y1))
+
+
+def cmd_grab(conn, args):
+    w, h, out_h, pixels, want, grabbed = grab_pixels(
+        conn, args.screen, args.raw)
     size = write_png(args.file, w, out_h, pixels)
     scaled = " (rows doubled to %dx%d)" % (w, out_h) if out_h != h else ""
     print("%dx%d%s -> %s (%d KB, %.1f MB raw in %.1f s)"
@@ -1220,6 +1447,216 @@ def cmd_grab(conn, args):
               % (args.diff, changed, total, 100.0 * changed / total,
                  box[0], box[1], box[2], box[3]), file=sys.stderr)
         return 1
+
+
+LOOK_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "wasabi-look")
+
+
+def cmd_look(conn, args):
+    """Grab the front screen to a file and print where it went - the
+    one-step "let me see" for a person or a program that reads images.
+    --window crops to one window, found by its title."""
+    box = None
+    label = "screen"
+    if args.window is not None:
+        screens, _ = list_windows(conn)
+        sc, win = find_window(screens, args.window)
+        if not win:
+            raise WasabiError("no window with '%s' in its title - "
+                              "'wasabi windows' lists them" % args.window)
+        if not sc["front"]:
+            raise WasabiError(
+                "'%s' is on the screen \"%s\", which is not in front - "
+                "bring it with: wasabi screen --to-front \"%s\""
+                % (win["title"], sc["title"], sc["title"]))
+        box = (win["left"], win["top"], win["left"] + win["width"],
+               win["top"] + win["height"])
+        label = 'window "%s"' % win["title"]
+    w, h, out_h, pixels, _, _ = grab_pixels(conn)
+    if box:
+        x0, y0 = max(0, box[0]), max(0, box[1])
+        x1, y1 = min(w, box[2]), min(out_h, box[3])
+        if x1 <= x0 or y1 <= y0:
+            raise WasabiError("%s is off the screen" % label)
+        pixels = crop_rgb(pixels, w, (x0, y0, x1, y1))
+        w, out_h = x1 - x0, y1 - y0
+    path = args.out
+    if not path:
+        os.makedirs(LOOK_DIR, exist_ok=True)
+        path = os.path.join(LOOK_DIR, "look-%s-%03d.png" % (
+            time.strftime("%Y%m%d-%H%M%S"), int(time.time() % 1 * 1000)))
+    write_png(path, w, out_h, pixels)
+    if args.json:
+        emit_json({"path": path, "width": w, "height": out_h,
+                   "what": label})
+    else:
+        print(path)
+
+
+def fetch(conn, path):
+    """A file's bytes, or None if the Amiga says it is not there."""
+    conn.send(GET, pack_str(path))
+    out = []
+    try:
+        drain_to_end(conn, out.append)
+    except WasabiError:
+        return None
+    return b"".join(out)
+
+
+def window_box(conn, title):
+    """(x0, y0, x1, y1) of a window on the front screen, for comparing
+    just that part of a grab."""
+    screens, _ = list_windows(conn)
+    sc, win = find_window(screens, title)
+    if not win:
+        raise WasabiError("no window with '%s' in its title" % title)
+    if not sc["front"]:
+        raise WasabiError("'%s' is not on the front screen" % win["title"])
+    return (win["left"], win["top"], win["left"] + win["width"],
+            win["top"] + win["height"])
+
+
+def screen_now(conn, box):
+    w, _, h, pixels, _, _ = grab_pixels(conn)
+    if box:
+        x0, y0 = max(0, box[0]), max(0, box[1])
+        x1, y1 = min(w, box[2]), min(h, box[3])
+        pixels = crop_rgb(pixels, w, (x0, y0, x1, y1))
+    return zlib.crc32(pixels), len(pixels)
+
+
+def cmd_wait(conn, args):
+    """Wait for something to happen on the Amiga, instead of guessing
+    with pauses. Exit 0 when it happens, 124 when --timeout runs out.
+
+    The thing is checked every --every seconds over one connection;
+    each check is one small command (a window list, a task list, a
+    file read) or, for the screen, one grab.
+    """
+    what, target = args.what, args.target
+    if what in ("window", "task", "file") and not target:
+        raise WasabiError("wait %s needs a name: wasabi wait %s NAME"
+                          % (what, what))
+    t0 = time.time()
+    deadline = t0 + args.timeout
+    box = window_box(conn, target) if what in ("change", "still") \
+        and target else None
+    first = screen_now(conn, box) if what in ("change", "still") else None
+    last_change = time.time()
+    detail = ""
+
+    while True:
+        met = False
+        if what == "window":
+            screens, _ = list_windows(conn)
+            sc, win = find_window(screens, target)
+            met = (win is None) if args.gone else (win is not None)
+            if win and not args.gone:
+                detail = '"%s" at %d,%d %dx%d' % (
+                    win["title"], win["left"], win["top"], win["width"],
+                    win["height"])
+        elif what == "task":
+            rows, _ = ps_rows(conn, target)
+            met = (not rows) if args.gone else bool(rows)
+            if rows and not args.gone:
+                detail = rows[0][7] + (" (%s)" % rows[0][8]
+                                       if rows[0][8] else "")
+        elif what == "file":
+            data = fetch(conn, target)
+            if args.gone:
+                met = data is None
+            elif data is not None:
+                if args.contains is None:
+                    met = True
+                else:
+                    text = data.decode("latin-1")
+                    met = args.contains.lower() in text.lower()
+                    if met:
+                        detail = next(
+                            (ln for ln in text.splitlines()
+                             if args.contains.lower() in ln.lower()), "")
+        elif what == "change":
+            met = screen_now(conn, box) != first
+        elif what == "still":
+            now_shot = screen_now(conn, box)
+            if now_shot != first:
+                first, last_change = now_shot, time.time()
+            met = time.time() - last_change >= args.quiet
+        took = time.time() - t0
+        if met:
+            if args.json:
+                emit_json({"met": True, "seconds": round(took, 2),
+                           "detail": detail})
+            else:
+                print("%s after %.1f s%s"
+                      % (wait_words(args), took,
+                         (": " + detail) if detail else ""))
+            return 0
+        if time.time() >= deadline:
+            if args.json:
+                emit_json({"met": False, "seconds": round(took, 2)})
+            raise TimeLimit("%s within %g s"
+                            % (wait_words(args, done=False), args.timeout))
+        time.sleep(min(args.every, max(0.0, deadline - time.time())))
+
+
+def wait_words(args, done=True):
+    """What was waited for, in words: 'window "Prefs" appeared'."""
+    t = args.target
+    if args.what == "window":
+        thing = 'a window titled "%s"' % t
+        verb = "closed" if args.gone else "appeared"
+    elif args.what == "task":
+        thing = "task %s" % t
+        verb = "ended" if args.gone else "is running"
+    elif args.what == "file":
+        thing = t
+        verb = ("vanished" if args.gone else
+                "contains '%s'" % args.contains if args.contains is not None
+                else "appeared")
+    elif args.what == "change":
+        thing, verb = ('window "%s"' % t if t else "the screen"), "changed"
+    else:
+        thing = 'window "%s"' % t if t else "the screen"
+        verb = "settled (still for %g s)" % args.quiet
+    if not done:
+        verb = {"appeared": "appear", "closed": "close", "ended": "end",
+                "is running": "start", "vanished": "vanish",
+                "changed": "change"}.get(verb, verb)
+        if verb.startswith("contains"):
+            verb = "come to contain" + verb[len("contains"):]
+        elif verb.startswith("settled"):
+            verb = "settle" + verb[len("settled"):]
+        return "%s did not %s" % (thing, verb)
+    return "%s %s" % (thing, verb)
+
+
+def cmd_wait_up(args):
+    """Wait until the Amiga answers - after a reboot, or a power-on.
+    Needs no connection to start with, so it is not run through the
+    usual connect-first path."""
+    t0 = time.time()
+    deadline = t0 + args.timeout
+    host, port = resolve_target(args)
+    while True:
+        try:
+            c = Conn(host, port, args.key, timeout=min(5.0, SILENCE))
+            banner = c.banner
+            c.close()
+            took = time.time() - t0
+            if args.json:
+                emit_json({"met": True, "seconds": round(took, 2),
+                           "detail": banner})
+            else:
+                print("the Amiga answers after %.1f s: %s" % (took, banner))
+            return 0
+        except (OSError, WasabiError):
+            pass
+        if time.time() >= deadline:
+            raise TimeLimit("the Amiga did not answer within %g s"
+                            % args.timeout)
+        time.sleep(1.0)
 
 
 def cmd_mouse(conn, args):
@@ -1339,13 +1776,22 @@ def cmd_key(conn, args):
     conn.expect_ok()
 
 
-def cmd_windows(conn, args):
-    """Every screen and its windows, front first.
+def row_scale(w, h):
+    """How many times `grab` doubles a screen's rows - the rule lives
+    here so the window list and look crop agree with the picture. 1 for
+    every square-pixel (RTG) mode; 2 for 640x256; 4 for 1280x256."""
+    k = 1
+    while h and w >= 2 * h * k:
+        k *= 2
+    return k
 
-    Positions are relative to the screen - the same pixels `grab`
-    shows and `mouse` clicks - so a window's close gadget is at its
-    top-left corner plus a few pixels, from facts rather than guesses.
-    """
+
+def list_windows(conn):
+    """Every screen, front first, each with its windows, front first.
+
+    Window y and height are in the picture's space - multiplied by the
+    screen's row_scale - so they match `grab`, `look` and `mouse`.
+    `raw` keeps the daemon's own lines."""
     if conn.caps and "windows" not in conn.caps:
         raise WasabiError(
             "this daemon (%s) cannot list windows - update it with "
@@ -1353,22 +1799,67 @@ def cmd_windows(conn, args):
     conn.send(WINDOWS)
     text = []
     drain_to_end(conn, text.append)
+    screens, raw = [], []
     for line in b"".join(text).decode("latin-1").splitlines():
+        raw.append(line)
         f = line.split("\t")
-        if args.raw:
-            print(line)
-        elif f[0] == "S" and len(f) >= 8:
-            print('screen "%s"  %sx%s, %s bit%s'
-                  % (f[7], f[4], f[5], f[6],
-                     "" if f[3] == "0" else ", pulled down to y=%s" % f[3]))
-        elif f[0] == "W" and len(f) >= 13:
-            flags = []
-            if "a" in f[10]:
-                flags.append("active")
-            if "b" in f[10]:
-                flags.append("backdrop")
-            print('  window "%s"  at %s,%s  %sx%s  task %s%s'
-                  % (f[12], f[2], f[3], f[4], f[5], f[11],
+        if f[0] == "S" and len(f) >= 8:
+            w, h = int(f[4]), int(f[5])
+            k = row_scale(w, h)
+            screens.append({"addr": f[1], "title": f[7], "left": int(f[2]),
+                            "top": int(f[3]), "width": w, "height": h,
+                            "depth": int(f[6]), "row_scale": k,
+                            "front": not screens, "windows": []})
+        elif f[0] == "W" and len(f) >= 13 and screens:
+            k = screens[-1]["row_scale"]
+            screens[-1]["windows"].append({
+                "addr": f[1], "title": f[12], "task": f[11],
+                "left": int(f[2]), "top": int(f[3]) * k,
+                "width": int(f[4]), "height": int(f[5]) * k,
+                "border": [int(f[6]), int(f[7]) * k, int(f[8]),
+                           int(f[9]) * k],
+                "active": "a" in f[10], "backdrop": "b" in f[10]})
+    return screens, raw
+
+
+def find_window(screens, title):
+    """The frontmost window whose title contains TITLE (any case), and
+    its screen; (None, None) when there is none."""
+    t = title.lower()
+    for sc in screens:
+        for win in sc["windows"]:
+            if t in win["title"].lower():
+                return sc, win
+    return None, None
+
+
+def cmd_windows(conn, args):
+    """Every screen and its windows, front first.
+
+    Positions are relative to the screen and in the picture's pixels -
+    the same `grab` shows and `mouse` clicks - so a window's close gadget
+    is at its top-left corner plus a few pixels, from facts rather than
+    guesses.
+    """
+    screens, raw = list_windows(conn)
+    if args.raw:
+        print("\n".join(raw))
+        return
+    if args.json:
+        emit_json(screens)
+        return
+    for sc in screens:
+        print('screen "%s"  %dx%d, %d bit%s%s'
+              % (sc["title"], sc["width"], sc["height"], sc["depth"],
+                 "" if not sc["top"] else
+                 ", pulled down to y=%d" % sc["top"],
+                 "" if sc["row_scale"] == 1 else
+                 ", rows x%d as in grab" % sc["row_scale"]))
+        for win in sc["windows"]:
+            flags = [n for n in ("active", "backdrop") if win[n]]
+            print('  window "%s"  at %d,%d  %dx%d  task %s%s'
+                  % (win["title"], win["left"], win["top"], win["width"],
+                     win["height"], win["task"],
                      "  [%s]" % ", ".join(flags) if flags else ""))
 
 
@@ -1391,6 +1882,11 @@ def cmd_screen(conn, args):
         parts = line.split(" ", 4)
         if len(parts) >= 4:
             rows.append(parts + [""] * (5 - len(parts)))
+    if args.json:
+        emit_json([{"addr": a, "width": int(w), "height": int(h),
+                    "depth": int(d), "title": t, "front": i == 0}
+                   for i, (a, w, h, d, t) in enumerate(rows)])
+        return
     print("%-10s %-11s %5s  %s" % ("ADDR", "SIZE", "DEPTH", "TITLE"))
     for i, (addr, w, h, d, title) in enumerate(rows):
         print("%-10s %-11s %5s  %s%s"
@@ -1425,7 +1921,9 @@ def stack_tight(free, cap):
     return free * 100 < cap * STACK_TIGHT_PCT or free < STACK_TIGHT_ABS
 
 
-def cmd_ps(conn, args):
+def ps_rows(conn, pattern=None):
+    """The task list as tuples: (addr, kind, pri, state, stack, free,
+    cli, name, cmd), sorted processes-first by CLI number then name."""
     # Ask for headroom only when the daemon says it understands the
     # flags word. A daemon that predates it ignores the payload and
     # sends the seven-field line, which is what we would then parse; a
@@ -1435,7 +1933,7 @@ def cmd_ps(conn, args):
     conn.send(PS, struct.pack(">I", PSF_FREE if want_free else 0))
     text = []
     drain_to_end(conn, lambda b: text.append(b))
-    rx = amiga_pattern(args.pattern) if args.pattern else None
+    rx = amiga_pattern(pattern) if pattern else None
     nfield = 8 if want_free else 7
     rows = []
     for line in b"".join(text).decode("latin-1").splitlines():
@@ -1454,6 +1952,18 @@ def cmd_ps(conn, args):
                      int(cli), name, cmd))
     rows.sort(key=lambda r: (r[1] != "p", r[6] if r[6] >= 0 else 999,
                              r[7].lower()))
+    return rows, want_free
+
+
+def cmd_ps(conn, args):
+    rows, want_free = ps_rows(conn, args.pattern)
+    if args.json:
+        emit_json([{"addr": r[0], "kind": "process" if r[1] == "p"
+                    else "task", "pri": r[2], "state": r[3],
+                    "stack": r[4], "free": r[5] if r[5] >= 0 else None,
+                    "cli": r[6] if r[6] >= 0 else None, "name": r[7],
+                    "command": r[8]} for r in rows])
+        return
 
     head = "%-10s %-4s %4s %-6s %7s" % ("ADDR", "KIND", "PRI", "STATE",
                                         "STACK")
@@ -1506,7 +2016,20 @@ def do_reboot(conn, cold=False):
 
 
 def cmd_reboot(conn, args):
+    if not args.yes:
+        raise WasabiError(
+            "this reboots the Amiga - whatever is open there is lost. "
+            "Pass --yes if you mean it")
     do_reboot(conn, cold=args.cold)
+    if args.wait:
+        conn.close()
+        print("rebooting - waiting for the Amiga to answer again...",
+              file=sys.stderr)
+        # Give it time to actually go down first, or the old daemon
+        # answers the first probe and "it is back" means nothing.
+        time.sleep(5.0)
+        args.timeout = args.wait
+        return cmd_wait_up(args)
     print("reboot sent", file=sys.stderr)
 
 
@@ -1526,6 +2049,7 @@ def cmd_restart(conn, args):
 
 
 def cmd_del(conn, args):
+    check_system_place(args, args.path, "delete")
     conn.send(DEL, pack_str(args.path))
     conn.expect_ok()
 
@@ -1776,6 +2300,7 @@ def load_config():
 
 
 def main(argv=None):
+    global SILENCE
     cfg = load_config()
     p = argparse.ArgumentParser(
         prog="wasabi", description="Drive a real Amiga over the network.")
@@ -1786,6 +2311,15 @@ def main(argv=None):
         "WASABI_PORT", cfg.get("port", 1234))))
     p.add_argument("--key", default=os.environ.get(
         "WASABI_KEY", cfg.get("key", "")))
+    p.add_argument("--silence", type=float, metavar="SECONDS",
+                   default=float(os.environ.get(
+                       "WASABI_SILENCE", cfg.get("silence", SILENCE))),
+                   help="give up when the Amiga has not answered for this "
+                        "long (default %d s); exit code %d"
+                        % (SILENCE, EXIT_SILENT))
+    p.add_argument("--json", action="store_true",
+                   help="print results as JSON (ls, ps, screen, windows, "
+                        "ping, run, wait, look)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("discover", help="find Amigas on this network"
@@ -1803,6 +2337,10 @@ def main(argv=None):
     s.add_argument("local")
     s.add_argument("remote")
     s.add_argument("-q", "--quiet", action="store_true")
+    s.add_argument("--force", action="store_true",
+                   help="allow it in a system place (SYS: C: L: LIBS: DEVS: "
+                        "S: FONTS: LOCALE: ENVARC:, and any 'protect =' "
+                        "volumes in the config)")
     s.set_defaults(fn=cmd_put)
 
     s = sub.add_parser("get", help="download a file ('-' for stdout)")
@@ -1818,6 +2356,9 @@ def main(argv=None):
     s.add_argument("--detach", action="store_true",
                    help="do not wait (wasabid ignores this for now - "
                         "use: wasabi run \"Run CMD\" instead)")
+    s.add_argument("--max-time", type=float, metavar="SECONDS",
+                   help="stop the command with Ctrl-C if it runs longer; "
+                        "exit code %d" % EXIT_TIME_LIMIT)
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("deploy",
@@ -1830,6 +2371,8 @@ def main(argv=None):
     g.add_argument("--restart", action="store_true",
                    help="reload the daemon afterwards")
     s.add_argument("--cold", action="store_true")
+    s.add_argument("--force", action="store_true",
+                   help="allow uploading into a system place (L:, C:, ...)")
     s.set_defaults(fn=cmd_deploy)
 
     s = sub.add_parser("update",
@@ -1876,6 +2419,12 @@ def main(argv=None):
     s.add_argument("--once", action="store_true",
                    help="stop when the connection drops instead of "
                         "reconnecting forever")
+    s.add_argument("--for", dest="for_", type=float, metavar="SECONDS",
+                   help="stop after this long (exit 0; with --until, "
+                        "exit %d if the text never came)" % EXIT_TIME_LIMIT)
+    s.add_argument("--until", metavar="TEXT",
+                   help="stop as soon as a line contains TEXT "
+                        "(any case) - wait for a program to say something")
     s.set_defaults(fn=cmd_stream, mode="debug")
 
     s = sub.add_parser("snoop", help="live DOS call trace")
@@ -1898,6 +2447,12 @@ def main(argv=None):
     s.add_argument("--once", action="store_true",
                    help="stop when the connection drops instead of "
                         "reconnecting forever")
+    s.add_argument("--for", dest="for_", type=float, metavar="SECONDS",
+                   help="stop after this long (exit 0; with --until, "
+                        "exit %d if the text never came)" % EXIT_TIME_LIMIT)
+    s.add_argument("--until", metavar="TEXT",
+                   help="stop as soon as a line contains TEXT "
+                        "(any case) - wait for a program to say something")
     s.set_defaults(fn=cmd_stream, mode="snoop")
 
     s = sub.add_parser("speedtest",
@@ -1945,6 +2500,39 @@ def main(argv=None):
                    help="press Return after the text")
     s.set_defaults(fn=cmd_key)
 
+    s = sub.add_parser("wait", help="wait for a window, task, file, "
+                       "screen change - or for the Amiga to come back")
+    s.add_argument("what", choices=["window", "task", "file", "change",
+                                    "still", "up"],
+                   help="window TITLE: a window whose title contains it; "
+                        "task NAME: a task (AmigaDOS pattern); file PATH; "
+                        "change [TITLE]: the screen (or a window) changes; "
+                        "still [TITLE]: it stops changing; up: the Amiga "
+                        "answers again (after a reboot)")
+    s.add_argument("target", nargs="?", default=None)
+    s.add_argument("--gone", action="store_true",
+                   help="wait for the window, task or file to go away")
+    s.add_argument("--contains", metavar="TEXT",
+                   help="file: wait until it contains TEXT (any case)")
+    s.add_argument("--timeout", type=float, default=30.0, metavar="SECONDS",
+                   help="give up after this long (default 30); exit code "
+                        "%d" % EXIT_TIME_LIMIT)
+    s.add_argument("--every", type=float, default=0.5, metavar="SECONDS",
+                   help="how often to look (default 0.5)")
+    s.add_argument("--quiet", type=float, default=1.0, metavar="SECONDS",
+                   help="still: how long nothing may change (default 1)")
+    s.set_defaults(fn=cmd_wait)
+
+    s = sub.add_parser("look", help="grab the front screen (or one "
+                       "window) to a PNG and print its path")
+    s.add_argument("--window", metavar="TITLE",
+                   help="crop to the frontmost window whose title "
+                        "contains TITLE (any case)")
+    s.add_argument("--out", metavar="FILE",
+                   help="where to write it (default: a new file in %s)"
+                        % LOOK_DIR)
+    s.set_defaults(fn=cmd_look)
+
     s = sub.add_parser("windows", help="list every screen and window")
     s.add_argument("--raw", action="store_true",
                    help="the daemon's tab-separated lines, for scripts")
@@ -1974,6 +2562,12 @@ def main(argv=None):
     s.add_argument("--cold", action="store_true",
                    help="accepted for the wire's sake; every reboot is "
                         "currently cold (ColdReboot is all exec offers)")
+    s.add_argument("--yes", action="store_true",
+                   help="really reboot (required)")
+    s.add_argument("--wait", type=float, nargs="?", const=120.0,
+                   metavar="SECONDS",
+                   help="then wait until the Amiga answers again "
+                        "(default up to 120 s)")
     s.set_defaults(fn=cmd_reboot)
 
     s = sub.add_parser("restart", help="reload the daemon in place (self-update)")
@@ -1984,6 +2578,10 @@ def main(argv=None):
 
     s = sub.add_parser("del", help="delete a file")
     s.add_argument("path")
+    s.add_argument("--force", action="store_true",
+                   help="allow it in a system place (SYS: C: L: LIBS: DEVS: "
+                        "S: FONTS: LOCALE: ENVARC:, and any 'protect =' "
+                        "volumes in the config)")
     s.set_defaults(fn=cmd_del)
 
     s = sub.add_parser("mkdir", help="create a drawer")
@@ -1991,10 +2589,22 @@ def main(argv=None):
     s.set_defaults(fn=cmd_mkdir)
 
     args = p.parse_args(argv)
+    SILENCE = max(1.0, args.silence)
+    args.protect = {v.strip().rstrip(":").lower()
+                    for v in cfg.get("protect", "").split(",") if v.strip()}
 
     # NB: 'local' is a positional in put/get - do not reuse that name here.
+    if args.cmd == "wait" and args.what == "up":
+        args.fn, args.no_conn = cmd_wait_up, True
     if getattr(args, "no_conn", False):
-        return args.fn(args) or 0
+        try:
+            return args.fn(args) or 0
+        except TimeLimit as exc:
+            print("wasabi: %s" % exc, file=sys.stderr)
+            return EXIT_TIME_LIMIT
+        except WasabiError as exc:
+            print("wasabi: %s" % exc, file=sys.stderr)
+            return 1
 
     # Which wire capability each subcommand needs, where a daemon might
     # plausibly be too old to have it. Everything not listed here has
@@ -2004,7 +2614,10 @@ def main(argv=None):
              "quit": "quit", "update": "install",
              "grab": "grab", "screen": "screen",
              "mouse": "mouse", "key": "key",
-             "windows": "windows"}.get(args.cmd)
+             "windows": "windows", "look": "grab"}.get(args.cmd)
+    if args.cmd == "wait":
+        needs = {"window": "windows", "change": "grab",
+                 "still": "grab"}.get(args.what)
 
     try:
         host, port = resolve_target(args)
@@ -2013,6 +2626,9 @@ def main(argv=None):
         return 2
     try:
         conn = Conn(host, port, args.key)
+    except AmigaSilent as exc:
+        print("wasabi: %s" % exc, file=sys.stderr)
+        return EXIT_SILENT
     except (OSError, WasabiError) as exc:
         print("wasabi: cannot reach %s:%d - %s" % (host, port, exc),
               file=sys.stderr)
@@ -2029,11 +2645,24 @@ def main(argv=None):
         return 2
     try:
         return args.fn(conn, args) or 0
+    except TimeLimit as exc:
+        print("wasabi: %s" % exc, file=sys.stderr)
+        return EXIT_TIME_LIMIT
+    except AmigaSilent as exc:
+        print("wasabi: %s" % exc, file=sys.stderr)
+        return EXIT_SILENT
     except WasabiError as exc:
         print("wasabi: %s" % exc, file=sys.stderr)
         return 1
     except BrokenPipeError:
         return 1
+    except socket.timeout:
+        # Connected, asked, and nothing came back: a frozen machine, or
+        # a daemon stuck on something. Say so plainly - a script must
+        # never sit here, and neither should a person.
+        print("wasabi: the Amiga stopped answering (nothing for %d s)"
+              % SILENCE, file=sys.stderr)
+        return EXIT_SILENT
     except OSError as exc:
         print("wasabi: the connection failed - %s" % exc, file=sys.stderr)
         return 2
