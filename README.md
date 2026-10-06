@@ -69,6 +69,7 @@ pulling in its libraries — captured live off the A1200.
 | `ps` / `kill` | **working on the real A1200** — full task list with stack headroom; Ctrl-C or RemTask |
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
 | `grab` / `screen` | **working on the real A1200** — front screen to PNG in 0.1 s; RTG and native paths both |
+| `view` | **working on the real A1200** (tested in a headless Firefox: picture, clicks, typing, Right Amiga shortcuts, right-button menus, settings) — the live screen in a window, driven with the PC's mouse and keyboard |
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
@@ -167,6 +168,9 @@ wasabi grab [FILE] [--window TITLE] [--diff BASE.png]
                              prints its path (no FILE: a new file each
                              time); --diff reports what changed, exits 1
 wasabi screen [--cycle|--to-front T]    list screens, flip between them
+wasabi view [--kiosk] [--no-browser]
+                             the Amiga's screen in a window: your mouse
+                             and keyboard drive it
 wasabi health [--watch [S]]  the Pi's temperature, voltage and power
                              history, Emu68's CPU meter, free memory
 wasabi windows [--raw]       every screen and window: place, size, task
@@ -999,6 +1003,46 @@ JSON instead of a table. Errors always go to stderr as one line.
 A1200, since `SYS:` is just another name for it). `reboot` needs `--yes`,
 as `quit` always has; `kill --force` (RemTask) was already explicit. A
 `run` is not checked — `wasabi run "Delete C:#?"` does what it says.
+
+## The view
+
+`wasabi view` opens the Amiga's screen in a window on the PC, live, and
+your mouse and keyboard work the Amiga - like a VNC viewer. Click the
+picture to give it the keyboard. Close the window and `wasabi view`
+ends too (`--stay` keeps it serving).
+
+**Keys go by position.** The PC sends *which key* was pressed, and the
+Amiga's own keymap decides the character - so with a Swedish keymap on
+the Amiga, the key right of L types ö, exactly as at its real keyboard.
+The PC has no Amiga keys, so **Settings** (top right) chooses which PC
+key plays Left Amiga, Right Amiga, Ctrl, Left Alt and Right Alt: any of
+Left/Right Ctrl, Left/Right Alt, Left/Right Super (Windows key) or the
+Menu key. A PC key plays one Amiga key at a time; giving it to another
+takes it from the first. The defaults: Right Ctrl → Right Amiga (the
+menu-shortcut key), Menu key → Left Amiga, Left Ctrl → Ctrl, and the
+Alts as themselves (Right Alt is AltGr, which the Amiga's keymap needs
+for @ { [ and the rest). Insert plays Help. Settings are kept in
+`~/.config/wasabi/view.json`, so every browser shares them.
+
+Things a browser keeps for itself: the desktop may take the Super keys
+before the page sees them, and a few Ctrl shortcuts (Ctrl+W, Ctrl+T)
+belong to the browser - **Full screen** lets the page keep more.
+
+**How it works.** A small bridge in `wasabi_view.py` serves the page
+(built from `view/src` into `view/dist`, which is committed, so no Node
+is needed to run it) and talks to the daemon over one connection per
+page: first every input the page sent, then one grab, of which only the
+rows that changed go to the page. About 8-10 pictures a second on the
+A1200's 1280x960 RTG screen; a mouse move or key takes ~3 ms. The
+Amiga's own pointer is a sprite and is not in the picture - the PC's
+pointer stands in for it. Ordinary keys go as whole presses (down and
+up together) and the PC's own key repeat repeats them; only the
+modifiers go down and up separately - an up that waited behind a slow
+grab once made the Amiga's own repeat type "eeeeeee". A Chromium-family
+browser opens it as an app window with no tabs or address bar; Firefox
+has no such mode, so it gets a new window (`--kiosk`: full screen).
+`--no-browser` just prints the address. It serves this PC only; the
+phone will reach it through the NAS (step 5 of the plan).
 
 ## Health
 

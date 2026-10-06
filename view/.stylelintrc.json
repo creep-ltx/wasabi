@@ -1,0 +1,29 @@
+{
+  "extends": ["stylelint-config-standard"],
+  "rules": {
+    "color-no-hex": true,
+    "color-named": "never",
+    "function-disallowed-list": ["rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color"],
+    "unit-disallowed-list": ["px", "pt", "pc", "cm", "mm", "in", "q", "em", "rem", "ex", "ch", "vh", "vw", "dvh", "dvw", "svh", "svw", "lvh", "lvw", "vmin", "vmax"],
+    "declaration-property-value-allowed-list": {
+      "/^font-family$/": ["/^var\\(--wv-/"],
+      "/^font-size$/": ["/^var\\(--wv-/"],
+      "/radius$/": ["/^var\\(--wv-/"]
+    },
+    "selector-class-pattern": null,
+    "custom-property-empty-line-before": null
+  },
+  "overrides": [
+    {
+      "files": ["src/tokens.css"],
+      "rules": {
+        "color-no-hex": null,
+        "color-named": null,
+        "function-disallowed-list": null,
+        "unit-disallowed-list": null,
+        "declaration-property-value-allowed-list": null,
+        "color-hex-length": null
+      }
+    }
+  ]
+}

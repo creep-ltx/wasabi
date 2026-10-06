@@ -1,0 +1,31 @@
+/*
+ * Wasabi view design tokens. The ONLY file allowed to hold raw colours
+ * and sizes (enforced by stylelint and ESLint); everything else uses
+ * var(--wv-*). Radix Themes supplies the controls' own look; these
+ * cover the page around them.
+ */
+
+:root {
+  --wv-page-width: 100vw;
+  --wv-page-height: 100dvh;
+
+  /* The space around the Amiga's screen is the Workbench-free black of
+   * a monitor bezel, so the picture's edges read clearly. */
+  --wv-color-page: #000;
+  --wv-color-bar: #111;
+  --wv-color-focus: #f80;
+
+  --wv-space-none: 0;
+  --wv-bar-pad: 4px;
+  --wv-focus-width: 2px;
+  --wv-dialog-width: 440px;
+  --wv-radius-none: 0;
+
+  /* One CSS pixel: the page measures the screen's size in numbers and
+   * multiplies by this, so no raw unit appears outside this file. */
+  --wv-px: 1px;
+
+  /* The screen is scaled with nearest-neighbour sampling: Amiga pixels
+   * stay sharp squares at any size. */
+  --wv-screen-rendering: pixelated;
+}

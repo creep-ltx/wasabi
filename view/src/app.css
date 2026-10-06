@@ -1,0 +1,53 @@
+html,
+body,
+#root {
+  margin: var(--wv-space-none);
+  padding: var(--wv-space-none);
+  width: var(--wv-page-width);
+  height: var(--wv-page-height);
+  overflow: hidden;
+  background: var(--wv-color-page);
+}
+
+.wv-page {
+  width: var(--wv-page-width);
+  height: var(--wv-page-height);
+  background: var(--wv-color-page);
+}
+
+.wv-bar {
+  flex: none;
+  padding: var(--wv-bar-pad);
+  background: var(--wv-color-bar);
+}
+
+/* The page works out the displayed size (fit to the window, or 1:1)
+ * and hands it over as plain numbers in --wv-screen-w/-h. */
+.wv-stage {
+  flex: 1;
+  min-height: var(--wv-space-none);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wv-stage[data-scale="one"] {
+  overflow: auto;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.wv-screen {
+  flex: none;
+  width: calc(var(--wv-screen-w, 640) * var(--wv-px));
+  height: calc(var(--wv-screen-h, 512) * var(--wv-px));
+  display: block;
+  image-rendering: var(--wv-screen-rendering);
+  outline: none;
+  cursor: default;
+}
+
+.wv-screen:focus-visible {
+  outline: var(--wv-focus-width) solid var(--wv-color-focus);
+}

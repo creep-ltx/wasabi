@@ -1872,6 +1872,17 @@ def cmd_health(conn, args):
         return 0
 
 
+def cmd_view(args):
+    """The Amiga's screen in a window, with its mouse and keyboard.
+    The bridge lives in wasabi_view.py next to this script."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import wasabi_view
+    target = resolve_target(args)
+    return wasabi_view.serve(sys.modules[__name__], args, target)
+
+
 def cmd_mouse(conn, args):
     """Move the pointer and click - drive GUIs remotely.
 
@@ -2773,6 +2784,20 @@ def main(argv=None):
     s.add_argument("--quiet", type=float, default=1.0, metavar="SECONDS",
                    help="still: how long nothing may change (default 1)")
     s.set_defaults(fn=cmd_wait)
+
+    s = sub.add_parser("view", help="the Amiga's screen in a window, "
+                       "driven with your mouse and keyboard")
+    s.add_argument("--port", dest="view_port", type=int, default=8070,
+                   help="where the page is served (default 8070)")
+    s.add_argument("--listen", default="127.0.0.1",
+                   help="address to serve on (default this PC only)")
+    s.add_argument("--no-browser", action="store_true",
+                   help="do not open a window; just print the address")
+    s.add_argument("--kiosk", action="store_true",
+                   help="open full screen")
+    s.add_argument("--stay", action="store_true",
+                   help="keep serving after the window closes")
+    s.set_defaults(fn=cmd_view, no_conn=True)
 
     s = sub.add_parser("health", help="the Pi's temperature, voltage and "
                        "power history, Emu68's CPU meter, free memory")

@@ -23,6 +23,7 @@ cleanup() {
     [ -n "${MOCK_PID:-}" ] && kill "$MOCK_PID" 2>/dev/null
     [ -n "${MOCK2_PID:-}" ] && kill "$MOCK2_PID" 2>/dev/null
     [ -n "${MOCK4_PID:-}" ] && kill "$MOCK4_PID" 2>/dev/null
+    [ -n "${VIEW_PID:-}" ] && kill "$VIEW_PID" 2>/dev/null
     rm -rf "$ROOT"
 }
 trap cleanup EXIT
@@ -714,6 +715,64 @@ out=$($W health 2>/dev/null | grep -c "since boot there was under-voltage, throt
 check "health says so in words" "1" "$out"
 $W health >/dev/null 2>&1
 check "a problem in the past only is exit 0" "0" "$?"
+
+# --- view: the bridge between a page and the Amiga ---
+# A raw WebSocket client plays the page: it must get a status line and
+# the first picture, and a key it sends must reach the daemon as one
+# whole press, Right Amiga's bit set while Right Amiga is held.
+VPORT=$((PORT+7))
+./wasabi --host 127.0.0.1 --port $PORT --key $KEY view --no-browser \
+    --port $VPORT >"$ROOT/view.log" 2>&1 &
+VIEW_PID=$!
+sleep 1.5
+rm -f "$ROOT/keys.log"
+out=$(timeout 10 python3 - "$VPORT" <<'PY'
+import base64, json, os, socket, struct, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+s.sendall(("GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+           "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+           "Sec-WebSocket-Version: 13\r\n\r\n"
+           % base64.b64encode(os.urandom(16)).decode()).encode())
+head = b""
+while b"\r\n\r\n" not in head:
+    head += s.recv(1)
+def read(n):
+    b = b""
+    while len(b) < n:
+        b += s.recv(n - len(b))
+    return b
+def frame():
+    b0, b1 = read(2); n = b1 & 0x7F
+    if n == 126: (n,) = struct.unpack(">H", read(2))
+    elif n == 127: (n,) = struct.unpack(">Q", read(8))
+    return b0 & 0x0F, read(n)
+def send(obj):
+    d = json.dumps(obj).encode(); mask = os.urandom(4)
+    s.sendall(bytes([0x81, 0x80 | len(d)]) + mask +
+              bytes(c ^ mask[i & 3] for i, c in enumerate(d)))
+got = set()
+while len(got) < 2:
+    op, d = frame()
+    if op == 1 and b'"connected": true' in d: got.add("status")
+    if op == 2:
+        _, w, h, y, rows = struct.unpack(">BHHHH", d[:9])
+        got.add("band %dx%d" % (w, h))
+print(" ".join(sorted(got)))
+send({"t": "key", "code": 0x67, "down": True})
+send({"t": "key", "code": 0x12, "down": True})
+send({"t": "key", "code": 0x12, "down": False})
+send({"t": "key", "code": 0x67, "down": False})
+time.sleep(1)
+PY
+)
+check "view: the page gets a status line and the first picture" \
+      "band 8x8 status" "$out"
+check "view: keys reach the daemon - Amiga held, E as one press, Amiga let go" \
+      "000000670080 00000012008000920080 000000e70000" \
+      "$(tr '\n' ' ' < "$ROOT/keys.log" | sed 's/ $//')"
+for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 $VIEW_PID 2>/dev/null || break; sleep 1; done
+kill -0 $VIEW_PID 2>/dev/null; check "view: the bridge ends once its page has gone" "1" "$?"
+kill $VIEW_PID 2>/dev/null
 
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")
