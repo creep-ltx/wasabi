@@ -1037,8 +1037,9 @@ A1200's 1280x960 RTG screen; a mouse move or key takes ~3 ms. The
 Amiga's own pointer is a sprite and is not in the picture - the PC's
 pointer stands in for it. Ordinary keys go as whole presses (down and
 up together) and the PC's own key repeat repeats them; only the
-modifiers go down and up separately - an up that waited behind a slow
-grab once made the Amiga's own repeat type "eeeeeee". A Chromium-family
+modifiers go down and up separately. input.device repeats a written key
+until its up arrives, so an up that arrives late - it happened once,
+through an ordering bug since fixed - makes the Amiga type "eeeeeee". A Chromium-family
 browser opens it as an app window with no tabs or address bar; Firefox
 has no such mode, so it gets a new window (`--kiosk`: full screen).
 `--no-browser` just prints the address. It serves this PC only; the

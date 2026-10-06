@@ -234,11 +234,12 @@ class Session:
                 return
             # Every other key goes as a whole press - down and up in one
             # command - the moment the PC key goes down, and again for
-            # each of the PC's own repeats. Sending the up separately
-            # made the Amiga's timing depend on the bridge's: an up that
-            # waited behind a slow grab (one taken while Workbench opened
-            # a window) arrived after input.device's repeat delay, and
-            # the Amiga typed "eeeeeee". Measured on the A1200.
+            # each of the PC's own repeats. input.device auto-repeats a
+            # written key until its up arrives (measured on the A1200:
+            # an up 0.8 s late typed "eeeeeee", 0.15 s late did not), so
+            # a separately sent up made the Amiga's typing depend on the
+            # bridge's timing. A late up did happen here (the ordering
+            # bug fixed in _cycle); whole presses rule out the rest.
             if not m["down"]:
                 return
             qual = self.qual | (QUAL_REPEAT if m.get("repeat") else 0)
