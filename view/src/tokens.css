@@ -6,6 +6,7 @@
  */
 
 :root {
+  color-scheme: dark;     /* dark scrollbars and form controls */
   --wv-page-width: 100vw;
   --wv-page-height: 100dvh;
 
@@ -24,6 +25,28 @@
   /* One CSS pixel: the page measures the screen's size in numbers and
    * multiplies by this, so no raw unit appears outside this file. */
   --wv-px: 1px;
+
+  /* The desktop app's frame. */
+  --wv-sidebar-width: 208px;
+  --wv-content-pad: 24px;
+  --wv-content-max: 1180px;
+  --wv-tile-min: 220px;
+  --wv-pane-height: 62vh;
+  --wv-thumb-min: 240px;
+  --wv-shot-max-h: 78vh;
+
+  --wv-hairline: 1px;
+  --wv-radius-round: 50%;
+  --wv-radius-tip: var(--radius-2);
+
+  /* Charts (dataviz reference palette, dark steps, validated against the
+   * dark card surface #18191b): one blue series, a recessive guide. */
+  --wv-viz-line: #3987e5;
+  --wv-viz-fill: #3987e526;
+  --wv-viz-guide: #ffffff2e;
+  --wv-spark-height: 44px;
+  --wv-spark-stroke: 2;
+  --wv-spark-dot: 3;
 
   /* The screen is scaled with nearest-neighbour sampling: Amiga pixels
    * stay sharp squares at any size. */

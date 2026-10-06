@@ -1,229 +1,127 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useState } from 'react';
 import {
+  AlertDialog,
   Badge,
   Box,
   Button,
-  Dialog,
   Flex,
-  Select,
+  Heading,
   Text,
 } from '@radix-ui/themes';
-import { AmigaLink, type LinkStatus } from './amiga/link';
 import {
-  AMIGA_MODIFIERS,
-  DEFAULT_KEYS,
-  PC_MODIFIER_KEYS,
-  assignKey,
-  type AmigaKeySettings,
-  type AmigaModifier,
-} from './amiga/keys';
+  CameraIcon,
+  DashboardIcon,
+  DesktopIcon,
+  FileTextIcon,
+  ReloadIcon,
+} from '@radix-ui/react-icons';
+import { api, type Health } from './api';
+import { OverviewPage } from './pages/Overview';
+import { ScreenPage } from './pages/Screen';
+import { FilesPage } from './pages/Files';
+import { ShotsPage } from './pages/Shots';
 
-type Scale = 'fit' | 'one';
-type Settings = { keys: AmigaKeySettings; scale: Scale };
+const PAGES = [
+  { id: 'overview', label: 'Overview', icon: <DashboardIcon /> },
+  { id: 'screen', label: 'Screen', icon: <DesktopIcon /> },
+  { id: 'files', label: 'Files', icon: <FileTextIcon /> },
+  { id: 'shots', label: 'Screenshots', icon: <CameraIcon /> },
+] as const;
+type PageId = (typeof PAGES)[number]['id'];
 
-const DEFAULTS: Settings = { keys: DEFAULT_KEYS, scale: 'fit' };
-
-/* Settings live with the bridge (~/.config/wasabi/view.json), not in
- * the browser, so every browser - and later the phone - shares them. */
-async function loadSettings(): Promise<Settings> {
-  try {
-    const r = await fetch('api/settings');
-    if (!r.ok) return DEFAULTS;
-    const s = (await r.json()) as Partial<Settings>;
-    return {
-      keys: { ...DEFAULT_KEYS, ...(s.keys ?? {}) },
-      scale: s.scale === 'one' ? 'one' : 'fit',
-    };
-  } catch {
-    return DEFAULTS;
-  }
+function pageFromHash(): PageId {
+  const h = window.location.hash.slice(1);
+  return (PAGES.find((p) => p.id === h)?.id ?? 'overview') as PageId;
 }
 
-function saveSettings(s: Settings) {
-  void fetch('api/settings', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(s),
-  });
-}
-
-const NO_STATUS: LinkStatus = {
-  connected: false,
-  banner: '',
-  error: '',
-  width: 0,
-  height: 0,
-  fps: 0,
-};
-
+/*
+ * `wasabi view` opens ?mode=view: the live screen and nothing else.
+ * `wasabi desktop` opens the app: a sidebar and four pages. The page is
+ * in the URL's #, so a reload stays where it was.
+ */
 export function App() {
-  const stageRef = useRef<HTMLDivElement>(null);
-  const linkRef = useRef<AmigaLink | null>(null);
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [status, setStatus] = useState<LinkStatus>(NO_STATUS);
-  const [stage, setStage] = useState({ w: 0, h: 0 });
+  const viewOnly = new URLSearchParams(window.location.search).get('mode') === 'view';
+  const [page, setPage] = useState<PageId>(pageFromHash);
+  const [banner, setBanner] = useState('');
+  const [online, setOnline] = useState<boolean | null>(null);
 
   useEffect(() => {
-    void loadSettings().then(setSettings);
+    const on = () => setPage(pageFromHash());
+    window.addEventListener('hashchange', on);
+    return () => window.removeEventListener('hashchange', on);
   }, []);
 
-  // One link for the page's life; key settings are handed to it live.
-  const ready = settings !== null;
+  // A light pulse for the sidebar's connection badge.
   useEffect(() => {
-    if (!ready || !stageRef.current) return;
-    const link = new AmigaLink(stageRef.current, DEFAULT_KEYS, setStatus);
-    linkRef.current = link;
-    return () => {
-      link.close();
-      linkRef.current = null;
-    };
-  }, [ready]);
+    if (viewOnly) return;
+    let stop = false;
+    const ping = () => api<Health>('api/health')
+      .then((h) => { if (!stop) { setOnline(true); setBanner(h.banner ?? ''); } })
+      .catch(() => { if (!stop) setOnline(false); });
+    void ping();
+    const t = window.setInterval(ping, 10000);
+    return () => { stop = true; window.clearInterval(t); };
+  }, [viewOnly]);
 
-  useEffect(() => {
-    if (settings) linkRef.current?.setKeys(settings.keys);
-  }, [settings]);
-
-  useEffect(() => {
-    const el = stageRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setStage({ w: el.clientWidth, h: el.clientHeight }));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [ready]);
-
-  const update = (next: Settings) => {
-    setSettings(next);
-    saveSettings(next);
-  };
-
-  // The displayed size: the whole Amiga screen, as large as fits, aspect
-  // kept - or its own pixels, one to one.
-  const w = status.width || 640;
-  const h = status.height || 512;
-  const scale =
-    settings?.scale === 'one' || !stage.w || !stage.h
-      ? 1
-      : Math.min(stage.w / w, stage.h / h);
-  const screenVars = {
-    '--wv-screen-w': String(Math.floor(w * scale)),
-    '--wv-screen-h': String(Math.floor(h * scale)),
-  } as CSSProperties;
+  if (viewOnly) return <ScreenPage bare />;
 
   return (
-    <Flex direction="column" className="wv-page">
-      <Flex className="wv-bar" align="center" gap="3">
-        <Badge color={status.connected ? 'green' : 'red'}>
-          {status.connected ? 'connected' : 'not connected'}
-        </Badge>
-        <Text size="2" color="gray">
-          {status.connected
-            ? `${status.banner} · ${status.width}×${status.height} · ${status.fps} fps`
-            : status.error || 'looking for the Amiga…'}
-        </Text>
+    <Flex className="wv-shell">
+      <Flex direction="column" className="wv-sidebar" p="3" gap="1">
+        <Box px="2" pt="1" pb="4">
+          <Heading size="5">Wasabi</Heading>
+          <Text size="1" color="gray">Amiga remote control</Text>
+        </Box>
+        {PAGES.map((p) => (
+          <Button key={p.id} className="wv-nav-item" size="2"
+            variant={page === p.id ? 'soft' : 'ghost'}
+            color={page === p.id ? undefined : 'gray'}
+            aria-current={page === p.id ? 'page' : undefined}
+            onClick={() => { window.location.hash = p.id; }}>
+            {p.icon} {p.label}
+          </Button>
+        ))}
         <Box flexGrow="1" />
-        <Text size="1" color="gray">
-          Click the screen to use the Amiga's mouse and keyboard
-        </Text>
-        <Button
-          size="1"
-          variant="soft"
-          onClick={() => {
-            void document.documentElement.requestFullscreen?.();
-            linkRef.current?.focus();
-          }}
-        >
-          Full screen
-        </Button>
-        {settings && (
-          <SettingsDialog settings={settings} onChange={update} />
-        )}
+        <Flex direction="column" gap="2" px="2" pb="1">
+          <Badge color={online ? 'green' : online === false ? 'red' : 'gray'}>
+            {online ? 'connected' : online === false ? 'not connected' : 'connecting…'}
+          </Badge>
+          <Text size="1" color="gray">{banner}</Text>
+          <RebootButton />
+        </Flex>
       </Flex>
-      <Box
-        ref={stageRef}
-        className="wv-stage"
-        data-scale={settings?.scale ?? 'fit'}
-        style={screenVars}
-      />
+      <Box className="wv-content">
+        {page === 'overview' && <OverviewPage />}
+        {page === 'screen' && <ScreenPage />}
+        {page === 'files' && <FilesPage />}
+        {page === 'shots' && <ShotsPage />}
+      </Box>
     </Flex>
   );
 }
 
-function SettingsDialog({
-  settings,
-  onChange,
-}: {
-  settings: Settings;
-  onChange: (s: Settings) => void;
-}) {
+function RebootButton() {
+  const [msg, setMsg] = useState('');
   return (
-    <Dialog.Root>
-      <Dialog.Trigger>
-        <Button size="1" variant="soft">
-          Settings
-        </Button>
-      </Dialog.Trigger>
-      <Dialog.Content maxWidth="var(--wv-dialog-width)">
-        <Dialog.Title>Settings</Dialog.Title>
-        <Dialog.Description size="2" color="gray" mb="4">
-          Which PC key plays each Amiga key. A PC key can play only one;
-          choosing it here takes it from the other.
-        </Dialog.Description>
-        <Flex direction="column" gap="3">
-          {AMIGA_MODIFIERS.map((m) => (
-            <Flex key={m.id} align="center" justify="between" gap="3">
-              <Text size="2">{m.label}</Text>
-              <Select.Root
-                value={settings.keys[m.id]}
-                onValueChange={(v) =>
-                  onChange({
-                    ...settings,
-                    keys: assignKey(settings.keys, m.id as AmigaModifier, v),
-                  })
-                }
-              >
-                <Select.Trigger aria-label={m.label} />
-                <Select.Content>
-                  {PC_MODIFIER_KEYS.map((k) => (
-                    <Select.Item key={k.code} value={k.code}>
-                      {k.label}
-                    </Select.Item>
-                  ))}
-                </Select.Content>
-              </Select.Root>
-            </Flex>
-          ))}
-          <Flex align="center" justify="between" gap="3" mt="2">
-            <Text size="2">Screen size</Text>
-            <Select.Root
-              value={settings.scale}
-              onValueChange={(v) => onChange({ ...settings, scale: v as Scale })}
-            >
-              <Select.Trigger aria-label="Screen size" />
-              <Select.Content>
-                <Select.Item value="fit">Fit the window</Select.Item>
-                <Select.Item value="one">Actual pixels (1:1)</Select.Item>
-              </Select.Content>
-            </Select.Root>
-          </Flex>
-          <Text size="1" color="gray">
-            The Super (Windows) keys may be taken by the desktop before the
-            browser sees them. Some Ctrl shortcuts (Ctrl+W, Ctrl+T) belong
-            to the browser; Full screen lets the page keep more of them.
-          </Text>
-        </Flex>
+    <AlertDialog.Root>
+      <AlertDialog.Trigger>
+        <Button size="1" variant="soft" color="red"><ReloadIcon /> Reboot Amiga</Button>
+      </AlertDialog.Trigger>
+      <AlertDialog.Content maxWidth="var(--wv-dialog-width)">
+        <AlertDialog.Title>Reboot the Amiga?</AlertDialog.Title>
+        <AlertDialog.Description size="2">
+          Whatever is open on the Amiga is lost. It takes about half a minute to come back.
+          {msg && <Text as="div" color="red" mt="2">{msg}</Text>}
+        </AlertDialog.Description>
         <Flex gap="3" mt="4" justify="end">
-          <Button
-            variant="soft"
-            color="gray"
-            onClick={() => onChange({ ...settings, keys: DEFAULT_KEYS })}
-          >
-            Default keys
-          </Button>
-          <Dialog.Close>
-            <Button>Done</Button>
-          </Dialog.Close>
+          <AlertDialog.Cancel><Button variant="soft" color="gray">Cancel</Button></AlertDialog.Cancel>
+          <AlertDialog.Action>
+            <Button color="red" onClick={() => {
+              api('api/reboot', {}).catch((e: Error) => setMsg(e.message));
+            }}>Reboot</Button>
+          </AlertDialog.Action>
         </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+      </AlertDialog.Content>
+    </AlertDialog.Root>
   );
 }

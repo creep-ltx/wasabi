@@ -725,10 +725,10 @@ check "a problem in the past only is exit 0" "0" "$?"
 cat > "$ROOT/page.py" <<'PY'
 import base64, json, os, socket, struct, sys, time
 s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
-s.sendall(("GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+s.sendall(("GET /ws HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\n"
            "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
            "Sec-WebSocket-Version: 13\r\n\r\n"
-           % base64.b64encode(os.urandom(16)).decode()).encode())
+           % (sys.argv[1], base64.b64encode(os.urandom(16)).decode())).encode())
 head = b""
 while b"\r\n\r\n" not in head:
     head += s.recv(1)
@@ -807,6 +807,38 @@ sleep 1.5
 out=$(timeout 10 python3 "$ROOT/page.py" "$VPORT" | head -1)
 check "view: without LIVE it falls back to whole rows from GRAB" \
       "status, band 8x8" "$out"
+kill $VIEW_PID 2>/dev/null
+
+# --- desktop: the app's API, and the guards on it ---
+./wasabi --host 127.0.0.1 --port $PORT --key $KEY desktop --no-browser \
+    --port $VPORT >"$ROOT/desk.log" 2>&1 &
+VIEW_PID=$!
+sleep 1.5
+A="http://127.0.0.1:$VPORT"
+out=$(curl -s "$A/api/health" | python3 -c 'import json,sys; print(json.load(sys.stdin)["temp_c"])')
+check "desktop: /api/health reads the machine" "51.5" "$out"
+out=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$A/api/grab")
+check "desktop: a change without X-Wasabi is refused" "403" "$out"
+out=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example:$VPORT" "$A/api/health")
+check "desktop: a request for another host name is refused" "403" "$out"
+out=$(curl -s -o /dev/null -w "%{http_code}" -H "Origin: http://evil.example" \
+      -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" \
+      -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "$A/ws")
+check "desktop: a live screen for another site is refused" "403" "$out"
+post() { curl -s -o "$ROOT/post.out" -w "%{http_code}" -X POST -H "X-Wasabi: 1" \
+         -H "Content-Type: application/json" -d "$2" "$A$1"; }
+out=$(post /api/copy/to-amiga "{\"paths\": [\"$PWD/LICENSE\"], \"dir\": \"L:\"}")
+check "desktop: copying into L: asks first (428)" "428" "$out"
+[ ! -f "$ROOT/L/LICENSE" ] && ok "desktop: and copies nothing until asked" \
+                           || no "desktop: and copies nothing until asked"
+out=$(post /api/copy/to-amiga "{\"paths\": [\"$PWD/LICENSE\"], \"dir\": \"L:\", \"force\": true}")
+check "desktop: confirmed, it copies" "200" "$out"
+cmp -s LICENSE "$ROOT/L/LICENSE" && ok "desktop: byte for byte" || no "desktop: byte for byte"
+mkdir -p "$ROOT/back"
+out=$(post /api/copy/to-pc "{\"items\": [{\"path\": \"C:greet.txt\"}], \"dir\": \"$ROOT/back\"}")
+check "desktop: Amiga -> PC copies" "hello from the amiga" "$(cat "$ROOT/back/greet.txt" 2>/dev/null)"
+out=$(curl -s "$A/api/amiga/ls?path=C:" | python3 -c 'import json,sys; print(any(e["name"]=="greet.txt" for e in json.load(sys.stdin)["entries"]))')
+check "desktop: lists an Amiga drawer" "True" "$out"
 kill $VIEW_PID 2>/dev/null
 
 # --- error paths ---

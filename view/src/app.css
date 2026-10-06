@@ -51,3 +51,139 @@ body,
 .wv-screen:focus-visible {
   outline: var(--wv-focus-width) solid var(--wv-color-focus);
 }
+
+/* --- the desktop app ------------------------------------------------ */
+
+.wv-shell {
+  width: var(--wv-page-width);
+  height: var(--wv-page-height);
+}
+
+.wv-sidebar {
+  flex: none;
+  width: var(--wv-sidebar-width);
+  border-right: var(--wv-hairline) solid var(--gray-a4);
+  background: var(--color-panel-solid);
+}
+
+.wv-nav-item {
+  justify-content: flex-start;
+  width: 100%;
+  margin: var(--wv-space-none);
+}
+
+.wv-content {
+  flex: 1;
+  min-width: var(--wv-space-none);
+  overflow: auto;
+}
+
+.wv-page-body {
+  max-width: var(--wv-content-max);
+  margin: var(--wv-space-none) auto;
+  padding: var(--wv-content-pad);
+}
+
+.wv-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--wv-tile-min), 1fr));
+  gap: var(--space-3);
+}
+
+.wv-spark {
+  position: relative;
+  height: var(--wv-spark-height);
+  margin-top: var(--space-2);
+  cursor: crosshair;
+}
+
+.wv-spark svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.wv-spark-dot {
+  position: absolute;
+  left: var(--wv-dot-x);
+  top: var(--wv-dot-y);
+  width: calc(var(--wv-spark-dot) * 2 * var(--wv-px));
+  height: calc(var(--wv-spark-dot) * 2 * var(--wv-px));
+  border-radius: var(--wv-radius-round);
+  background: var(--wv-viz-line);
+  box-shadow: 0 0 0 calc(2 * var(--wv-px)) var(--color-panel-solid);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.wv-spark-tip {
+  position: absolute;
+  left: var(--wv-tip-x);
+  bottom: 100%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--wv-radius-tip);
+  background: var(--gray-2);
+  border: var(--wv-hairline) solid var(--gray-a5);
+  pointer-events: none;
+}
+
+.wv-panes {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.wv-pane-list {
+  height: var(--wv-pane-height);
+  overflow: auto;
+}
+
+.wv-pane-list,
+.wv-content {
+  scrollbar-color: var(--gray-a6) transparent;
+}
+
+.wv-grow {
+  width: 100%;
+}
+
+.wv-row-dir {
+  cursor: pointer;
+}
+
+.wv-nowrap {
+  white-space: nowrap;
+}
+
+.wv-shots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--wv-thumb-min), 1fr));
+  gap: var(--space-3);
+}
+
+.wv-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  background: var(--wv-color-page);
+}
+
+.wv-shot-big {
+  display: block;
+  max-width: 100%;
+  max-height: var(--wv-shot-max-h);
+  margin: var(--space-3) auto;
+}
+
+.wv-screen-page {
+  height: 100%;
+}
+
+.wv-shot-card {
+  cursor: pointer;
+}

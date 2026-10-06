@@ -8,7 +8,7 @@ const b = await puppeteer.launch({ browser: 'firefox', executablePath: '/usr/bin
 try {
   const p = await b.newPage();
   await p.setViewport({ width: 1400, height: 1100 });
-  await p.goto(process.argv[2] || 'http://127.0.0.1:8071/');
+  await p.goto(process.argv[2] || 'http://127.0.0.1:8071/?mode=view');
   await p.waitForFunction(() => document.querySelector('canvas')?.width === 1280);
   await p.evaluate(() => {
     window.bytes = 0;

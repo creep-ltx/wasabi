@@ -345,17 +345,75 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
          ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf"}
 
 
-def make_handler(w, target, key, server_state):
+def make_handler(w, target, key, server_state, api, port, listen):
+    import urllib.parse
+    from wasabi_api import ApiError
+    hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port,
+             "%s:%d" % (listen, port)}
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt, *a):      # quiet: this is an app window
             pass
 
+        def trusted(self, changes):
+            """See wasabi_api's docstring: Host names this server, and a
+            change carries X-Wasabi, which another site cannot send."""
+            if self.headers.get("Host", "") not in hosts:
+                self.reply(403, "text/plain", b"wrong host")
+                return False
+            if changes and self.headers.get("X-Wasabi") != "1":
+                self.reply(403, "text/plain", b"missing X-Wasabi")
+                return False
+            return True
+
+        def api(self, method):
+            url = urllib.parse.urlsplit(self.path)
+            body = {}
+            if method == "POST":
+                n = int(self.headers.get("Content-Length", "0") or 0)
+                try:
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                except ValueError:
+                    return self.json(400, {"error": "bad JSON"})
+            try:
+                out = api.dispatch(method, url.path,
+                                   urllib.parse.parse_qs(url.query), body)
+            except ApiError as exc:
+                return self.json(exc.code, {"error": str(exc)})
+            except OSError as exc:
+                return self.json(500, {"error": str(exc)})
+            self.json(200, out)
+
+        def json(self, code, obj):
+            self.reply(code, "application/json", json.dumps(obj).encode())
+
+        def do_POST(self):
+            if not self.trusted(changes=True):
+                return
+            if self.path.startswith("/api/"):
+                return self.api("POST")
+            self.reply(404, "text/plain", b"not found")
+
         def do_GET(self):
+            if not self.trusted(changes=False):
+                return
             path = self.path.split("?", 1)[0]
             if path == "/ws":
+                origin = self.headers.get("Origin", "")
+                if origin and origin.split("://", 1)[-1] not in hosts:
+                    return self.reply(403, "text/plain", b"wrong origin")
                 return self.websocket()
+            if path.startswith("/shots/"):
+                try:
+                    p = api.shot_path(urllib.parse.unquote(path[7:]))
+                except ApiError:
+                    return self.reply(404, "text/plain", b"not found")
+                with open(p, "rb") as fh:
+                    return self.reply(200, "image/png", fh.read())
+            if path.startswith("/api/") and path != "/api/settings":
+                return self.api("GET")
             if path == "/api/settings":
                 try:
                     with open(settings_path()) as fh:
@@ -375,6 +433,8 @@ def make_handler(w, target, key, server_state):
                                       "application/octet-stream"), body)
 
         def do_PUT(self):
+            if not self.trusted(changes=True):
+                return
             if self.path != "/api/settings":
                 return self.reply(404, "text/plain", b"not found")
             n = int(self.headers.get("Content-Length", "0"))
@@ -494,7 +554,10 @@ def serve(w, args, target):
             "the view's page is not built - run: cd %s/view && npm install "
             "&& npm run build" % HERE)
     state = ServerState()
-    handler = make_handler(w, target, args.key, state)
+    from wasabi_api import Api
+    api = Api(w, target, args.key, getattr(args, "protect", set()))
+    handler = make_handler(w, target, args.key, state, api, args.view_port,
+                           args.listen)
     try:
         httpd = ThreadingHTTPServer((args.listen, args.view_port), handler)
     except OSError as exc:
@@ -505,6 +568,8 @@ def serve(w, args, target):
     httpd.daemon_threads = True
     url = "http://%s:%d/" % ("127.0.0.1" if args.listen in ("0.0.0.0", "")
                              else args.listen, args.view_port)
+    if getattr(args, "mode", "view") == "view":
+        url += "?mode=view"          # just the screen; desktop gets it all
     print("wasabi view on %s - the Amiga at %s:%d%s" % (
         url, target[0], target[1],
         "" if args.stay else "; closes when its window does"),

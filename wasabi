@@ -2785,19 +2785,23 @@ def main(argv=None):
                    help="still: how long nothing may change (default 1)")
     s.set_defaults(fn=cmd_wait)
 
-    s = sub.add_parser("view", help="the Amiga's screen in a window, "
-                       "driven with your mouse and keyboard")
-    s.add_argument("--port", dest="view_port", type=int, default=8070,
-                   help="where the page is served (default 8070)")
-    s.add_argument("--listen", default="127.0.0.1",
-                   help="address to serve on (default this PC only)")
-    s.add_argument("--no-browser", action="store_true",
-                   help="do not open a window; just print the address")
-    s.add_argument("--kiosk", action="store_true",
-                   help="open full screen")
-    s.add_argument("--stay", action="store_true",
-                   help="keep serving after the window closes")
-    s.set_defaults(fn=cmd_view, no_conn=True)
+    for name, mode, helptext in (
+            ("view", "view", "the Amiga's screen in a window, driven with "
+                             "your mouse and keyboard"),
+            ("desktop", "desktop", "the Wasabi desktop app: live stats, "
+                                   "screen, files, screenshots")):
+        s = sub.add_parser(name, help=helptext)
+        s.add_argument("--port", dest="view_port", type=int, default=8070,
+                       help="where the page is served (default 8070)")
+        s.add_argument("--listen", default="127.0.0.1",
+                       help="address to serve on (default this PC only)")
+        s.add_argument("--no-browser", action="store_true",
+                       help="do not open a window; just print the address")
+        s.add_argument("--kiosk", action="store_true",
+                       help="open full screen")
+        s.add_argument("--stay", action="store_true",
+                       help="keep serving after the window closes")
+        s.set_defaults(fn=cmd_view, no_conn=True, mode=mode)
 
     s = sub.add_parser("health", help="the Pi's temperature, voltage and "
                        "power history, Emu68's CPU meter, free memory")

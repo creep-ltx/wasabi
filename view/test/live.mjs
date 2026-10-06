@@ -4,7 +4,7 @@
 import puppeteer from 'puppeteer-core';
 import { execFileSync } from 'node:child_process';
 
-const URL = process.argv[2] || 'http://127.0.0.1:8071/';
+const URL = process.argv[2] || 'http://127.0.0.1:8071/?mode=view';
 const wasabi = (...a) => execFileSync('wasabi', a, { encoding: 'utf8' }).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = 0;
@@ -170,11 +170,11 @@ try {
   const saved = await page.evaluate(async () => {
     const s = { keys: { lamiga: 'MetaLeft', ramiga: 'ControlRight', ctrl: 'ControlLeft',
       lalt: 'AltLeft', ralt: 'AltRight' }, scale: 'fit' };
-    await fetch('api/settings', { method: 'PUT', body: JSON.stringify(s) });
+    await fetch('api/settings', { method: 'PUT', headers: { 'X-Wasabi': '1' }, body: JSON.stringify(s) });
     return (await (await fetch('api/settings')).json()).keys.lamiga;
   });
   check('settings are saved by the bridge', saved === 'MetaLeft');
-  await page.evaluate(async () => fetch('api/settings', { method: 'PUT', body: '{}' }));
+  await page.evaluate(async () => fetch('api/settings', { method: 'PUT', headers: { 'X-Wasabi': '1' }, body: '{}' }));
 
   // Clean up the Shell.
   [px, py] = await toPage(300, 200);

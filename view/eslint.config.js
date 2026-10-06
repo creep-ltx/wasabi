@@ -38,7 +38,9 @@ export default tseslint.config(
           message: 'Raw colours and sizes belong in src/tokens.css; use a token.',
         },
         {
-          selector: 'JSXOpeningElement[name.name=/^[a-z]/]',
+          // Radix has no chart or image primitives: the sparkline's SVG
+          // parts and screenshot <img> are the only raw elements allowed.
+          selector: 'JSXOpeningElement[name.name=/^(?!(svg|path|line|circle|rect|g|title|img)$)[a-z]/]',
           message: 'Use a Radix component, not a raw HTML element.',
         },
         {

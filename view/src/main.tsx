@@ -10,7 +10,8 @@ const root = document.getElementById('root');
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <Theme appearance="dark" hasBackground={false} radius="none" scaling="90%">
+      <Theme appearance="dark" hasBackground={false} accentColor="blue" grayColor="slate"
+        radius="medium" scaling="95%">
         <App />
       </Theme>
     </StrictMode>,

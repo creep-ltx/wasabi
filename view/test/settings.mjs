@@ -1,7 +1,7 @@
 // The Settings dialog: pick PC keys for Amiga keys, see the bridge save
 // them, and see a PC key move from one Amiga key to another.
 import puppeteer from 'puppeteer-core';
-const URL = process.argv[2] || 'http://127.0.0.1:8071/';
+const URL = process.argv[2] || 'http://127.0.0.1:8071/?mode=view';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = 0;
 const check = (name, ok, extra = '') => {
@@ -13,7 +13,7 @@ try {
   const p = await b.newPage();
   await p.setViewport({ width: 1400, height: 1000 });
   await p.goto(URL);
-  await p.evaluate(() => fetch('api/settings', { method: 'PUT', body: '{}' }));
+  await p.evaluate(() => fetch('api/settings', { method: 'PUT', headers: { 'X-Wasabi': '1' }, body: '{}' }));
   await p.reload();
   await p.waitForFunction(() => document.querySelector('canvas')?.width === 1280);
   const clickText = async (sel, text) => {

@@ -50,10 +50,10 @@
 #include "patches.h"                 /* everything that hijacks a vector */
 #include "health.h"                  /* the machine's vital signs */
 
-#define VERSION_STR "wasabid 0.3b3"
+#define VERSION_STR "wasabid 0.3b4"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.3b3 (6.10.2026)";
+    "$VER: wasabid 0.3b4 (6.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -1269,8 +1269,12 @@ static BOOL cmd_ls(int fd, const char *path)
         return send_err(fd, "Examine failed");
     }
     while (ExNext(lock, fib)) {
+        /* A positive type is a drawer - except a soft link (ST_SOFTLINK,
+         * 3), which may point at a file: RAM:Disk.info is one, and
+         * listing it as a drawer made it unopenable. */
         LONG n = sprintf(line, "%c %lu %ld %ld %ld %ld %s\n",
-                         fib->fib_DirEntryType > 0 ? 'd' : 'f',
+                         fib->fib_DirEntryType > 0 &&
+                         fib->fib_DirEntryType != ST_SOFTLINK ? 'd' : 'f',
                          /* Unsigned on purpose: OS 3.x hands back a signed
                           * 32-bit size, so anything past 2 GB arrives
                           * negative. A file cannot be -1 bytes long, and

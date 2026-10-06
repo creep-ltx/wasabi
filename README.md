@@ -69,6 +69,7 @@ pulling in its libraries — captured live off the A1200.
 | `ps` / `kill` | **working on the real A1200** — full task list with stack headroom; Ctrl-C or RemTask |
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
 | `grab` / `screen` | **working on the real A1200** — front screen to PNG in 0.1 s; RTG and native paths both |
+| `desktop` | **working on the real A1200** (tested in a headless Firefox: every page, copies both ways with folders, delete, screenshots) — the desktop app: live stats, the screen, a two-pane file manager, screenshots, reboot |
 | `view` | **working on the real A1200** (tested in a headless Firefox: picture, clicks, typing, Right Amiga shortcuts, right-button menus, settings) — the live screen in a window, driven with the PC's mouse and keyboard; only changes are sent, key-to-screen 52 ms over Wi-Fi |
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
@@ -168,6 +169,9 @@ wasabi grab [FILE] [--window TITLE] [--diff BASE.png]
                              prints its path (no FILE: a new file each
                              time); --diff reports what changed, exits 1
 wasabi screen [--cycle|--to-front T]    list screens, flip between them
+wasabi desktop [--kiosk] [--no-browser]
+                             the desktop app: overview, screen, files,
+                             screenshots, in one window
 wasabi view [--kiosk] [--no-browser]
                              the Amiga's screen in a window: your mouse
                              and keyboard drive it
@@ -1003,6 +1007,37 @@ JSON instead of a table. Errors always go to stderr as one line.
 A1200, since `SYS:` is just another name for it). `reboot` needs `--yes`,
 as `quit` always has; `kill --force` (RemTask) was already explicit. A
 `run` is not checked — `wasabi run "Delete C:#?"` does what it says.
+
+## The desktop app
+
+`wasabi desktop` opens Wasabi as an app: a sidebar and four pages.
+
+- **Overview** - live: the Pi's temperature and Emu68's 68k CPU meter
+  with three-minute sparklines (hover for a reading), the power and heat
+  status since the Pi started, the Pi's uptime, chip and fast memory and
+  every disk as meters (network volumes, which report no real numbers,
+  say so), and the versions: wasabid, Kickstart and Workbench, exec,
+  Emu68, the board, clocks and voltage, the JIT cache, the last guru.
+  It reads `health` every 2 s and the volumes every 30 s.
+- **Screen** - the live view below, with a Screenshot button. It runs
+  only while the page is open: an open live view costs the Amiga ~5%.
+- **Files** - this PC on the left, the Amiga on the right. Click a
+  folder to open it, type a path, tick files *or folders* and copy them
+  across either way. New folder on both sides; Delete on the Amiga side
+  (folders with everything in them), always after asking. The safety
+  catch holds here too: writing or deleting in a system place asks a
+  second time.
+- **Screenshots** - full-colour, exact grabs, kept in `~/Pictures/Wasabi`;
+  a gallery, a big view, download and delete.
+
+**Reboot Amiga** sits at the foot of the sidebar, behind a confirmation.
+
+The app only answers its own page: requests must be addressed to it by
+name (`127.0.0.1` or `localhost`, stopping DNS rebinding), anything that
+changes something must carry an `X-Wasabi` header (which another web
+site cannot send), and the live screen's connection must come from the
+app's own origin. It serves this PC only. The service behind the pages
+is `wasabi_api.py`; the pages are in `view/src/pages/`.
 
 ## The view
 
