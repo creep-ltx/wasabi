@@ -50,10 +50,10 @@
 #include "patches.h"                 /* everything that hijacks a vector */
 #include "health.h"                  /* the machine's vital signs */
 
-#define VERSION_STR "wasabid 0.3b2"
+#define VERSION_STR "wasabid 0.3b3"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.3b2 (6.10.2026)";
+    "$VER: wasabid 0.3b3 (6.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -75,7 +75,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health"
+                 "key,windows,health,live"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -125,6 +125,7 @@ typedef char welcome_fits_its_buffer[
 #define T_KEY     0x4b
 #define T_WINDOWS 0x4c
 #define T_HEALTH  0x4d
+#define T_LIVE    0x4e
 
 struct Library *SocketBase;
 /*
@@ -1921,6 +1922,505 @@ static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
     return ok;
 }
 
+
+/* --- LIVE: the screen for a live view - only what changed, compact -- */
+
+/*
+ * GRAB sends every pixel as 24-bit RGB, which is right for a picture to
+ * keep and wrong for a live view: 3.7 MB a frame of the A1200's
+ * Workbench, over a Wi-Fi hop doing ~28 MB/s, is the whole frame budget.
+ * LIVE keeps, per client, the last picture that client was sent, and
+ * sends only the rectangles that differ from it, in a compact format:
+ *
+ *   deep screens (> 8 bits)  RGB565, 2 bytes a pixel (lossy for 24-bit,
+ *                            fine for watching; GRAB stays exact)
+ *   8 bits or fewer          the pen numbers, 1 byte a pixel, plus the
+ *                            palette whenever it changes - exact
+ *
+ * Every DATA frame is one self-describing message (the bridge forwards
+ * them to the page untouched):
+ *
+ *   0x10 'head'   u16 w, u16 h, u8 format (1 = RGB565, 2 = pen8),
+ *                 u8 full (1 = the page must drop what it has)
+ *   0x11 'pal'    u16 n, then n * RGB bytes
+ *   0x12 'rect'   u16 x, u16 y, u16 w, u16 h, then w*h pixels, row by row
+ *
+ * then END. A frame where nothing changed is the head and the END.
+ * flags bit 0 asks for everything (a page that has just connected).
+ * The comparison is per row - first and last changed pixel - with
+ * neighbouring changed rows merged into one rectangle while it stays
+ * under one frame's worth of bytes.
+ */
+#define LIVE_RGB565 1
+#define LIVE_PEN8   2
+#define LIVE_RECT_MAX (MAX_PAYLOAD - 16)
+
+struct LiveState {
+    struct Screen *sc;                  /* what prev is a picture of */
+    UWORD w, h, fmt;
+    ULONG size;                         /* bytes in prev */
+    UBYTE *prev;                        /* the client's picture, w*h*bpp */
+    UBYTE *raw;                         /* deep screens read in place: the
+                                         * card's own pixels, last frame */
+    ULONG rawsize, rawpf, rawbpr;
+    ULONG pal[256];                     /* pen8: 0x00RRGGBB as last sent */
+    UWORD npal;
+};
+static struct LiveState *g_live[MAX_CLIENTS];
+
+static void live_free(int cl)
+{
+    struct LiveState *ls = g_live[cl];
+    if (!ls)
+        return;
+    if (ls->prev)
+        FreeMem(ls->prev, ls->size);
+    if (ls->raw)
+        FreeMem(ls->raw, ls->rawsize);
+    FreeMem(ls, sizeof(*ls));
+    g_live[cl] = NULL;
+}
+
+/* One rectangle out of prev (which already holds the new pixels). */
+static BOOL live_send_rect(int fd, struct LiveState *ls, UBYTE *out,
+                           LONG x0, LONG x1, LONG y0, LONG y1)
+{
+    LONG bpp = ls->fmt == LIVE_RGB565 ? 2 : 1;
+    LONG rw = x1 - x0, y, n = 9;
+    out[0] = 0x12;
+    out[1] = x0 >> 8; out[2] = x0;
+    out[3] = y0 >> 8; out[4] = y0;
+    out[5] = rw >> 8; out[6] = rw;
+    out[7] = (y1 - y0) >> 8; out[8] = (y1 - y0);
+    for (y = y0; y < y1; y++) {
+        memcpy(out + n, ls->prev + ((ULONG)y * ls->w + x0) * bpp, rw * bpp);
+        n += rw * bpp;
+    }
+    return send_frame(fd, T_DATA, out, n);
+}
+
+/*
+ * The changed rectangles of one frame, found in the first pass (with
+ * the screen's memory locked) and sent in the second (unlocked): the
+ * network must never hold the Amiga's drawing still. Past LIVE_MAXRECT
+ * the rest of the screen goes as rectangles of whole rows.
+ */
+#define LIVE_MAXRECT 512
+static struct { UWORD x0, x1, y0, y1; } g_rects[LIVE_MAXRECT];
+static LONG g_nrects;
+
+struct LiveScan {                       /* the rectangle being built */
+    LONG ry0, rx0, rx1, bpp, w;
+};
+
+static void live_close(struct LiveScan *sc, LONG yend)
+{
+    if (sc->ry0 < 0)
+        return;
+    if (g_nrects < LIVE_MAXRECT) {
+        g_rects[g_nrects].x0 = sc->rx0;
+        g_rects[g_nrects].x1 = sc->rx1;
+        g_rects[g_nrects].y0 = sc->ry0;
+        g_rects[g_nrects].y1 = yend;
+        g_nrects++;
+    } else {                            /* list full: widen the last one */
+        g_rects[LIVE_MAXRECT - 1].x0 = 0;
+        g_rects[LIVE_MAXRECT - 1].x1 = sc->w;
+        g_rects[LIVE_MAXRECT - 1].y1 = yend;
+    }
+    sc->ry0 = -1;
+}
+
+/* Row yy changed between columns first..last (first < 0: unchanged). */
+static void live_row(struct LiveScan *sc, LONG yy, LONG first, LONG last)
+{
+    if (first < 0) {
+        live_close(sc, yy);
+        return;
+    }
+    if (sc->ry0 >= 0) {
+        LONG nx0 = first < sc->rx0 ? first : sc->rx0;
+        LONG nx1 = last + 1 > sc->rx1 ? last + 1 : sc->rx1;
+        if ((yy + 1 - sc->ry0) * (nx1 - nx0) * sc->bpp > LIVE_RECT_MAX) {
+            live_close(sc, yy);
+        } else {
+            sc->rx0 = nx0;
+            sc->rx1 = nx1;
+            return;
+        }
+    }
+    sc->ry0 = yy;
+    sc->rx0 = first;
+    sc->rx1 = last + 1;
+}
+
+/*
+ * Compare one row of new RGB565 pixels, produced by EXPR from the
+ * source pointer s (advanced by STEP bytes a pixel), against prev.
+ */
+#define LIVE_DIFF565(STEP, EXPR) do { \
+        for (x = 0; x < (LONG)w; x++, s += (STEP)) { \
+            UWORD px = (EXPR); \
+            if (full || pv[x] != px) { \
+                if (first < 0) first = x; \
+                last = x; \
+                pv[x] = px; \
+            } \
+        } \
+    } while (0)
+
+#define C565(r, g, b) (UWORD)(((((r) & 0xFF) & 0xF8) << 8) | \
+                              ((((g) & 0xFF) & 0xFC) << 3) | \
+                              (((b) & 0xFF) >> 3))
+
+/* One row from a direct (locked) framebuffer in pixel format pf.
+ * FALSE for a format this does not know - the caller falls back.
+ *
+ * Graphics-card memory is slow to read from the 68k side under Emu68
+ * (measured on the A1200, 1280x960: one longword a pixel takes 29 ms
+ * for the screen, the same loop over fast RAM 5 ms) - so each pixel is
+ * ONE read of its full width, and the colour is taken apart in a
+ * register. Reading it a byte at a time cost three trips and 213 ms. */
+static BOOL live_row565(ULONG pf, const UBYTE *row, UWORD *pv, ULONG w,
+                        BOOL full, LONG *pfirst, LONG *plast)
+{
+    LONG x, first = -1, last = -1;
+    const ULONG *l = (const ULONG *)row;
+    const UWORD *s16 = (const UWORD *)row;
+    const UBYTE *s = row;
+    ULONG v;
+    switch (pf) {
+    case PIXFMT_ARGB32:                 /* bytes A R G B */
+        for (x = 0; x < (LONG)w; x++) {
+            UWORD px;
+            v = l[x];
+            px = C565(v >> 16, v >> 8, v);
+            if (full || pv[x] != px) {
+                if (first < 0) first = x;
+                last = x;
+                pv[x] = px;
+            }
+        }
+        break;
+    case PIXFMT_BGRA32:                 /* bytes B G R A */
+        for (x = 0; x < (LONG)w; x++) {
+            UWORD px;
+            v = l[x];
+            px = C565(v >> 8, v >> 16, v >> 24);
+            if (full || pv[x] != px) {
+                if (first < 0) first = x;
+                last = x;
+                pv[x] = px;
+            }
+        }
+        break;
+    case PIXFMT_RGBA32:                 /* bytes R G B A */
+        for (x = 0; x < (LONG)w; x++) {
+            UWORD px;
+            v = l[x];
+            px = C565(v >> 24, v >> 16, v >> 8);
+            if (full || pv[x] != px) {
+                if (first < 0) first = x;
+                last = x;
+                pv[x] = px;
+            }
+        }
+        break;
+    case PIXFMT_RGB16:                  /* already RGB565, big-endian */
+        for (x = 0; x < (LONG)w; x++) {
+            UWORD px = s16[x];
+            if (full || pv[x] != px) {
+                if (first < 0) first = x;
+                last = x;
+                pv[x] = px;
+            }
+        }
+        break;
+    case PIXFMT_RGB16PC:                /* RGB565, little-endian */
+        for (x = 0; x < (LONG)w; x++) {
+            UWORD px = s16[x];
+            px = (UWORD)((px << 8) | (px >> 8));
+            if (full || pv[x] != px) {
+                if (first < 0) first = x;
+                last = x;
+                pv[x] = px;
+            }
+        }
+        break;
+    case PIXFMT_RGB24: LIVE_DIFF565(3, C565(s[0], s[1], s[2])); break;
+    case PIXFMT_BGR24: LIVE_DIFF565(3, C565(s[2], s[1], s[0])); break;
+    default:
+        return FALSE;
+    }
+    *pfirst = first;
+    *plast = last;
+    return TRUE;
+}
+
+static BOOL cmd_live(int cl, int fd, ULONG flags)
+{
+    struct LiveState *ls;
+    struct Screen *sc;
+    struct RastPort temprp;
+    struct LiveScan scan;
+    ULONG ib, w, h, pf = 0, bpr = 0;
+    LONG depth, fmt, bpp, band, y, i, rowbytes = 0, aligned;
+    UBYTE *src = NULL, *out = NULL, *base = NULL, head[8];
+    LONG srcsize = 0;
+    APTR lock = NULL;
+    BOOL full, ok = TRUE, nomem = FALSE;
+    ULONG t0 = health_usecs(), t1 = 0;
+    UBYTE path = 0;                     /* 1 direct, 2 ReadPixelArray */
+
+    ib = LockIBase(0);
+    sc = IntuitionBase->FirstScreen;
+    UnlockIBase(ib);
+    if (!sc)
+        return send_perr(fd, "there are no screens open");
+    w = (ULONG)sc->Width;
+    h = (ULONG)sc->Height;
+    depth = (LONG)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH);
+    fmt = depth > 8 ? LIVE_RGB565 : LIVE_PEN8;
+    bpp = fmt == LIVE_RGB565 ? 2 : 1;
+    if (!w || !h || (LONG)w * 4 > LIVE_RECT_MAX)
+        return send_perr(fd, "that screen is too wide for a live view");
+    if (fmt == LIVE_RGB565 && !g_cgfx)
+        g_cgfx = OpenLibrary("cybergraphics.library", 40);
+    if (fmt == LIVE_RGB565 && !g_cgfx)
+        return send_perr(fd, "a deep screen and no cybergraphics.library");
+
+    ls = g_live[cl];
+    if (!ls) {
+        ls = AllocMem(sizeof(*ls), MEMF_ANY | MEMF_CLEAR);
+        if (!ls)
+            return send_err(fd, "out of memory");
+        g_live[cl] = ls;
+    }
+    /* Why a full frame, for the page's (and a debugger's) benefit. */
+    head[7] = ((flags & 1) ? 1 : 0) | (ls->sc != sc ? 2 : 0) |
+              (ls->w != w ? 4 : 0) | (ls->h != h ? 8 : 0) |
+              (ls->fmt != fmt ? 16 : 0) | (!ls->prev ? 32 : 0);
+    full = head[7] != 0;
+    if (full) {
+        if (ls->prev)
+            FreeMem(ls->prev, ls->size);
+        ls->size = w * h * bpp;
+        ls->prev = AllocMem(ls->size, MEMF_ANY);
+        ls->npal = 0;
+        if (!ls->prev) {
+            live_free(cl);
+            return send_err(fd, "out of memory for the live picture");
+        }
+        ls->sc = sc; ls->w = w; ls->h = h; ls->fmt = fmt;
+    }
+
+    head[0] = 0x10;
+    head[1] = w >> 8; head[2] = w;
+    head[3] = h >> 8; head[4] = h;
+    head[5] = fmt;
+    head[6] = full;
+    if (!send_frame(fd, T_DATA, head, 8))
+        return FALSE;
+
+    out = AllocMem(LIVE_RECT_MAX + 16, MEMF_ANY);
+    if (!out) {
+        live_free(cl);
+        return send_err(fd, "out of memory for the live view");
+    }
+    g_nrects = 0;
+    scan.ry0 = -1;
+    scan.bpp = bpp;
+    scan.w = w;
+    temprp.BitMap = NULL;
+
+    if (fmt == LIVE_PEN8) {
+        /* The palette first: a changed palette changes every pixel's
+         * colour without changing a single pen number. */
+        static ULONG rgb32[256 * 3];
+        LONG ncol = 1L << depth, changed = full;
+        if (ncol > 256) ncol = 256;
+        GetRGB32(sc->ViewPort.ColorMap, 0, (ULONG)ncol, rgb32);
+        for (i = 0; i < ncol; i++) {
+            ULONG c = ((rgb32[i * 3] >> 24) << 16) |
+                      ((rgb32[i * 3 + 1] >> 24) << 8) |
+                      (rgb32[i * 3 + 2] >> 24);
+            if (i >= ls->npal || ls->pal[i] != c) changed = TRUE;
+            ls->pal[i] = c;
+        }
+        ls->npal = ncol;
+        if (changed) {
+            out[0] = 0x11; out[1] = ncol >> 8; out[2] = ncol;
+            for (i = 0; i < ncol; i++) {
+                out[3 + i * 3] = ls->pal[i] >> 16;
+                out[4 + i * 3] = ls->pal[i] >> 8;
+                out[5 + i * 3] = ls->pal[i];
+            }
+            ok = send_frame(fd, T_DATA, out, 3 + ncol * 3);
+        }
+    } else {
+        /*
+         * A graphics-card screen: lock its memory and read it in place.
+         * ReadPixelArray converted every pixel to 24-bit RGB first and
+         * cost ~95 ms a frame on the A1200 for a screen nothing had
+         * touched. The lock is held only for the comparison - no
+         * network traffic happens under it.
+         */
+        struct TagItem tags[4];
+        tags[0].ti_Tag = LBMI_BASEADDRESS; tags[0].ti_Data = (ULONG)&base;
+        tags[1].ti_Tag = LBMI_BYTESPERROW; tags[1].ti_Data = (ULONG)&bpr;
+        tags[2].ti_Tag = LBMI_PIXFMT;      tags[2].ti_Data = (ULONG)&pf;
+        tags[3].ti_Tag = TAG_DONE;         tags[3].ti_Data = 0;
+        /* A row at a time is copied out with CopyMem first and compared
+         * in fast RAM: a loop that read the card's memory and fast RAM
+         * by turns took 200 ms a frame on the A1200, a bulk copy and a
+         * fast-RAM loop a fraction of that (measured). */
+        static ULONG rowbuf[LIVE_RECT_MAX / 4];   /* longword aligned */
+        lock = __LockBitMapTagList_base(g_cgfx, sc->RastPort.BitMap, tags);
+        if (lock && base && w * 4 <= sizeof(rowbuf)) {
+            ULONG pbytes = (pf == PIXFMT_ARGB32 || pf == PIXFMT_BGRA32 ||
+                            pf == PIXFMT_RGBA32) ? 4 :
+                           (pf == PIXFMT_RGB16 || pf == PIXFMT_RGB16PC) ? 2 : 0;
+            ULONG n = (w * 4 <= bpr ? w * 4 : bpr) & ~3UL;
+            BOOL quick = !(((ULONG)base | bpr) & 3);
+            /*
+             * 4- and 2-byte formats: keep the card's own pixels from last
+             * time and compare those a longword at a time - no colour
+             * maths for a pixel that did not change; only the changed
+             * span is converted to RGB565.
+             */
+            if (pbytes) {
+                ULONG need = w * h * pbytes;
+                if (full || !ls->raw || ls->rawpf != pf || ls->rawsize != need) {
+                    if (ls->raw)
+                        FreeMem(ls->raw, ls->rawsize);
+                    ls->raw = AllocMem(need, MEMF_ANY);
+                    ls->rawsize = ls->raw ? need : 0;
+                    ls->rawpf = pf;
+                    full = TRUE;        /* nothing to compare against */
+                }
+                if (!ls->raw)
+                    pbytes = 0;         /* no memory: per-pixel road */
+                n = w * pbytes;
+            }
+            for (y = 0; y < (LONG)h; y++) {
+                LONG first, last;
+                if (quick && !(n & 3))
+                    CopyMemQuick(base + (ULONG)y * bpr, rowbuf, n);
+                else
+                    CopyMem(base + (ULONG)y * bpr, rowbuf, n);
+                if (pbytes) {
+                    ULONG *nw = rowbuf, *ow = (ULONG *)(ls->raw + (ULONG)y * n);
+                    LONG nwords = n / 4, a = 0, b = nwords - 1;
+                    if (!full) {
+                        while (a < nwords && nw[a] == ow[a]) a++;
+                        if (a < nwords)
+                            while (nw[b] == ow[b]) b--;
+                    }
+                    if (a >= nwords) {
+                        first = last = -1;
+                    } else {
+                        LONG ignore0, ignore1;
+                        CopyMem(&nw[a], &ow[a], (b - a + 1) * 4);
+                        first = a * 4 / pbytes;
+                        last = ((b + 1) * 4) / pbytes - 1;
+                        /* convert just that span into the RGB565 copy */
+                        live_row565(pf, (UBYTE *)rowbuf + first * pbytes,
+                                    (UWORD *)(ls->prev + (ULONG)y * w * 2) + first,
+                                    last - first + 1, TRUE, &ignore0, &ignore1);
+                    }
+                } else if (!live_row565(pf, (UBYTE *)rowbuf,
+                                        (UWORD *)(ls->prev + (ULONG)y * w * 2),
+                                        w, full, &first, &last))
+                    break;                  /* unknown format: fall back */
+                live_row(&scan, y, first, last);
+            }
+            __UnLockBitMap_base(g_cgfx, lock);
+            if (y >= (LONG)h) {
+                live_close(&scan, h);
+                path = 1;
+                goto send;
+            }
+            /* fell back part-way: start the comparison again cleanly */
+            g_nrects = 0;
+            scan.ry0 = -1;
+        } else if (lock) {
+            __UnLockBitMap_base(g_cgfx, lock);
+        }
+    }
+
+    /* The general road: ReadPixelArray(8) a band at a time. */
+    aligned = SCREEN_ALIGN(w);
+    rowbytes = fmt == LIVE_RGB565 ? (LONG)w * 3 : aligned;
+    band = 32;
+    srcsize = rowbytes * band;
+    src = AllocMem(srcsize, MEMF_ANY);
+    if (src && fmt == LIVE_PEN8) {
+        temprp = sc->RastPort;
+        temprp.Layer = NULL;
+        temprp.BitMap = AllocBitMap(aligned, 1, 8, 0, NULL);
+    }
+    if (!src || (fmt == LIVE_PEN8 && !temprp.BitMap)) {
+        ok = FALSE;
+        nomem = TRUE;
+        goto done;
+    }
+    for (y = 0; ok && y < (LONG)h; y += band) {
+        LONG n = (y + band > (LONG)h) ? ((LONG)h - y) : band, r;
+        if (fmt == LIVE_RGB565)
+            __ReadPixelArray_base(g_cgfx, src, 0, 0, (UWORD)rowbytes,
+                                  &sc->RastPort, 0, (UWORD)y,
+                                  (UWORD)w, (UWORD)n, RECTFMT_RGB);
+        else
+            ReadPixelArray8(&sc->RastPort, 0, (ULONG)y, w - 1,
+                            (ULONG)(y + n - 1), src, &temprp);
+        for (r = 0; r < n; r++) {
+            LONG yy = y + r, first = -1, last = -1, x;
+            const UBYTE *s = src + r * rowbytes;
+            if (fmt == LIVE_RGB565) {
+                UWORD *pv = (UWORD *)(ls->prev + (ULONG)yy * w * 2);
+                LIVE_DIFF565(3, C565(s[0], s[1], s[2]));
+            } else {
+                UBYTE *pv = ls->prev + (ULONG)yy * w;
+                for (x = 0; x < (LONG)w; x++) {
+                    if (full || pv[x] != s[x]) {
+                        if (first < 0) first = x;
+                        last = x;
+                        pv[x] = s[x];
+                    }
+                }
+            }
+            live_row(&scan, yy, first, last);
+        }
+    }
+    live_close(&scan, h);
+    path = 2;
+
+send:
+    t1 = health_usecs();
+    if (flags & 2) {                    /* asked how long it took */
+        out[0] = 0x13; out[1] = path;
+        put_be32(out + 2, t1 - t0);
+        put_be32(out + 6, (ULONG)g_nrects);
+        ok = send_frame(fd, T_DATA, out, 10);
+    }
+    for (i = 0; ok && i < g_nrects; i++)
+        ok = live_send_rect(fd, ls, out, g_rects[i].x0, g_rects[i].x1,
+                            g_rects[i].y0, g_rects[i].y1);
+done:
+    if (src) FreeMem(src, srcsize);
+    FreeMem(out, LIVE_RECT_MAX + 16);
+    if (temprp.BitMap)
+        FreeBitMap(temprp.BitMap);
+    if (!ok) {
+        live_free(cl);                   /* half-sent: start over next time */
+        /* out of memory: say so in END's place; a failed send has
+         * already lost the connection */
+        return nomem ? send_err(fd, "out of memory for the live view")
+                     : FALSE;
+    }
+    return send_frame(fd, T_END, NULL, 0);
+}
+
 /*
  * List the open screens, front first, and optionally reorder them.
  *
@@ -2589,6 +3089,9 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_WINDOWS:
         return cmd_windows(fd);
 
+    case T_LIVE:
+        return cmd_live(cl, fd, len >= 4 ? get_be32(p) : 0);
+
     case T_HEALTH: {
         /* Static: 2 KB is a quarter of the shell's 8 KB stack. */
         static char report[2048];
@@ -2690,6 +3193,7 @@ static void drop(int cl)
         snoop_stop();
         g_snoop_client = -1;
     }
+    live_free(cl);
     CloseSocket(g_clients[cl].fd);
     g_clients[cl].fd = -1;
     g_clients[cl].hello = FALSE;

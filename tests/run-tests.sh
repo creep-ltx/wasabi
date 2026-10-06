@@ -719,14 +719,10 @@ check "a problem in the past only is exit 0" "0" "$?"
 # --- view: the bridge between a page and the Amiga ---
 # A raw WebSocket client plays the page: it must get a status line and
 # the first picture, and a key it sends must reach the daemon as one
-# whole press, Right Amiga's bit set while Right Amiga is held.
-VPORT=$((PORT+7))
-./wasabi --host 127.0.0.1 --port $PORT --key $KEY view --no-browser \
-    --port $VPORT >"$ROOT/view.log" 2>&1 &
-VIEW_PID=$!
-sleep 1.5
-rm -f "$ROOT/keys.log"
-out=$(timeout 10 python3 - "$VPORT" <<'PY'
+# whole press, Right Amiga's bit set while Right Amiga is held. With a
+# daemon that has LIVE the picture is its compact head + rect; without
+# (WASABI_VIEW_NOLIVE plays one) it is whole RGB rows from GRAB.
+cat > "$ROOT/page.py" <<'PY'
 import base64, json, os, socket, struct, sys, time
 s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
 s.sendall(("GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
@@ -750,28 +746,67 @@ def send(obj):
     d = json.dumps(obj).encode(); mask = os.urandom(4)
     s.sendall(bytes([0x81, 0x80 | len(d)]) + mask +
               bytes(c ^ mask[i & 3] for i, c in enumerate(d)))
-got = set()
-while len(got) < 2:
+got = []
+want = 3
+heads = 0
+while len(got) < want:
     op, d = frame()
-    if op == 1 and b'"connected": true' in d: got.add("status")
-    if op == 2:
+    if op == 1 and b'"connected": true' in d:
+        got.append("status")
+    elif op == 2 and d[0] == 1:
         _, w, h, y, rows = struct.unpack(">BHHHH", d[:9])
-        got.add("band %dx%d" % (w, h))
-print(" ".join(sorted(got)))
+        got.append("band %dx%d" % (w, h)); want = 2
+    elif op == 2 and d[0] == 0x10:
+        heads += 1
+        if heads == 1:
+            got.append("head %dx%d fmt %d full %d" % struct.unpack(">HHBB", d[1:7]))
+    elif op == 2 and d[0] == 0x12:
+        x, y, w, h = struct.unpack(">HHHH", d[1:9])
+        got.append("rect %dx%d %d bytes" % (w, h, len(d) - 9))
+print(", ".join(got))
+# after the first frame, an unchanged screen costs only heads
+quiet = 0
+t_end = time.time() + 1.0
+s.settimeout(0.2)
+while time.time() < t_end:
+    try:
+        op, d = frame()
+    except socket.timeout:
+        continue
+    if op == 2 and d[0] == 0x12:
+        quiet += 1
+print("rects while still: %d" % quiet)
 send({"t": "key", "code": 0x67, "down": True})
 send({"t": "key", "code": 0x12, "down": True})
 send({"t": "key", "code": 0x12, "down": False})
 send({"t": "key", "code": 0x67, "down": False})
 time.sleep(1)
 PY
-)
-check "view: the page gets a status line and the first picture" \
-      "band 8x8 status" "$out"
+VPORT=$((PORT+7))
+./wasabi --host 127.0.0.1 --port $PORT --key $KEY view --no-browser \
+    --port $VPORT >"$ROOT/view.log" 2>&1 &
+VIEW_PID=$!
+sleep 1.5
+rm -f "$ROOT/keys.log"
+out=$(timeout 10 python3 "$ROOT/page.py" "$VPORT")
+check "view: the page gets a status line and the first LIVE picture" \
+      "status, head 8x4 fmt 1 full 1, rect 8x4 64 bytes" "$(echo "$out" | head -1)"
+check "view: a still screen sends no pixels after that" \
+      "rects while still: 0" "$(echo "$out" | sed -n 2p)"
 check "view: keys reach the daemon - Amiga held, E as one press, Amiga let go" \
       "000000670080 00000012008000920080 000000e70000" \
       "$(tr '\n' ' ' < "$ROOT/keys.log" | sed 's/ $//')"
 for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 $VIEW_PID 2>/dev/null || break; sleep 1; done
 kill -0 $VIEW_PID 2>/dev/null; check "view: the bridge ends once its page has gone" "1" "$?"
+kill $VIEW_PID 2>/dev/null
+
+WASABI_VIEW_NOLIVE=1 ./wasabi --host 127.0.0.1 --port $PORT --key $KEY \
+    view --no-browser --port $VPORT >"$ROOT/view2.log" 2>&1 &
+VIEW_PID=$!
+sleep 1.5
+out=$(timeout 10 python3 "$ROOT/page.py" "$VPORT" | head -1)
+check "view: without LIVE it falls back to whole rows from GRAB" \
+      "status, band 8x8" "$out"
 kill $VIEW_PID 2>/dev/null
 
 # --- error paths ---

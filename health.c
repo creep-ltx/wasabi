@@ -236,3 +236,21 @@ LONG health_report(char *buf, LONG size)
     }
     return n;
 }
+
+/* Microseconds from Emu68's free-running counter, or 0 without Emu68:
+ * cheap timing for measuring the daemon's own work. */
+ULONG health_usecs(void)
+{
+    ULONG frq, lo;
+    APTR ssp;
+
+    probe();
+    if (!g_emu68)
+        return 0;
+    ssp = SuperState();
+    MOVEC_D0(0xe0, frq);
+    MOVEC_D0(0xe1, lo);
+    if (ssp)
+        UserState(ssp);
+    return frq >= 1000000 ? lo / (frq / 1000000) : 0;
+}

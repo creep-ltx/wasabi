@@ -112,6 +112,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x4B | KEY      | C→S | `u16 mode`, then events or text (below) |
 | 0x4C | WINDOWS  | C→S | (empty) |
 | 0x4D | HEALTH   | C→S | (empty) |
+| 0x4E | LIVE     | C→S | `u32 flags` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -140,7 +141,7 @@ assuming silence means yes.
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
 `speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry,psfree,`
-`mouse,key,windows,health` for a current build. Self-update makes version skew
+`mouse,key,windows,health,live` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -667,6 +668,51 @@ windows). Tabs and newlines inside titles are sent as spaces.
 The walk runs under `LockIBase()` into a 16 KB buffer; frames go out
 after the lock is dropped. If the buffer fills, the lines so far are
 sent followed by `ERR` in place of `END`.
+
+### LIVE — the front screen for a live view: only what changed
+
+For `wasabi view`, where `GRAB`'s 3.7 MB of 24-bit RGB a frame is the
+whole budget of a Wi-Fi hop. The daemon keeps, **per connection**, the
+last picture it sent there, and replies with `DATA` messages - each one
+self-describing, so the bridge forwards them to the page untouched -
+then `END`:
+
+| First byte | Message | Body |
+|---|---|---|
+| `0x10` | head | `u16 w`, `u16 h`, `u8 format` (1 = RGB565, 2 = pen8), `u8 full`, `u8 why` |
+| `0x11` | palette | `u16 n`, then `n` RGB triples (pen8 only, sent when it changes) |
+| `0x12` | rect | `u16 x`, `u16 y`, `u16 w`, `u16 h`, then the rectangle's pixels row by row |
+| `0x13` | timing | `u8 path` (1 direct, 2 ReadPixelArray), `u32` µs, `u32` rects — only when asked |
+
+`flags` bit 0 asks for everything (a page that has just connected);
+bit 1 asks for the timing message. `full` = 1 means the page must drop
+what it has; `why` says what forced it (bit 0 asked, 1 another screen,
+2/3 a new width/height, 4 a new format, 5 nothing kept yet). A frame
+where nothing changed is the head and the `END` — 8 bytes.
+
+**Format.** Deep screens (> 8 bits) go as RGB565, 2 bytes a pixel:
+lossy for a 24-bit screen (every channel within 7 of the truth,
+measured against `GRAB`), fine for watching. Screens of 8 bits or fewer
+go as pen numbers, 1 byte a pixel, plus the palette whenever it changes
+— exact. `GRAB` stays exact 24-bit for pictures to keep.
+
+**Finding what changed.** Rows are compared to the kept picture; each
+changed row contributes its first and last changed pixel, and
+neighbouring changed rows merge into one rectangle while it stays under
+one frame's worth of bytes. A graphics-card screen is read in place
+under `LockBitMapTags()`: each row is copied out with `CopyMemQuick`
+and compared a longword at a time against the card's own pixels from
+last time (kept too), and only the changed span is converted to RGB565.
+The lock covers only the comparison; the rectangles are sent after it
+is released, so a slow network never holds the Amiga's drawing still.
+Measured on the A1200 (1280×960, BGRA32): an unchanged frame costs
+~20 ms of the Amiga's time. The ways that were slower, for the record:
+`ReadPixelArray` alone 46 ms; reading the card's memory a byte at a
+time, or alternating card reads with fast-RAM reads, 200+ ms; a row
+copied out and converted pixel by pixel, 62 ms. Card memory is slow to
+read from the 68k side under Emu68 (one longword a pixel: 29 ms for the
+whole screen, against 5 ms for the same loop in fast RAM). Formats the
+direct road does not know, and native screens, take `ReadPixelArray`.
 
 ### HEALTH — the machine's vital signs
 

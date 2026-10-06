@@ -42,8 +42,15 @@ MOD_BITS = {0x60: 0x01, 0x61: 0x02, 0x62: 0x04, 0x63: 0x08,
             0x64: 0x10, 0x65: 0x20, 0x66: 0x40, 0x67: 0x80}
 QUAL_REPEAT = 0x0200
 NOPOS = -32768
-MIN_FRAME = 0.1                 # at most ~10 grabs a second
+MIN_FRAME = 0.1                 # GRAB fallback: at most ~10 a second
+# LIVE: a frame costs the Amiga ~20 ms of work (1280x960 RTG, measured)
+# whether or not anything changed, so look often only while something
+# is happening - input from the page, or a picture that changed.
+LIVE_BUSY = 0.05                # 20 a second while busy
+LIVE_IDLE = 0.2                 # 5 a second once all is still
+LIVE_BUSY_FOR = 2.0             # "busy" lasts this long after activity
 DEBUG = bool(os.environ.get("WASABI_VIEW_DEBUG"))   # log input to stderr
+NO_LIVE = bool(os.environ.get("WASABI_VIEW_NOLIVE"))  # force GRAB, to compare
 
 
 def settings_path():
@@ -126,6 +133,9 @@ class Session:
         self.alive = True
         self.qual = 0                    # held Amiga modifier bits
         self.prev = None                 # (width, height, pixels) last sent
+        self.live = False                # the daemon has LIVE
+        self.need_full = True            # the page needs every pixel
+        self.active = 0.0                # when input or a change last came
 
     def stop(self):
         self.alive = False
@@ -139,8 +149,11 @@ class Session:
                     conn = self.w.Conn(self.target[0], self.target[1],
                                        self.key)
                     self.prev = None     # a fresh page needs every row
+                    self.need_full = True
+                    self.live = "live" in conn.caps and not NO_LIVE
                     self.ws.send_text({"t": "status", "connected": True,
-                                       "banner": conn.banner})
+                                       "banner": conn.banner,
+                                       "live": self.live})
                 except (OSError, self.w.WasabiError) as exc:
                     self.ws.send_text({"t": "status", "connected": False,
                                        "error": "cannot reach the Amiga: "
@@ -166,14 +179,22 @@ class Session:
 
     def _cycle(self, conn):
         t0 = time.time()
-        self._drain_input(conn)
-        self._grab(conn)
+        if self._drain_input(conn):
+            self.active = t0
+        if self.live:
+            if self._live(conn):
+                self.active = time.time()
+            busy = time.time() - self.active < LIVE_BUSY_FOR
+            frame = LIVE_BUSY if busy else LIVE_IDLE
+        else:
+            self._grab(conn)
+            frame = MIN_FRAME
         # Wait out the rest of the frame - but wake for input at once.
         # What woke us is kept aside, in order, for the next drain: put
         # back on the queue it would go behind newer input, and a key
         # could reach the Amiga before the Right Amiga pressed with it
         # (seen on the A1200: Right Amiga+E arrived as E, then Amiga).
-        left = MIN_FRAME - (time.time() - t0)
+        left = frame - (time.time() - t0)
         if left > 0:
             try:
                 msg = self.inbox.get(timeout=left)
@@ -191,6 +212,7 @@ class Session:
                 break
             if m is not None:
                 msgs.append(m)
+        busy = bool(msgs)
         # Only the last of a run of moves matters: the pointer goes
         # where it ended up, not through every point it passed.
         for i, m in enumerate(msgs):
@@ -198,6 +220,7 @@ class Session:
                     msgs[i + 1].get("t") == "move":
                 continue
             self._input(conn, m)
+        return busy
 
     def _input(self, conn, m):
         w = self.w
@@ -263,6 +286,29 @@ class Session:
                 conn.expect_ok()
         except (OSError, self.w.WasabiError):
             pass
+
+    def _live(self, conn):
+        """One LIVE frame: the daemon's messages go to the page as they
+        are (they are already the page's format). TRUE if any pixel or
+        the palette changed."""
+        conn.send(self.w.LIVE, struct.pack(">I", 1 if self.need_full else 0))
+        self.need_full = False
+        changed = False
+        while True:
+            tag, payload = conn.recv()
+            if tag == self.w.DATA:
+                if payload[:1] in (b"\x11", b"\x12"):
+                    changed = True
+                self.ws.send_binary(payload)
+            elif tag == self.w.END:
+                break
+            elif tag == self.w.ERR:
+                self.need_full = True
+                raise self.w.WasabiError(conn._errtext(payload))
+            else:
+                raise self.w.WasabiError("unexpected tag 0x%02x in LIVE" % tag)
+        self.ws.send_text({"t": "frame", "changed": changed})
+        return changed
 
     def _grab(self, conn):
         width, _, height, pixels, _, _ = self.w.grab_pixels(conn)

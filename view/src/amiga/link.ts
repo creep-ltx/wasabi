@@ -1,10 +1,21 @@
 /*
  * The live link to the Amiga, through the bridge (`wasabi view`).
  *
- * From the bridge: binary messages are bands of changed rows -
- *   u8 1, u16 width, u16 height, u16 y, u16 rows, then rows*width RGB
- * (big-endian), painted straight into the canvas; text messages are
- * JSON status. A new screen size repaints from scratch.
+ * From the bridge, binary messages (all numbers big-endian):
+ *
+ *   0x10 head   u16 w, u16 h, u8 format (1 RGB565, 2 pen8), u8 full
+ *   0x11 pal    u16 n, then n RGB triples (pen8 screens)
+ *   0x12 rect   u16 x, y, w, h, then the rectangle's pixels
+ *
+ * - wasabid's LIVE frames, forwarded untouched: only what changed, in a
+ * compact format. A daemon without LIVE gets the old form instead -
+ *   0x01 band   u16 w, u16 h, u16 y, u16 rows, then rows*w RGB
+ * - whole rows of a grab. Text messages are JSON status.
+ *
+ * A native non-interlaced screen (640x256) has pixels twice as wide as
+ * tall: the canvas keeps the Amiga's own rows and is shown with each
+ * row doubled (rowScale), and the pointer is sent in that doubled
+ * space, which is what Intuition's IECLASS_POINTERPOS expects there.
  *
  * To the bridge: JSON - pointer moves and buttons in the Amiga screen's
  * own pixels, keys as Amiga raw codes going down or up. The bridge
@@ -31,6 +42,10 @@ export class AmigaLink {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private image: ImageData | null = null;
+  private rowScale = 1;
+  private fmt = 0;
+  private pens: Uint8Array | null = null;     // pen8 screens: pen per pixel
+  private palette = new Uint8Array(256 * 3);
   private status: LinkStatus = {
     connected: false,
     banner: '',
@@ -107,7 +122,7 @@ export class AmigaLink {
     this.ws = ws;
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') this.onStatus(ev.data);
-      else this.onBand(ev.data as ArrayBuffer);
+      else this.onBinary(ev.data as ArrayBuffer);
     };
     ws.onclose = () => {
       this.update({ connected: false });
@@ -136,19 +151,46 @@ export class AmigaLink {
     }
   }
 
-  private onBand(buf: ArrayBuffer) {
+  private onBinary(buf: ArrayBuffer) {
     const v = new DataView(buf);
-    if (v.getUint8(0) !== 1) return;
+    switch (v.getUint8(0)) {
+      case 0x01:
+        return this.onBand(v, buf);
+      case 0x10:
+        return this.onHead(v);
+      case 0x11:
+        return this.onPalette(v, buf);
+      case 0x12:
+        return this.onRect(v, buf);
+    }
+  }
+
+  /* The same rule `wasabi grab` uses: double the rows until the shape
+   * is plausible. No square-pixel mode is 2:1 or wider. */
+  private static rowScaleFor(w: number, h: number): number {
+    let k = 1;
+    while (h && w >= 2 * h * k) k *= 2;
+    return k;
+  }
+
+  private resize(w: number, h: number, rowScale: number) {
+    if (w === this.canvas.width && h === this.canvas.height && this.image &&
+        rowScale === this.rowScale) return;
+    this.canvas.width = w;
+    this.canvas.height = h;
+    this.rowScale = rowScale;
+    this.image = this.ctx.createImageData(w, h);
+    this.update({ width: w, height: h * rowScale });
+  }
+
+  /* Old form: whole RGB rows, already row-doubled by the bridge. */
+  private onBand(v: DataView, buf: ArrayBuffer) {
     const w = v.getUint16(1);
     const h = v.getUint16(3);
     const y = v.getUint16(5);
     const rows = v.getUint16(7);
-    if (w !== this.canvas.width || h !== this.canvas.height || !this.image) {
-      this.canvas.width = w;
-      this.canvas.height = h;
-      this.image = this.ctx.createImageData(w, h);
-      this.update({ width: w, height: h });
-    }
+    this.resize(w, h, 1);
+    if (!this.image) return;
     // RGB in, RGBA out: the canvas wants an alpha byte per pixel.
     const src = new Uint8Array(buf, 9, rows * w * 3);
     const dst = this.image.data;
@@ -166,6 +208,81 @@ export class AmigaLink {
     this.ctx.putImageData(this.image, 0, 0, 0, y, w, rows);
   }
 
+  private onHead(v: DataView) {
+    const w = v.getUint16(1);
+    const h = v.getUint16(3);
+    const fmt = v.getUint8(5);
+    const full = v.getUint8(6);
+    if (full || fmt !== this.fmt) {
+      this.image = null;                     // force a fresh canvas
+      this.pens = fmt === 2 ? new Uint8Array(w * h) : null;
+    }
+    this.fmt = fmt;
+    this.resize(w, h, AmigaLink.rowScaleFor(w, h));
+  }
+
+  private onPalette(v: DataView, buf: ArrayBuffer) {
+    const n = Math.min(256, v.getUint16(1));
+    this.palette.set(new Uint8Array(buf, 3, n * 3));
+    // Every pixel may have changed colour without changing its pen.
+    if (this.pens && this.image) {
+      this.paintPens(0, 0, this.canvas.width, this.canvas.height);
+      this.ctx.putImageData(this.image, 0, 0);
+    }
+  }
+
+  private paintPens(x0: number, y0: number, rw: number, rh: number) {
+    if (!this.pens || !this.image) return;
+    const w = this.canvas.width;
+    const dst = this.image.data;
+    const pal = this.palette;
+    for (let y = y0; y < y0 + rh; y++) {
+      let p = y * w + x0;
+      let d = p * 4;
+      for (let x = 0; x < rw; x++, p++, d += 4) {
+        const c = this.pens[p] * 3;
+        dst[d] = pal[c];
+        dst[d + 1] = pal[c + 1];
+        dst[d + 2] = pal[c + 2];
+        dst[d + 3] = 255;
+      }
+    }
+  }
+
+  private onRect(v: DataView, buf: ArrayBuffer) {
+    if (!this.image) return;
+    const x0 = v.getUint16(1);
+    const y0 = v.getUint16(3);
+    const rw = v.getUint16(5);
+    const rh = v.getUint16(7);
+    const w = this.canvas.width;
+    if (this.fmt === 2 && this.pens) {
+      const src = new Uint8Array(buf, 9, rw * rh);
+      for (let y = 0; y < rh; y++) {
+        this.pens.set(src.subarray(y * rw, (y + 1) * rw), (y0 + y) * w + x0);
+      }
+      this.paintPens(x0, y0, rw, rh);
+    } else {
+      // RGB565, big-endian: widen each channel back to 8 bits.
+      const dst = this.image.data;
+      let s = 9;
+      for (let y = 0; y < rh; y++) {
+        let d = ((y0 + y) * w + x0) * 4;
+        for (let x = 0; x < rw; x++, s += 2, d += 4) {
+          const px = v.getUint16(s);
+          const r = px >> 11;
+          const g = (px >> 5) & 63;
+          const b = px & 31;
+          dst[d] = (r << 3) | (r >> 2);
+          dst[d + 1] = (g << 2) | (g >> 4);
+          dst[d + 2] = (b << 3) | (b >> 2);
+          dst[d + 3] = 255;
+        }
+      }
+    }
+    this.ctx.putImageData(this.image, 0, 0, x0, y0, rw, rh);
+  }
+
   private send(obj: object) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(obj));
@@ -177,10 +294,12 @@ export class AmigaLink {
   private amigaXY(ev: MouseEvent): { x: number; y: number } {
     const r = this.canvas.getBoundingClientRect();
     const x = Math.floor(((ev.clientX - r.left) / r.width) * this.canvas.width);
-    const y = Math.floor(((ev.clientY - r.top) / r.height) * this.canvas.height);
+    // In the shown (row-doubled) space: the one the pointer uses.
+    const shownH = this.canvas.height * this.rowScale;
+    const y = Math.floor(((ev.clientY - r.top) / r.height) * shownH);
     return {
       x: Math.max(0, Math.min(this.canvas.width - 1, x)),
-      y: Math.max(0, Math.min(this.canvas.height - 1, y)),
+      y: Math.max(0, Math.min(shownH - 1, y)),
     };
   }
 

@@ -69,7 +69,7 @@ pulling in its libraries — captured live off the A1200.
 | `ps` / `kill` | **working on the real A1200** — full task list with stack headroom; Ctrl-C or RemTask |
 | `speedtest` | **working on the real A1200** — gigabit line rate both ways at 256 MB |
 | `grab` / `screen` | **working on the real A1200** — front screen to PNG in 0.1 s; RTG and native paths both |
-| `view` | **working on the real A1200** (tested in a headless Firefox: picture, clicks, typing, Right Amiga shortcuts, right-button menus, settings) — the live screen in a window, driven with the PC's mouse and keyboard |
+| `view` | **working on the real A1200** (tested in a headless Firefox: picture, clicks, typing, Right Amiga shortcuts, right-button menus, settings) — the live screen in a window, driven with the PC's mouse and keyboard; only changes are sent, key-to-screen 52 ms over Wi-Fi |
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
@@ -1031,11 +1031,20 @@ belong to the browser - **Full screen** lets the page keep more.
 **How it works.** A small bridge in `wasabi_view.py` serves the page
 (built from `view/src` into `view/dist`, which is committed, so no Node
 is needed to run it) and talks to the daemon over one connection per
-page: first every input the page sent, then one grab, of which only the
-rows that changed go to the page. About 8-10 pictures a second on the
-A1200's 1280x960 RTG screen; a mouse move or key takes ~3 ms. The
-Amiga's own pointer is a sprite and is not in the picture - the PC's
-pointer stands in for it. Ordinary keys go as whole presses (down and
+page: first every input the page sent, then one `LIVE` frame. The daemon
+remembers what that page was last sent and replies with only the
+rectangles that changed, in a compact format (16-bit colour for
+graphics-card screens, pen numbers and palette for native ones); the
+bridge passes them straight to the page. A still screen costs 8 bytes a
+frame instead of 3.7 MB. Measured over the Wi-Fi hop: a key press shows
+up on the page **52 ms** later, every time — full grabs took 90-245 ms
+(median 164). The bridge looks 20 times a second while you are using it
+or the screen is changing, and 5 times a second when all is still: each
+look costs the Amiga ~20 ms of work, so an open, idle view takes ~5% of
+its CPU. Against an older daemon without `LIVE` it falls back to whole
+grabs. `wasabi grab` is unchanged and still exact. The Amiga's own
+pointer is a sprite and is not in the picture - the PC's pointer stands
+in for it. Ordinary keys go as whole presses (down and
 up together) and the PC's own key repeat repeats them; only the
 modifiers go down and up separately. input.device repeats a written key
 until its up arrives, so an up that arrives late - it happened once,

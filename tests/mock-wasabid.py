@@ -41,7 +41,7 @@ RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
-KEYIN, WINDOWS, HEALTH = 0x4B, 0x4C, 0x4D
+KEYIN, WINDOWS, HEALTH, LIVE = 0x4B, 0x4C, 0x4D, 0x4E
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -54,7 +54,7 @@ BANNER = None
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
-        "hb,guru,snoopentry,psfree,key,windows,health")
+        "hb,guru,snoopentry,psfree,key,windows,health,live")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -258,6 +258,8 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_windows()
         elif tag == HEALTH:
             self.do_health()
+        elif tag == LIVE:
+            self.do_live(payload)
         elif tag == PS:
             self.do_ps(payload)
         elif tag == KILL:
@@ -523,6 +525,20 @@ class Handler(socketserver.BaseRequestHandler):
         with open(os.path.join(ROOT, "keys.log"), "a") as f:
             f.write(payload.hex() + "\n")
         self.send(OK)
+
+    def do_live(self, payload):
+        """The daemon's LIVE on an 8x4 RGB565 screen: everything when
+        asked for it (flags bit 0), then nothing has changed."""
+        (flags,) = struct.unpack_from(">I", payload, 0) if len(payload) >= 4 \
+            else (0,)
+        full = flags & 1
+        self.send(DATA, struct.pack(">BHHBBB", 0x10, 8, 4, 1, full,
+                                    1 if full else 0))
+        if full:
+            px = b"".join(struct.pack(">H", (x * 4 << 11) | (y * 16 << 5) | 16)
+                          for y in range(4) for x in range(8))
+            self.send(DATA, struct.pack(">BHHHH", 0x12, 0, 0, 8, 4) + px)
+        self.send(END)
 
     def do_health(self):
         """An Emu68 A1200 at a steady 100 68k MIPS, 51.5 C, which had
