@@ -533,8 +533,12 @@ check "kill by command name succeeds" "0" "$?"
 out=$($W kill nosuchtask 2>&1 | grep -c "no task")
 check "kill of a missing task errors" "1" "$out"
 
-out=$($W kill con_handler 2>&1 | grep -c "ambiguous")
-check "kill of an ambiguous name errors" "1" "$out"
+out=$($W kill con_handler 2>&1 | grep -c "2 tasks match con_handler - name one by its address")
+check "kill of an ambiguous name errors, naming the addresses" "1" "$out"
+out=$($W kill clock 2>&1 | grep -c "sent Ctrl-C to clock (0x08052400)")
+check "kill finds a program by its bare name, path or not" "1" "$out"
+out=$($W ps clock 2>/dev/null | grep -c "SYS:Utilities/Clock")
+check "and so does ps" "1" "$out"
 
 out=$($W kill wasabid 2>&1 | grep -c "restart or reboot")
 check "kill refuses the daemon itself" "1" "$out"

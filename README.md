@@ -157,7 +157,9 @@ wasabi snoop [--task PAT] [--log F] [--for S] [--until TEXT]
                              live DOS call trace
 wasabi ps [PATTERN]          list every task, with stack headroom;
                              AmigaDOS wildcards filter
-wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask
+wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask. NAME
+                             may be the bare program name: Clock finds
+                             one started as SYS:Utilities/Clock
 wasabi speedtest [SIZE] [--target PATH]  latency and throughput both ways
 wasabi grab [FILE] [--window TITLE] [--diff BASE.png]
                              the front screen, or one window, as a PNG;

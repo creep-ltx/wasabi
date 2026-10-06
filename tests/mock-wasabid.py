@@ -482,6 +482,9 @@ class Handler(socketserver.BaseRequestHandler):
                  "wasabid", "c:wasabid"),
         MockTask("0x08051200", "p", 0, "wait", 4096, 3100, 2,
                  "Background CLI", "Wait"),
+        # started by its full path: a Shell records it as typed
+        MockTask("0x08052400", "p", 1, "wait", 4096, 3000, 3,
+                 "Background CLI", "SYS:Utilities/Clock"),
         MockTask("0x08032400", "t", 5, "wait", 6144, 380, -1,
                  "input.device", ""),
         MockTask("0x08036000", "t", 5, "wait", 4096, -1, -1,

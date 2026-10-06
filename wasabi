@@ -1938,6 +1938,12 @@ def stack_tight(free, cap):
     return free * 100 < cap * STACK_TIGHT_PCT or free < STACK_TIGHT_ABS
 
 
+def cmd_base(cmd):
+    """'SYS:Utilities/Clock' -> 'Clock': a Shell records a command as it
+    was typed, path and all, but people name it by its last part."""
+    return re.split(r"[:/]", cmd)[-1]
+
+
 def ps_rows(conn, pattern=None):
     """The task list as tuples: (addr, kind, pri, state, stack, free,
     cli, name, cmd), sorted processes-first by CLI number then name."""
@@ -1963,7 +1969,8 @@ def ps_rows(conn, pattern=None):
             addr, kind, pri, state, stack, cli, rest = parts
             free = "-1"
         name, _, cmd = rest.partition("\t")
-        if rx and not (rx.match(name) or (cmd and rx.match(cmd))):
+        if rx and not (rx.match(name) or (cmd and (
+                rx.match(cmd) or rx.match(cmd_base(cmd))))):
             continue
         rows.append((addr, kind, int(pri), state, int(stack), int(free),
                      int(cli), name, cmd))
@@ -2014,11 +2021,36 @@ def cmd_ps(conn, args):
 
 
 def cmd_kill(conn, args):
+    """Ctrl-C (or with --force, RemTask) a task by name or 0x address.
+
+    A name is resolved here first, against the task name, the command
+    as typed, and the command's last part - so 'Clock' finds a Clock
+    started as 'SYS:Utilities/Clock'. The daemon is then sent the
+    address, and re-checks that the task is still alive before it acts.
+    """
+    target = args.target
+    if not target.lower().startswith("0x"):
+        t = target.lower()
+        rows, _ = ps_rows(conn)
+        hits = [r for r in rows if t in (r[7].lower(), r[8].lower(),
+                                         cmd_base(r[8]).lower())]
+        if not hits:
+            raise WasabiError("no task or process called %s - "
+                              "'wasabi ps' lists them" % target)
+        if len(hits) > 1:
+            raise WasabiError(
+                "%d tasks match %s - name one by its address: %s"
+                % (len(hits), target, ", ".join(
+                    "%s (%s)" % (r[0], r[8] or r[7]) for r in hits)))
+        target = hits[0][0]
+        label = "%s (%s)" % (args.target, target)
+    else:
+        label = target
     flags = 1 if args.force else 0
-    conn.send(KILL, struct.pack(">I", flags) + pack_str(args.target))
+    conn.send(KILL, struct.pack(">I", flags) + pack_str(target))
     conn.expect_ok()
     print("%s %s" % ("removed" if args.force else "sent Ctrl-C to",
-                     args.target), file=sys.stderr)
+                     label), file=sys.stderr)
 
 
 def do_reboot(conn, cold=False):
