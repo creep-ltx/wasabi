@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Wasabi
+GenericName=Amiga remote control
+Comment=Live stats, screen, files and screenshots of the Amiga
+Exec=wasabi desktop
+Icon=wasabi
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=Amiga;A1200;remote;

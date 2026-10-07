@@ -548,6 +548,34 @@ def open_window(url, kiosk=False):
     return True
 
 
+def app_window(url, title, kiosk):
+    """Open the page in a window of its own - no tabs, no address bar,
+    and no browser shortcuts in the way (Ctrl+W goes to the Amiga) -
+    through pywebview and whatever web engine the system has (WebKitGTK
+    on this PC once `webkit2gtk-4.1` is installed; Qt WebEngine works
+    too). Blocks until the window is closed and returns True; returns
+    False at once when there is no such engine, and the caller falls
+    back to a browser. WASABI_WEBVIEW_GUI picks a backend ("gtk"/"qt")."""
+    try:
+        import webview
+    except ImportError:
+        return False
+    try:
+        win = webview.create_window(title, url, width=1400, height=900,
+                                    min_size=(800, 560),
+                                    background_color="#000000",
+                                    fullscreen=kiosk)
+        close_after = float(os.environ.get("WASABI_WEBVIEW_CLOSE_AFTER", 0))
+        if close_after:                 # tests: close it as a person would
+            threading.Timer(close_after, win.destroy).start()
+        webview.start(gui=os.environ.get("WASABI_WEBVIEW_GUI") or None,
+                      private_mode=False)
+    except Exception as exc:            # no usable engine: say so, fall back
+        print("no app window (%s) - using the browser" % exc, file=sys.stderr)
+        return False
+    return True
+
+
 def serve(w, args, target):
     if not os.path.isfile(os.path.join(DIST, "index.html")):
         raise w.WasabiError(
@@ -574,9 +602,15 @@ def serve(w, args, target):
         url, target[0], target[1],
         "" if args.stay else "; closes when its window does"),
         file=sys.stderr)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    if not args.no_browser and not getattr(args, "browser", False):
+        title = "Wasabi" if getattr(args, "mode", "view") != "view" \
+            else "Wasabi view"
+        if app_window(url, title, args.kiosk):
+            httpd.shutdown()            # the window was closed: done
+            return 0
     if not args.no_browser and not open_window(url, args.kiosk):
         print("no browser found - open %s yourself" % url, file=sys.stderr)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
         while True:
             time.sleep(0.5)

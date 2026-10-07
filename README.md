@@ -1032,6 +1032,16 @@ as `quit` always has; `kill --force` (RemTask) was already explicit. A
 
 **Reboot Amiga** sits at the foot of the sidebar, behind a confirmation.
 
+**Its own window.** With pywebview and a system web engine installed
+(`sudo pacman -S python-pywebview webkit2gtk-4.1` on this PC),
+`wasabi desktop` and `wasabi view` open in a window of their own - no
+tabs, no address bar, and no browser shortcuts in the way, so Ctrl+W
+reaches the Amiga. Closing the window ends the program. Without them,
+or with `--browser`, they open in the web browser as before. `make
+install-desktop` puts **Wasabi** in the app menu, with its icon
+(`desktop/`). Tested with pywebview's Qt backend (off-screen); the GTK
+one, which the command above installs, is the same pywebview call.
+
 The app only answers its own page: requests must be addressed to it by
 name (`127.0.0.1` or `localhost`, stopping DNS rebinding), anything that
 changes something must carry an `X-Wasabi` header (which another web

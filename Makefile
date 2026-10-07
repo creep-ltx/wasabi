@@ -30,4 +30,15 @@ deploy: wasabid
 clean:
 	rm -f wasabid
 
-.PHONY: all test deploy clean
+# The launcher entry and icon, for this user: `wasabi desktop` from the
+# app menu. Exec gets the full path - a launcher's PATH may lack ~/.local/bin.
+APPS  = $(HOME)/.local/share/applications
+ICONS = $(HOME)/.local/share/icons/hicolor/scalable/apps
+install-desktop:
+	mkdir -p "$(APPS)" "$(ICONS)"
+	cp desktop/wasabi.svg "$(ICONS)/wasabi.svg"
+	sed "s|^Exec=wasabi|Exec=$(HOME)/.local/bin/wasabi|" desktop/wasabi.desktop \
+	    > "$(APPS)/wasabi.desktop"
+	-update-desktop-database "$(APPS)" 2>/dev/null
+
+.PHONY: all test deploy clean install-desktop

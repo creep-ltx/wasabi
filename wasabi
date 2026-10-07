@@ -2801,6 +2801,9 @@ def main(argv=None):
                        help="open full screen")
         s.add_argument("--stay", action="store_true",
                        help="keep serving after the window closes")
+        s.add_argument("--browser", action="store_true",
+                       help="open in the web browser even when an app "
+                            "window is possible")
         s.set_defaults(fn=cmd_view, no_conn=True, mode=mode)
 
     s = sub.add_parser("health", help="the Pi's temperature, voltage and "
