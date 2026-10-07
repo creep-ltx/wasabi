@@ -18,6 +18,7 @@ import {
 } from '@radix-ui/react-icons';
 import { api, size, type Health, type Info } from '../api';
 import { Sparkline } from '../ui/Sparkline';
+import { LogoutButton, RebootButton } from '../ui/Machine';
 
 const EVERY = 2;          // seconds between health readings
 const KEEP = 90;          // readings kept for the sparklines: 3 minutes
@@ -95,7 +96,9 @@ function Meter({ label, free, total, note }: {
   );
 }
 
-export function OverviewPage() {
+export function OverviewPage({ login = false, onLogout }: {
+  login?: boolean; onLogout?: () => void;
+}) {
   const [h, setH] = useState<Health | null>(null);
   const [info, setInfo] = useState<Info | null>(null);
   const [error, setError] = useState('');
@@ -239,6 +242,11 @@ export function OverviewPage() {
               </DataList.Item>
             </DataList.Root>
           </Card>
+          {/* On a phone the sidebar is hidden: its buttons live here. */}
+          <Flex gap="3" mt="4" display={{ initial: 'flex', md: 'none' }}>
+            <RebootButton />
+            {login && onLogout && <LogoutButton onDone={onLogout} />}
+          </Flex>
         </>
       )}
     </Box>

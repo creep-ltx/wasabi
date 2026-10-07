@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Wasabi: a dab of wasabi green on a dark tile, with the Amiga's
+       red Boing check showing faintly through. -->
+  <defs>
+    <clipPath id="dab"><circle cx="128" cy="128" r="84"/></clipPath>
+    <radialGradient id="shade" cx="40%" cy="35%" r="70%">
+      <stop offset="0" stop-color="#b6e36a"/>
+      <stop offset="1" stop-color="#5f9a1c"/>
+    </radialGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#111318"/>
+  <circle cx="128" cy="128" r="84" fill="url(#shade)"/>
+  <g clip-path="url(#dab)" opacity="0.16">
+    <rect x="50" y="58" width="39" height="39" fill="#e33"/>
+    <rect x="128" y="58" width="39" height="39" fill="#e33"/>
+    <rect x="89" y="97" width="39" height="39" fill="#e33"/>
+    <rect x="167" y="97" width="39" height="39" fill="#e33"/>
+    <rect x="50" y="136" width="39" height="39" fill="#e33"/>
+    <rect x="128" y="136" width="39" height="39" fill="#e33"/>
+    <rect x="89" y="175" width="39" height="39" fill="#e33"/>
+    <rect x="167" y="175" width="39" height="39" fill="#e33"/>
+  </g>
+  <path d="M82 96 L104 166 L128 116 L152 166 L174 96" fill="none"
+        stroke="#ffffff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -46,6 +46,7 @@ body,
   image-rendering: var(--wv-screen-rendering);
   outline: none;
   cursor: default;
+  touch-action: none;     /* the phone's fingers drive the Amiga, not scrolling */
 }
 
 .wv-screen:focus-visible {
@@ -186,4 +187,38 @@ body,
 
 .wv-shot-card {
   cursor: pointer;
+}
+
+/* --- Wasabi phone ---------------------------------------------------- */
+
+.wv-login {
+  width: var(--wv-page-width);
+  height: var(--wv-page-height);
+}
+
+.wv-login-card {
+  width: 100%;
+  max-width: var(--wv-dialog-width);
+}
+
+.wv-bottom-nav {
+  flex: none;
+  border-top: var(--wv-hairline) solid var(--gray-a4);
+  background: var(--color-panel-solid);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.wv-bottom-nav .rt-Button {
+  flex: 1;
+  flex-direction: column;
+  height: auto;
+  padding-block: var(--space-2);
+  gap: var(--space-1);
+}
+
+.wv-keybar {
+  flex: none;
+  overflow-x: auto;
+  background: var(--wv-color-bar);
+  padding: var(--wv-bar-pad);
 }

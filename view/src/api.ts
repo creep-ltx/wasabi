@@ -15,6 +15,9 @@ export async function api<T>(path: string, body?: object): Promise<T> {
         body: JSON.stringify(body),
       });
   const data = (await r.json().catch(() => ({}))) as { error?: string };
+  // A server with a login (Wasabi phone) answers 401 once the session
+  // has gone: the app shows the login again.
+  if (r.status === 401) window.dispatchEvent(new Event('wasabi-login'));
   if (r.status === 428) throw new NeedsForce(data.error ?? 'needs confirming');
   if (!r.ok) throw new Error(data.error ?? `${r.status}`);
   return data as T;
@@ -77,3 +80,6 @@ export function bytes(n: number | null): string {
   if (n < 1024) return `${n} B`;
   return size(Math.round(n / 1024));
 }
+
+export type Me = { mode: 'desktop' | 'server'; local_name: string; local_home: string };
+export type AuthState = { required: boolean; setup: boolean; logged_in: boolean };

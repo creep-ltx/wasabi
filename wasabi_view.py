@@ -239,6 +239,27 @@ class Session:
             conn.send(w.MOUSE, struct.pack(">HHHhh", 2 if m["down"] else 3,
                                            b, 0, NOPOS, NOPOS))
             conn.expect_ok()
+        elif t == "text":
+            self._text(conn, m)
+        elif t == "press":
+            # one key with modifiers, from the phone's key bar: modifier
+            # keys down, the key, modifiers up - all in one command
+            code = int(m["code"]) & 0x7F
+            qual = int(m.get("qual", 0)) & 0xFF
+            ev = []
+            q = 0
+            for mod, bit in sorted(MOD_BITS.items()):
+                if qual & bit and mod != 0x62:
+                    q |= bit
+                    ev.append((mod, q))
+            ev += [(code, q), (code | 0x80, q)]
+            for mod, bit in sorted(MOD_BITS.items(), reverse=True):
+                if q & bit:
+                    q &= ~bit
+                    ev.append((mod | 0x80, q))
+            conn.send(w.KEY, struct.pack(">H", 0) +
+                      b"".join(struct.pack(">HH", c, qq) for c, qq in ev))
+            conn.expect_ok()
         elif t == "key":
             code = int(m["code"]) & 0x7F
             bit = MOD_BITS.get(code)
@@ -268,6 +289,18 @@ class Session:
             qual = self.qual | (QUAL_REPEAT if m.get("repeat") else 0)
             conn.send(w.KEY, struct.pack(">HHHHH", 0, code, qual,
                                          code | 0x80, self.qual))
+            conn.expect_ok()
+
+    def _text(self, conn, m):
+        """Typed text from a phone's keyboard: the Amiga's keymap picks
+        the keys (KEY text mode), so å and @ come out right."""
+        data = str(m.get("s", ""))[:2048].replace("\n", "\r")
+        try:
+            raw = data.encode("latin-1")
+        except UnicodeEncodeError:
+            raw = data.encode("latin-1", "replace")
+        if raw:
+            conn.send(self.w.KEY, struct.pack(">H", 1) + raw)
             conn.expect_ok()
 
     def _release(self, conn):
@@ -342,12 +375,14 @@ class Session:
 
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
          ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png",
+         ".webmanifest": "application/manifest+json",
          ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf"}
 
 
-def make_handler(w, target, key, server_state, api, port, listen):
+def make_handler(w, target, key, server_state, api, port, listen, auth=None):
+    import http.cookies
     import urllib.parse
-    from wasabi_api import ApiError
+    from wasabi_api import ApiError, Auth
     hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port,
              "%s:%d" % (listen, port)}
 
@@ -357,10 +392,56 @@ def make_handler(w, target, key, server_state, api, port, listen):
         def log_message(self, fmt, *a):      # quiet: this is an app window
             pass
 
+        def session(self):
+            c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
+            m = c.get(Auth.COOKIE)
+            return m.value if m else ""
+
+        def logged_in(self):
+            return auth is None or auth.check(self.session())
+
+        def set_session(self, token, body=b'{"ok": true}'):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "%s=%s; HttpOnly; SameSite=Strict; "
+                             "Path=/; Max-Age=%d" % (Auth.COOKIE, token,
+                                                     Auth.DAYS * 86400))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def auth_call(self, method, path):
+            """The login: open to all - it is how one gets in."""
+            if method == "GET":
+                return self.json(200, {
+                    "required": auth is not None,
+                    "setup": bool(auth and auth.needs_setup()),
+                    "logged_in": self.logged_in()})
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except ValueError:
+                body = {}
+            if auth is None:
+                return self.json(404, {"error": "no login on this server"})
+            try:
+                if path == "/api/auth/setup":
+                    return self.set_session(auth.setup(str(body.get("password", ""))))
+                if path == "/api/auth/login":
+                    return self.set_session(auth.login(str(body.get("password", ""))))
+                if path == "/api/auth/logout":
+                    auth.logout(self.session())
+                    return self.set_session("", b'{"ok": true}')
+            except ApiError as exc:
+                return self.json(exc.code, {"error": str(exc)})
+            return self.json(404, {"error": "no such call"})
+
         def trusted(self, changes):
             """See wasabi_api's docstring: Host names this server, and a
-            change carries X-Wasabi, which another site cannot send."""
-            if self.headers.get("Host", "") not in hosts:
+            change carries X-Wasabi, which another site cannot send. A
+            server with a login is reached by any of its names (the NAS
+            has three), and the login cookie does the Host check's job."""
+            if auth is None and self.headers.get("Host", "") not in hosts:
                 self.reply(403, "text/plain", b"wrong host")
                 return False
             if changes and self.headers.get("X-Wasabi") != "1":
@@ -392,6 +473,10 @@ def make_handler(w, target, key, server_state, api, port, listen):
         def do_POST(self):
             if not self.trusted(changes=True):
                 return
+            if self.path.startswith("/api/auth/"):
+                return self.auth_call("POST", self.path.split("?", 1)[0])
+            if not self.logged_in():
+                return self.json(401, {"error": "please log in"})
             if self.path.startswith("/api/"):
                 return self.api("POST")
             self.reply(404, "text/plain", b"not found")
@@ -400,9 +485,17 @@ def make_handler(w, target, key, server_state, api, port, listen):
             if not self.trusted(changes=False):
                 return
             path = self.path.split("?", 1)[0]
+            if path.startswith("/api/auth/"):
+                return self.auth_call("GET", path)
+            guarded = path == "/ws" or path.startswith("/shots/") or \
+                (path.startswith("/api/") and path != "/api/settings")
+            if guarded and not self.logged_in():
+                return self.json(401, {"error": "please log in"})
             if path == "/ws":
                 origin = self.headers.get("Origin", "")
-                if origin and origin.split("://", 1)[-1] not in hosts:
+                allowed = hosts | {self.headers.get("Host", "")} if auth \
+                    else hosts
+                if origin and origin.split("://", 1)[-1] not in allowed:
                     return self.reply(403, "text/plain", b"wrong origin")
                 return self.websocket()
             if path.startswith("/shots/"):
@@ -435,6 +528,8 @@ def make_handler(w, target, key, server_state, api, port, listen):
         def do_PUT(self):
             if not self.trusted(changes=True):
                 return
+            if not self.logged_in():
+                return self.json(401, {"error": "please log in"})
             if self.path != "/api/settings":
                 return self.reply(404, "text/plain", b"not found")
             n = int(self.headers.get("Content-Length", "0"))
@@ -582,10 +677,17 @@ def serve(w, args, target):
             "the view's page is not built - run: cd %s/view && npm install "
             "&& npm run build" % HERE)
     state = ServerState()
-    from wasabi_api import Api
-    api = Api(w, target, args.key, getattr(args, "protect", set()))
+    from wasabi_api import Api, Auth
+    server = getattr(args, "mode", "") == "server"
+    auth = Auth(os.path.join(os.environ.get(
+        "XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "wasabi")) \
+        if server else None
+    root = getattr(args, "files", None) if server else None
+    if root:
+        os.makedirs(root, exist_ok=True)
+    api = Api(w, target, args.key, getattr(args, "protect", set()), root=root)
     handler = make_handler(w, target, args.key, state, api, args.view_port,
-                           args.listen)
+                           args.listen, auth)
     try:
         httpd = ThreadingHTTPServer((args.listen, args.view_port), handler)
     except OSError as exc:
@@ -603,6 +705,17 @@ def serve(w, args, target):
         "" if args.stay else "; closes when its window does"),
         file=sys.stderr)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    if server:
+        print("serving with a login%s; files in %s" % (
+            " (the first visitor chooses the password)"
+            if auth.needs_setup() else "", root), file=sys.stderr)
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
+        httpd.shutdown()
+        return 0
     if not args.no_browser and not getattr(args, "browser", False):
         title = "Wasabi" if getattr(args, "mode", "view") != "view" \
             else "Wasabi view"

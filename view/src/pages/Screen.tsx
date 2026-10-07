@@ -1,19 +1,31 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import {
   Badge,
   Box,
   Button,
+  Checkbox,
   Dialog,
   Flex,
   Select,
   Text,
+  TextField,
 } from '@radix-ui/themes';
-import { CameraIcon, EnterFullScreenIcon, GearIcon } from '@radix-ui/react-icons';
+import {
+  ArrowDownIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ArrowUpIcon,
+  CameraIcon,
+  EnterFullScreenIcon,
+  GearIcon,
+  KeyboardIcon,
+} from '@radix-ui/react-icons';
 import { AmigaLink, type LinkStatus } from '../amiga/link';
 import { api, putSettings } from '../api';
 import {
   AMIGA_MODIFIERS,
   DEFAULT_KEYS,
+  POSITIONS,
   PC_MODIFIER_KEYS,
   assignKey,
   type AmigaKeySettings,
@@ -126,9 +138,11 @@ export function ScreenPage({ bare = false }: { bare?: boolean }) {
             : status.error || 'looking for the Amiga…'}
         </Text>
         <Box flexGrow="1" />
-        <Text size="1" color="gray">
-          {note || "Click the screen to use the Amiga's mouse and keyboard"}
-        </Text>
+        <Box display={{ initial: 'none', md: 'block' }}>
+          <Text size="1" color="gray">
+            {note || "Click the screen to use the Amiga's mouse and keyboard"}
+          </Text>
+        </Box>
         <Button
           size="1"
           variant="soft"
@@ -141,20 +155,23 @@ export function ScreenPage({ bare = false }: { bare?: boolean }) {
         >
           <CameraIcon /> Screenshot
         </Button>
-        <Button
-          size="1"
-          variant="soft"
-          onClick={() => {
-            void document.documentElement.requestFullscreen?.();
-            linkRef.current?.focus();
-          }}
-        >
-          <EnterFullScreenIcon /> Full screen
-        </Button>
+        <Box display={{ initial: 'none', md: 'block' }}>
+          <Button
+            size="1"
+            variant="soft"
+            onClick={() => {
+              void document.documentElement.requestFullscreen?.();
+              linkRef.current?.focus();
+            }}
+          >
+            <EnterFullScreenIcon /> Full screen
+          </Button>
+        </Box>
         {settings && (
           <SettingsDialog settings={settings} onChange={update} />
         )}
       </Flex>
+      <KeyBar link={linkRef} />
       <Box
         ref={stageRef}
         className="wv-stage"
@@ -242,5 +259,70 @@ function SettingsDialog({
         </Flex>
       </Dialog.Content>
     </Dialog.Root>
+  );
+}
+
+/* Keys a phone's keyboard has not got, and the phone's keyboard itself
+ * for text. Shown on small screens; a PC has its real keyboard. */
+const BAR_KEYS: { label: ReactNode; code: number; name: string }[] = [
+  { label: 'Return', code: 0x44, name: 'Return' },
+  { label: '⌫', code: 0x41, name: 'Backspace' },
+  { label: 'Del', code: 0x46, name: 'Delete' },
+  { label: 'Esc', code: 0x45, name: 'Escape' },
+  { label: 'Tab', code: 0x42, name: 'Tab' },
+  { label: <ArrowUpIcon />, code: 0x4c, name: 'Up' },
+  { label: <ArrowDownIcon />, code: 0x4d, name: 'Down' },
+  { label: <ArrowLeftIcon />, code: 0x4f, name: 'Left' },
+  { label: <ArrowRightIcon />, code: 0x4e, name: 'Right' },
+  { label: 'Help', code: 0x5f, name: 'Help' },
+];
+
+function KeyBar({ link }: { link: RefObject<AmigaLink | null> }) {
+  const [text, setText] = useState('');
+  const [amiga, setAmiga] = useState(false);
+  const send = () => {
+    const l = link.current;
+    if (!l || !text) return;
+    // With Right Amiga held, one letter or digit is a shortcut: send it
+    // by key position with the qualifier; text goes through the keymap.
+    const one = text.length === 1 ? POSITIONS.get(/[0-9]/.test(text)
+      ? `Digit${text}` : `Key${text.toUpperCase()}`) : undefined;
+    if (amiga && one !== undefined) l.press(one, 0x80);
+    else l.sendText(text);
+    setText('');
+  };
+  return (
+    <Flex className="wv-keybar" gap="1" display={{ initial: 'flex', md: 'none' }}>
+      <Dialog.Root>
+        <Dialog.Trigger>
+          <Button size="1" variant="soft" aria-label="Type on the Amiga"><KeyboardIcon /></Button>
+        </Dialog.Trigger>
+        <Dialog.Content maxWidth="var(--wv-dialog-width)">
+          <Dialog.Title>Type on the Amiga</Dialog.Title>
+          <Dialog.Description size="2" color="gray" mb="3">
+            Goes to the Amiga's active window. Enter sends.
+          </Dialog.Description>
+          <TextField.Root autoFocus value={text} placeholder="Text"
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') send(); }} />
+          <Text as="label" size="2" mt="3">
+            <Flex gap="2" align="center" mt="3">
+              <Checkbox checked={amiga} onCheckedChange={(v) => setAmiga(v === true)} />
+              Hold Right Amiga (one letter = a menu shortcut)
+            </Flex>
+          </Text>
+          <Flex gap="3" mt="4" justify="end">
+            <Button variant="soft" color="gray" onClick={() => link.current?.press(0x44)}>Return</Button>
+            <Button onClick={send} disabled={!text}>Send</Button>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
+      {BAR_KEYS.map((k) => (
+        <Button key={k.name} size="1" variant="soft" color="gray" aria-label={k.name}
+          onClick={() => link.current?.press(k.code)}>
+          {k.label}
+        </Button>
+      ))}
+    </Flex>
   );
 }

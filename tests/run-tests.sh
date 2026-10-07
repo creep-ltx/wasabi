@@ -841,6 +841,31 @@ out=$(curl -s "$A/api/amiga/ls?path=C:" | python3 -c 'import json,sys; print(any
 check "desktop: lists an Amiga drawer" "True" "$out"
 kill $VIEW_PID 2>/dev/null
 
+# --- serve: Wasabi phone's server - a login, and a fenced folder ---
+mkdir -p "$ROOT/srv-files"
+./wasabi --host 127.0.0.1 --port $PORT --key $KEY serve --port $VPORT \
+    --files "$ROOT/srv-files" >"$ROOT/serve.log" 2>&1 &
+VIEW_PID=$!
+sleep 1.5
+A="http://127.0.0.1:$VPORT"
+J=(-H "Content-Type: application/json" -H "X-Wasabi: 1")
+out=$(curl -s -o /dev/null -w "%{http_code}" "$A/api/health")
+check "serve: nothing without logging in" "401" "$out"
+out=$(curl -s "$A/api/auth/state")
+check "serve: the first visitor is asked to choose a password" \
+      '{"required": true, "setup": true, "logged_in": false}' "$out"
+out=$(curl -s -c "$ROOT/jar" "${J[@]}" -X POST -d '{"password":"correct horse"}' "$A/api/auth/setup")
+check "serve: setting it logs in" '{"ok": true}' "$out"
+out=$(curl -s "${J[@]}" -X POST -d '{"password":"another one"}' "$A/api/auth/setup")
+check "serve: and nobody can set it again" '{"error": "a password is already set"}' "$out"
+out=$(curl -s -o /dev/null -w "%{http_code}" "${J[@]}" -X POST -d '{"password":"wrong guess"}' "$A/api/auth/login")
+check "serve: a wrong password is refused" "401" "$out"
+out=$(curl -s -b "$ROOT/jar" "$A/api/health" | python3 -c 'import json,sys; print(json.load(sys.stdin)["temp_c"])')
+check "serve: logged in, it works" "51.5" "$out"
+out=$(curl -s -b "$ROOT/jar" "$A/api/local/ls?path=/../../etc" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error"))')
+check "serve: the files folder cannot be left" "that is outside the Wasabi folder" "$out"
+kill $VIEW_PID 2>/dev/null
+
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")
 if [ "$out" -ge 1 ]; then ok "a missing file reports an error"

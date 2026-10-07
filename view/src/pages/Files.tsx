@@ -8,8 +8,10 @@ import {
   Checkbox,
   Dialog,
   Flex,
+  Grid,
   Heading,
   IconButton,
+  SegmentedControl,
   Spinner,
   Table,
   Text,
@@ -26,7 +28,7 @@ import {
   ReloadIcon,
   TrashIcon,
 } from '@radix-ui/react-icons';
-import { api, bytes, NeedsForce, type Entry } from '../api';
+import { api, bytes, NeedsForce, type Entry, type Me } from '../api';
 
 type Side = 'pc' | 'amiga';
 type Listing = { path: string; entries: Entry[]; parent?: string };
@@ -48,9 +50,10 @@ function FolderGlyph() {
 
 /* One side of the file manager. Click a folder to open it; tick files
  * to copy them across. */
-function Pane({ side, path, setPath, listing, selected, setSelected, busy, onReload,
+function Pane({ side, title, path, setPath, listing, selected, setSelected, busy, onReload,
   onMkdir, onDelete }: {
   side: Side;
+  title: string;
   path: string;
   setPath: (p: string) => void;
   listing: Listing | null;
@@ -82,7 +85,7 @@ function Pane({ side, path, setPath, listing, selected, setSelected, busy, onRel
   return (
     <Card size="2">
       <Flex align="center" justify="between" mb="2">
-        <Heading size="3">{side === 'pc' ? 'This PC' : 'Amiga'}</Heading>
+        <Heading size="3">{title}</Heading>
         <Flex gap="1" align="center">
           {busy && <Spinner />}
           <Tooltip content="Up one level">
@@ -167,8 +170,11 @@ function Pane({ side, path, setPath, listing, selected, setSelected, busy, onRel
   );
 }
 
-export function FilesPage() {
-  const [pcPath, setPcPath] = useState('~');
+export function FilesPage({ me }: { me: Me | null }) {
+  const local = me?.local_name ?? 'This PC';
+  // On a phone the panes take turns; on a wide screen both show.
+  const [shown, setShown] = useState<Side>('amiga');
+  const [pcPath, setPcPath] = useState(me?.local_home ?? '~');
   const [amPath, setAmPath] = useState('');
   const [pc, setPc] = useState<Listing | null>(null);
   const [am, setAm] = useState<Listing | null>(null);
@@ -236,7 +242,7 @@ export function FilesPage() {
 
   const toAmiga = () => run('amiga', `Copied ${pcSel.size} item(s) to ${amPath}`,
     (force) => api('api/copy/to-amiga', {
-      paths: [...pcSel].map((n) => `${pc?.path}/${n}`), dir: amPath, force,
+      paths: [...pcSel].map((n) => `${(pc?.path ?? '').replace(/\/$/, '')}/${n}`), dir: amPath, force,
     }), () => loadAm());
   const toPc = () => run('pc', `Copied ${amSel.size} item(s) to ${pc?.path}`,
     () => api('api/copy/to-pc', {
@@ -258,26 +264,36 @@ export function FilesPage() {
         </Callout.Root>
       )}
       {done && <Text as="p" size="2" color="green" mb="3">{done}</Text>}
-      <Box className="wv-panes">
-        <Pane side="pc" path={pc?.path ?? pcPath} setPath={setPcPath} listing={pc}
+      <Box display={{ initial: 'block', md: 'none' }} mb="3">
+        <SegmentedControl.Root value={shown} onValueChange={(v) => setShown(v as Side)}>
+          <SegmentedControl.Item value="amiga">Amiga</SegmentedControl.Item>
+          <SegmentedControl.Item value="pc">{local}</SegmentedControl.Item>
+        </SegmentedControl.Root>
+      </Box>
+      <Grid columns={{ initial: '1', md: '1fr auto 1fr' }} gap="3" align="start">
+        <Box display={{ initial: shown === 'pc' ? 'block' : 'none', md: 'block' }}>
+        <Pane side="pc" title={local} path={pc?.path ?? pcPath} setPath={setPcPath} listing={pc}
           selected={pcSel} setSelected={setPcSel} busy={busy === 'pc'}
           onReload={() => loadPc()}
           onMkdir={(name) => run('pc', `Made ${name}`,
             () => api('api/local/mkdir', { path: `${pc?.path}/${name}` }),
             () => loadPc())} />
-        <Flex direction="column" gap="3" pt="9">
-          <Tooltip content="Copy the ticked PC items to the Amiga">
+        </Box>
+        <Flex direction={{ initial: 'row', md: 'column' }} gap="3" pt={{ initial: '0', md: '9' }}
+          justify="center">
+          <Tooltip content={`Copy the ticked ${local} items to the Amiga`}>
             <Button disabled={!pcSel.size || !amPath || !!busy} onClick={() => void toAmiga()}>
               Copy <ArrowRightIcon />
             </Button>
           </Tooltip>
-          <Tooltip content="Copy the ticked Amiga items to this PC">
+          <Tooltip content={`Copy the ticked Amiga items to ${local}`}>
             <Button disabled={!amSel.size || !amPath || !!busy} onClick={() => void toPc()}>
               <ArrowLeftIcon /> Copy
             </Button>
           </Tooltip>
         </Flex>
-        <Pane side="amiga" path={amPath} setPath={setAmPath} listing={am}
+        <Box display={{ initial: shown === 'amiga' ? 'block' : 'none', md: 'block' }}>
+        <Pane side="amiga" title="Amiga" path={amPath} setPath={setAmPath} listing={am}
           selected={amSel} setSelected={setAmSel} busy={busy === 'amiga'}
           onReload={() => loadAm()}
           onMkdir={(name) => run('amiga', `Made ${name}`,
@@ -291,7 +307,8 @@ export function FilesPage() {
               }
             }, () => loadAm()),
           })} />
-      </Box>
+        </Box>
+      </Grid>
       <AlertDialog.Root open={!!confirm} onOpenChange={(o) => { if (!o) setConfirm(null); }}>
         <AlertDialog.Content maxWidth="var(--wv-dialog-width)">
           <AlertDialog.Title>Are you sure?</AlertDialog.Title>

@@ -13,10 +13,11 @@ foreign page cannot send without a CORS preflight this server never
 answers), and the live screen's WebSocket must come from this origin.
 """
 
+import hashlib
+import hmac
 import json
 import os
-import shutil
-import struct
+import secrets
 import threading
 import time
 
@@ -30,9 +31,15 @@ class ApiError(Exception):
 
 
 class Api:
-    def __init__(self, w, target, key, protect):
+    def __init__(self, w, target, key, protect, root=None, shots=None):
         self.w, self.target, self.key = w, target, key
         self.protect = protect
+        # root: the server's files folder (Wasabi on the NAS) - the "PC"
+        # side is then that folder and nothing above it. None: the whole
+        # PC, as the desktop app on the user's own machine.
+        self.root = os.path.realpath(root) if root else None
+        self.shots_dir = shots or (os.path.join(self.root, "Screenshots")
+                                   if self.root else SHOTS)
         self.lock = threading.Lock()
         self.prev_health = None          # for the CPU meter's rate
         self.versions = None             # (time, {...}) - Version is a run
@@ -119,9 +126,27 @@ class Api:
             return {"path": path, "entries": rows}
         return self.call(get)
 
-    @staticmethod
-    def local_ls(path):
-        path = os.path.abspath(os.path.expanduser(path or "~"))
+    def real(self, path):
+        """A path from the page -> a real path on this machine. Under a
+        root, the page's paths are relative to it ("/" is the root) and
+        nothing outside it can be named, symlinks included."""
+        if self.root is None:
+            return os.path.abspath(os.path.expanduser(path or "~"))
+        full = os.path.realpath(os.path.join(self.root,
+                                             (path or "/").lstrip("/")))
+        if full != self.root and not full.startswith(self.root + os.sep):
+            raise ApiError("that is outside the Wasabi folder", 403)
+        return full
+
+    def shown(self, real):
+        """A real path -> the path the page shows."""
+        if self.root is None:
+            return real
+        rel = os.path.relpath(real, self.root)
+        return "/" if rel == "." else "/" + rel
+
+    def local_ls(self, path):
+        path = self.real(path)
         try:
             names = os.listdir(path)
         except OSError as exc:
@@ -141,7 +166,10 @@ class Api:
                          "date": time.strftime("%Y-%m-%d %H:%M",
                                                time.localtime(st.st_mtime))})
         rows.sort(key=lambda e: (not e["dir"], e["name"].lower()))
-        return {"path": path, "parent": os.path.dirname(path),
+        parent = os.path.dirname(path)
+        if self.root is not None and path == self.root:
+            parent = path
+        return {"path": self.shown(path), "parent": self.shown(parent),
                 "entries": rows}
 
     def guard(self, path, force, verb):
@@ -169,6 +197,7 @@ class Api:
                 self.w.do_put(c, src, dst, quiet=True)
                 copied.append(dst)
 
+        local_paths = [self.real(p) for p in local_paths]
         for src in local_paths:
             self.guard(amiga_join(amiga_dir, os.path.basename(src)), force,
                        "write")
@@ -179,7 +208,7 @@ class Api:
 
     def to_pc(self, amiga_paths, local_dir):
         """Copy Amiga files and drawers into a PC folder."""
-        local_dir = os.path.abspath(os.path.expanduser(local_dir))
+        local_dir = self.real(local_dir)
         copied = []
 
         def get_tree(c, src, dst, isdir):
@@ -194,7 +223,7 @@ class Api:
                     c.send(self.w.GET, self.w.pack_str(src))
                     self.w.drain_to_end(c, fh.write)
                 os.replace(tmp, dst)
-                copied.append(dst)
+                copied.append(self.shown(dst))
 
         def run(c):
             for item in amiga_paths:
@@ -227,10 +256,9 @@ class Api:
         self.call(lambda c: remove(c, path, isdir))
         return {"ok": True}
 
-    @staticmethod
-    def local_mkdir(path):
+    def local_mkdir(self, path):
         try:
-            os.makedirs(os.path.expanduser(path), exist_ok=False)
+            os.makedirs(self.real(path), exist_ok=False)
         except OSError as exc:
             raise ApiError("cannot make %s: %s" % (path, exc.strerror))
         return {"ok": True}
@@ -240,35 +268,34 @@ class Api:
     def grab(self):
         def do(c):
             w_, h, out_h, pixels, _, _ = self.w.grab_pixels(c)
-            os.makedirs(SHOTS, exist_ok=True)
+            os.makedirs(self.shots_dir, exist_ok=True)
             name = "amiga-%s.png" % time.strftime("%Y%m%d-%H%M%S")
             n = 1
-            while os.path.exists(os.path.join(SHOTS, name)):
+            while os.path.exists(os.path.join(self.shots_dir, name)):
                 n += 1
                 name = "amiga-%s-%d.png" % (time.strftime("%Y%m%d-%H%M%S"), n)
-            self.w.write_png(os.path.join(SHOTS, name), w_, out_h, pixels)
+            self.w.write_png(os.path.join(self.shots_dir, name), w_, out_h, pixels)
             return {"name": name, "width": w_, "height": out_h}
         return self.call(do)
 
-    @staticmethod
-    def shots():
+    def shots(self):
         try:
-            names = [n for n in os.listdir(SHOTS) if n.endswith(".png")]
+            names = [n for n in os.listdir(self.shots_dir) if n.endswith(".png")]
         except OSError:
             names = []
         out = []
         for n in sorted(names, reverse=True):
-            st = os.stat(os.path.join(SHOTS, n))
+            st = os.stat(os.path.join(self.shots_dir, n))
             out.append({"name": n, "size": st.st_size,
                         "date": time.strftime("%Y-%m-%d %H:%M",
                                               time.localtime(st.st_mtime))})
-        return {"folder": SHOTS, "shots": out}
+        return {"folder": self.shown(self.shots_dir) if self.root
+                else self.shots_dir, "shots": out}
 
-    @staticmethod
-    def shot_path(name):
+    def shot_path(self, name):
         if "/" in name or not name.endswith(".png") or name.startswith("."):
             raise ApiError("no such screenshot", 404)
-        p = os.path.join(SHOTS, name)
+        p = os.path.join(self.shots_dir, name)
         if not os.path.isfile(p):
             raise ApiError("no such screenshot", 404)
         return p
@@ -285,6 +312,11 @@ class Api:
             return {"ok": True}
         return self.call(do)
 
+    def me(self):
+        return {"mode": "server" if self.root else "desktop",
+                "local_name": "NAS" if self.root else "This PC",
+                "local_home": "/" if self.root else "~"}
+
     def dispatch(self, method, path, query, body):
         """Route one /api call; returns a JSON-able object."""
         q = lambda k, d="": query.get(k, [d])[0]     # noqa: E731
@@ -294,6 +326,7 @@ class Api:
             ("GET", "/api/amiga/ls"): lambda: self.amiga_ls(q("path")),
             ("GET", "/api/local/ls"): lambda: self.local_ls(q("path")),
             ("GET", "/api/shots"): lambda: self.shots(),
+            ("GET", "/api/me"): lambda: self.me(),
             ("POST", "/api/copy/to-amiga"): lambda: self.to_amiga(
                 body["paths"], body["dir"], body.get("force", False)),
             ("POST", "/api/copy/to-pc"): lambda: self.to_pc(
@@ -349,3 +382,83 @@ def parse_info(text):
                 continue
     out["volumes"] = vols
     return out
+
+
+class Auth:
+    """The server's login (`wasabi serve`): one password, chosen by the
+    first visitor - the person who has just set the server up - and kept
+    as a salted scrypt hash. A login is a random session token in an
+    HttpOnly, SameSite=Strict cookie, remembered for 30 days and kept on
+    disk so a restart of the container does not log the phone out."""
+
+    COOKIE = "wasabi_session"
+    DAYS = 30
+
+    def __init__(self, folder):
+        os.makedirs(folder, exist_ok=True)
+        self.pw_file = os.path.join(folder, "view-password")
+        self.ss_file = os.path.join(folder, "view-sessions.json")
+        self.lock = threading.Lock()
+        try:
+            with open(self.ss_file) as fh:
+                self.sessions = {k: v for k, v in json.load(fh).items()
+                                 if v > time.time()}
+        except (OSError, ValueError):
+            self.sessions = {}
+
+    def needs_setup(self):
+        return not os.path.isfile(self.pw_file)
+
+    @staticmethod
+    def _hash(pw, salt):
+        return hashlib.scrypt(pw.encode(), salt=salt, n=2 ** 14, r=8, p=1,
+                              dklen=32)
+
+    def setup(self, pw):
+        if not self.needs_setup():
+            raise ApiError("a password is already set", 409)
+        if len(pw) < 8:
+            raise ApiError("choose at least 8 characters")
+        salt = secrets.token_bytes(16)
+        tmp = self.pw_file + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write("scrypt$%s$%s\n" % (salt.hex(), self._hash(pw, salt).hex()))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.pw_file)
+        return self._new_session()
+
+    def login(self, pw):
+        try:
+            with open(self.pw_file) as fh:
+                _, salt, want = fh.read().strip().split("$")
+        except (OSError, ValueError):
+            raise ApiError("no password is set yet", 409)
+        if not hmac.compare_digest(self._hash(pw, bytes.fromhex(salt)).hex(),
+                                   want):
+            time.sleep(1.0)             # slow a guesser down
+            raise ApiError("wrong password", 401)
+        return self._new_session()
+
+    def _new_session(self):
+        token = secrets.token_urlsafe(32)
+        with self.lock:
+            self.sessions[token] = time.time() + self.DAYS * 86400
+            self._save()
+        return token
+
+    def _save(self):
+        tmp = self.ss_file + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(self.sessions, fh)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.ss_file)
+
+    def check(self, token):
+        with self.lock:
+            exp = self.sessions.get(token or "")
+            return bool(exp and exp > time.time())
+
+    def logout(self, token):
+        with self.lock:
+            if self.sessions.pop(token or "", None):
+                self._save()

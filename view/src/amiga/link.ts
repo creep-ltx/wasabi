@@ -328,8 +328,84 @@ export class AmigaLink {
     this.buttons.clear();
   }
 
+  /* Text from a phone's keyboard: the Amiga's keymap picks the keys. */
+  sendText(s: string) {
+    this.send({ t: 'text', s });
+  }
+
+  /* One key, with modifier qualifier bits (0x80 = Right Amiga ...). */
+  press(code: number, qual = 0) {
+    this.send({ t: 'press', code, qual });
+  }
+
+  /*
+   * Fingers on a phone: a tap is a left click where it lands; a finger
+   * that moves is a left-button drag; a finger held still for half a
+   * second is the RIGHT button held - the Amiga's menus: keep holding,
+   * slide onto the menu item, lift. A cancelled pointerdown stops the
+   * browser's own mouse events, so a tap is not also a click.
+   */
+  private attachTouch() {
+    const c = this.canvas;
+    let start: { x: number; y: number; at: { x: number; y: number } } | null = null;
+    let mode: 'none' | 'left' | 'right' = 'none';
+    let timer = 0;
+    c.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'mouse') return;
+      ev.preventDefault();
+      c.setPointerCapture(ev.pointerId);
+      const at = this.amigaXY(ev);
+      start = { x: ev.clientX, y: ev.clientY, at };
+      mode = 'none';
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        if (!start || mode !== 'none') return;
+        mode = 'right';
+        this.queueMove(start.at);
+        this.flushMove();
+        this.buttons.add(1);
+        this.send({ t: 'button', b: 1, down: true });
+        navigator.vibrate?.(20);
+      }, 500);
+    });
+    c.addEventListener('pointermove', (ev) => {
+      if (ev.pointerType === 'mouse' || !start) return;
+      const far = Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 10;
+      if (mode === 'none' && far) {
+        window.clearTimeout(timer);
+        mode = 'left';
+        this.queueMove(start.at);
+        this.flushMove();
+        this.buttons.add(0);
+        this.send({ t: 'button', b: 0, down: true });
+      }
+      if (mode !== 'none') this.queueMove(this.amigaXY(ev));
+    });
+    const end = (ev: PointerEvent) => {
+      if (ev.pointerType === 'mouse' || !start) return;
+      window.clearTimeout(timer);
+      if (mode === 'none') {
+        this.queueMove(start.at);
+        this.flushMove();
+        this.send({ t: 'button', b: 0, down: true });
+        this.send({ t: 'button', b: 0, down: false });
+      } else {
+        this.queueMove(this.amigaXY(ev));
+        this.flushMove();
+        const b = mode === 'right' ? 1 : 0;
+        this.buttons.delete(b);
+        this.send({ t: 'button', b, down: false });
+      }
+      start = null;
+      mode = 'none';
+    };
+    c.addEventListener('pointerup', end);
+    c.addEventListener('pointercancel', end);
+  }
+
   private attachInput() {
     const c = this.canvas;
+    this.attachTouch();
     c.addEventListener('mousemove', (ev) => this.queueMove(this.amigaXY(ev)));
     c.addEventListener('mousedown', (ev) => {
       ev.preventDefault();
