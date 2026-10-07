@@ -379,8 +379,7 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
          ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf"}
 
 
-def make_handler(w, target, key, server_state, api, port, listen, auth=None,
-                 hub=None):
+def make_handler(w, fleet, server_state, port, listen, auth=None):
     import http.cookies
     import urllib.parse
     from wasabi_api import ApiError, Auth
@@ -459,9 +458,39 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None,
                     body = json.loads(self.rfile.read(n) or b"{}")
                 except ValueError:
                     return self.json(400, {"error": "bad JSON"})
+            query = urllib.parse.parse_qs(url.query)
+            if url.path in ("/api/machines", "/api/machines/discover"):
+                try:
+                    if url.path == "/api/machines/discover":
+                        return self.json(200, fleet.discover())
+                    if method == "POST":
+                        return self.json(200, fleet.change(body))
+                    return self.json(200, fleet.listing())
+                except ApiError as exc:
+                    return self.json(exc.code, {"error": str(exc)})
+            api = self.machine().api
             try:
-                out = api.dispatch(method, url.path,
-                                   urllib.parse.parse_qs(url.query), body)
+                out = api.dispatch(method, url.path, query, body)
+            except ApiError as exc:
+                return self.json(exc.code, {"error": str(exc)})
+            except OSError as exc:
+                return self.json(500, {"error": str(exc)})
+            self.json(200, out)
+
+        def upload(self):
+            """A file from the page, as the raw request body (drag and
+            drop, the phone's file picker): ?side=amiga|local&dir=&name="""
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            g = lambda k: q.get(k, [""])[0]           # noqa: E731
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            api = self.machine().api
+            if n > api.UPLOAD_MAX:
+                return self.json(413, {"error": "that file is too big to "
+                                       "send this way (512 MB at most)"})
+            data = self.rfile.read(n)
+            try:
+                out = api.upload(g("side"), g("dir"), g("name"), data,
+                                 g("force") == "1")
             except ApiError as exc:
                 return self.json(exc.code, {"error": str(exc)})
             except OSError as exc:
@@ -471,6 +500,11 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None,
         def json(self, code, obj):
             self.reply(code, "application/json", json.dumps(obj).encode())
 
+        def machine(self):
+            """The machine this request is for: ?m=<id>, else the first."""
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            return fleet.get(q.get("m", [""])[0])
+
         def do_POST(self):
             if not self.trusted(changes=True):
                 return
@@ -478,6 +512,8 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None,
                 return self.auth_call("POST", self.path.split("?", 1)[0])
             if not self.logged_in():
                 return self.json(401, {"error": "please log in"})
+            if self.path.split("?", 1)[0] == "/api/upload":
+                return self.upload()
             if self.path.startswith("/api/"):
                 return self.api("POST")
             self.reply(404, "text/plain", b"not found")
@@ -507,7 +543,7 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None,
                 return self.websocket()
             if path.startswith("/shots/"):
                 try:
-                    p = api.shot_path(urllib.parse.unquote(path[7:]))
+                    p = fleet.first.api.shot_path(urllib.parse.unquote(path[7:]))
                 except ApiError:
                     return self.reply(404, "text/plain", b"not found")
                 with open(p, "rb") as fh:
@@ -594,6 +630,7 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None,
 
         def websocket_logs(self):
             """The Developer page's log view: join the shared streams."""
+            hub = self.machine().hub
             ws = self.upgrade()
             hub.join(ws)
             try:
@@ -613,6 +650,8 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None,
 
         def websocket_run(self):
             """Run one command at a time, its output as it comes."""
+            mach = self.machine()
+            target, key = mach.target, mach.key
             ws = self.upgrade()
             running = {}
 
@@ -670,8 +709,9 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None,
                 self.close_connection = True
 
         def websocket(self):
+            mach = self.machine()
             ws = self.upgrade()
-            session = Session(w, target, key, ws)
+            session = Session(w, mach.target, mach.key, ws)
             worker = threading.Thread(target=session.run, daemon=True)
             worker.start()
             try:
@@ -787,17 +827,17 @@ def serve(w, args, target):
     root = getattr(args, "files", None) if server else None
     if root:
         os.makedirs(root, exist_ok=True)
-    api = Api(w, target, args.key, getattr(args, "protect", set()), root=root)
-    if server:                          # history and alerts: the NAS only
-        from wasabi_monitor import Monitor
-        api.monitor = Monitor(w, target, args.key, os.path.join(
-            os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-            "wasabi"))
-        api.monitor.start()
-    from wasabi_logs import LogHub
-    hub = LogHub(w, target, args.key)
-    handler = make_handler(w, target, args.key, state, api, args.view_port,
-                           args.listen, auth, hub)
+    from wasabi_fleet import Fleet
+    cfg_dir = os.path.join(os.environ.get(
+        "XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "wasabi")
+    fleet = Fleet(w, target, args.key, getattr(args, "protect", set()),
+                  root, cfg_dir)
+    if server:                          # history and alerts: the NAS only,
+        from wasabi_monitor import Monitor   # for its first machine
+        m = fleet.first
+        m.api.monitor = Monitor(w, m.target, m.key, cfg_dir)
+        m.api.monitor.start()
+    handler = make_handler(w, fleet, state, args.view_port, args.listen, auth)
     try:
         httpd = ThreadingHTTPServer((args.listen, args.view_port), handler)
     except OSError as exc:

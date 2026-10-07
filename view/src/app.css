@@ -251,3 +251,17 @@ body,
 .wv-keep-tab[data-state="inactive"] {
   display: none;
 }
+
+.wv-drop-over {
+  outline: var(--wv-focus-width) dashed var(--accent-9);
+}
+
+.wv-editor {
+  height: var(--wv-log-height);
+  font-family: var(--wv-font-mono);
+  font-size: var(--wv-font-small);
+}
+
+.wv-editor textarea {
+  font-family: var(--wv-font-mono);
+}

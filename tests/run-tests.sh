@@ -872,6 +872,26 @@ out=$(curl -s "$A/api/amiga/ls?path=C:" | python3 -c 'import json,sys; print(any
 check "desktop: lists an Amiga drawer" "True" "$out"
 kill $VIEW_PID 2>/dev/null
 
+# --- machines: more than one Amiga in one app ---
+./wasabi --host 127.0.0.1 --port $PORT --key $KEY desktop --no-browser \
+    --stay --port $VPORT >"$ROOT/fleet.log" 2>&1 &
+VIEW_PID=$!
+sleep 1.5
+A="http://127.0.0.1:$VPORT"
+J=(-H "Content-Type: application/json" -H "X-Wasabi: 1")
+out=$(curl -s "$A/api/machines" | python3 -c 'import json,sys; m=json.load(sys.stdin)["machines"]; print(len(m), m[0]["auto"], m[0]["online"])')
+check "machines: the first one is found automatically, and online" "1 True True" "$out"
+out=$(curl -s "${J[@]}" -X POST -d "{\"action\":\"add\",\"name\":\"Second\",\"host\":\"127.0.0.1\",\"port\":$PORT}" "$A/api/machines" | python3 -c 'import json,sys; print([m["id"] for m in json.load(sys.stdin)["machines"]])')
+check "machines: one can be added by address" "['amiga', 'second']" "$out"
+out=$(curl -s "$A/api/health?m=second" | python3 -c 'import json,sys; print(json.load(sys.stdin)["temp_c"])')
+check "machines: ?m= picks the machine for a call" "51.5" "$out"
+out=$(curl -s "${J[@]}" -X POST -d '{"action":"add","host":"bad host; rm","port":1}' "$A/api/machines")
+check "machines: a nonsense address is refused" '{"error": "give the machine'"'"'s address, like 192.168.1.20 or 127.0.0.1"}' "$out"
+curl -s "${J[@]}" -X POST -d '{"action":"remove","id":"second"}' "$A/api/machines" >/dev/null
+out=$(curl -s "$A/api/machines" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["machines"]))')
+check "machines: and removed again" "1" "$out"
+kill $VIEW_PID 2>/dev/null
+
 # --- serve: Wasabi phone's server - a login, and a fenced folder ---
 mkdir -p "$ROOT/srv-files"
 ./wasabi --host 127.0.0.1 --port $PORT --key $KEY serve --port $VPORT \

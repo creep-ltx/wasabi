@@ -28,15 +28,10 @@ import {
   StopIcon,
   TrashIcon,
 } from '@radix-ui/react-icons';
-import { api } from '../api';
+import { api, socketUrl } from '../api';
 
 /* --- shared: a WebSocket to the bridge ------------------------------- */
 
-function socketUrl(path: string) {
-  const u = new URL(path, window.location.href);
-  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
-  return u.toString();
-}
 
 /* --- Logs: the debug (serial) and snoop (DOS calls) streams ---------- */
 

@@ -6,7 +6,31 @@
 
 export class NeedsForce extends Error {}
 
+/*
+ * Which Amiga this window is for (the machine picker); every call and
+ * live connection names it. Kept per browser; changing it reloads.
+ */
+export const MACHINE = localStorage.getItem('wasabi-machine') ?? '';
+
+export function withMachine(url: string): string {
+  if (!MACHINE) return url;
+  return url + (url.includes('?') ? '&' : '?') + `m=${encodeURIComponent(MACHINE)}`;
+}
+
+export function pickMachine(id: string) {
+  localStorage.setItem('wasabi-machine', id);
+  window.location.reload();
+}
+
+/* A WebSocket address for this page, for the chosen machine. */
+export function socketUrl(path: string): string {
+  const u = new URL(withMachine(path), window.location.href);
+  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+  return u.toString();
+}
+
 export async function api<T>(path: string, body?: object): Promise<T> {
+  path = withMachine(path);
   const r = await fetch(path, body === undefined
     ? undefined
     : {
@@ -80,6 +104,10 @@ export function bytes(n: number | null): string {
   if (n < 1024) return `${n} B`;
   return size(Math.round(n / 1024));
 }
+
+export type MachineRow = { id: string; name: string; host: string; port: number;
+  auto?: boolean; online: boolean; banner: string };
+export type Found = { host: string; port: number; name: string; banner: string; known: boolean };
 
 export type Me = { mode: 'desktop' | 'server'; local_name: string; local_home: string; history?: boolean };
 export type AuthState = { required: boolean; setup: boolean; logged_in: boolean };

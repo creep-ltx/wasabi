@@ -23,6 +23,7 @@
  */
 
 import { amigaCodeFor, type AmigaKeySettings } from './keys';
+import { socketUrl } from '../api';
 
 export type LinkStatus = {
   connected: boolean;
@@ -115,9 +116,7 @@ export class AmigaLink {
   }
 
   private connect() {
-    const url = new URL('ws', window.location.href);
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(socketUrl('ws'));
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
     ws.onmessage = (ev) => {
@@ -425,6 +424,20 @@ export class AmigaLink {
       this.send({ t: 'button', b, down: false });
     });
     c.addEventListener('contextmenu', (ev) => ev.preventDefault());
+    // The mouse wheel, the NewMouse way: one notch is one press of raw
+    // key $7A (up) or $7B (down) - MultiView, Workbench drawers and MUI
+    // lists scroll to it. A touchpad's small deltas are gathered into
+    // notches, so a gentle swipe is not a flood of presses.
+    let wheel = 0;
+    c.addEventListener('wheel', (ev) => {
+      ev.preventDefault();
+      wheel += ev.deltaMode === 1 ? ev.deltaY * 40 : ev.deltaMode === 2 ? ev.deltaY * 400 : ev.deltaY;
+      while (Math.abs(wheel) >= 40) {
+        const down = wheel > 0;
+        this.press(down ? 0x7b : 0x7a);
+        wheel += down ? -40 : 40;
+      }
+    }, { passive: false });
     c.addEventListener('keydown', (ev) => {
       const code = amigaCodeFor(ev.code, this.keys);
       if (code === undefined) return;

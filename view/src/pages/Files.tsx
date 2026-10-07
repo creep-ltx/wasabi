@@ -12,9 +12,11 @@ import {
   Heading,
   IconButton,
   SegmentedControl,
+  Select,
   Spinner,
   Table,
   Text,
+  TextArea,
   TextField,
   Tooltip,
 } from '@radix-ui/themes';
@@ -24,11 +26,13 @@ import {
   ArrowUpIcon,
   CrossCircledIcon,
   FileIcon,
+  Pencil1Icon,
   PlusIcon,
   ReloadIcon,
   TrashIcon,
+  UploadIcon,
 } from '@radix-ui/react-icons';
-import { api, bytes, NeedsForce, type Entry, type Me } from '../api';
+import { api, bytes, NeedsForce, withMachine, type Entry, type Me } from '../api';
 
 type Side = 'pc' | 'amiga';
 type Listing = { path: string; entries: Entry[]; parent?: string };
@@ -51,7 +55,7 @@ function FolderGlyph() {
 /* One side of the file manager. Click a folder to open it; tick files
  * to copy them across. */
 function Pane({ side, title, path, setPath, listing, selected, setSelected, busy, onReload,
-  onMkdir, onDelete }: {
+  onMkdir, onDelete, onEdit, onUpload }: {
   side: Side;
   title: string;
   path: string;
@@ -63,7 +67,18 @@ function Pane({ side, title, path, setPath, listing, selected, setSelected, busy
   onReload: () => void;
   onMkdir: (name: string) => void;
   onDelete?: () => void;
+  onEdit?: () => void;
+  onUpload: (files: File[]) => void;
 }) {
+  const [over, setOver] = useState(false);
+  // A hidden file picker, made from code: JSX here is Radix only.
+  const pick = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.onchange = () => { if (input.files?.length) onUpload([...input.files]); };
+    input.click();
+  };
   const [typed, setTyped] = useState(path);
   const [typedFor, setTypedFor] = useState(path);
   const [newName, setNewName] = useState('');
@@ -83,7 +98,14 @@ function Pane({ side, title, path, setPath, listing, selected, setSelected, busy
     setSelected(s);
   };
   return (
-    <Card size="2">
+    <Card size="2" className={over ? 'wv-drop-over' : undefined}
+      onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setOver(true); } }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setOver(false);
+        if (e.dataTransfer.files.length) onUpload([...e.dataTransfer.files]);
+      }}>
       <Flex align="center" justify="between" mb="2">
         <Heading size="3">{title}</Heading>
         <Flex gap="1" align="center">
@@ -121,6 +143,22 @@ function Pane({ side, title, path, setPath, listing, selected, setSelected, busy
               </Flex>
             </Dialog.Content>
           </Dialog.Root>
+          <Tooltip content="Upload files here (or drop them on this pane)">
+            <IconButton variant="ghost" color="gray" aria-label="Upload"
+              disabled={side === 'amiga' && !path} onClick={pick}>
+              <UploadIcon />
+            </IconButton>
+          </Tooltip>
+          {onEdit && (
+            <Tooltip content="Edit the ticked text file">
+              <IconButton variant="ghost" color="gray" aria-label="Edit"
+                disabled={selected.size !== 1 ||
+                  !!entries.find((e) => selected.has(e.name))?.dir}
+                onClick={onEdit}>
+                <Pencil1Icon />
+              </IconButton>
+            </Tooltip>
+          )}
           {onDelete && (
             <Tooltip content="Delete the ticked items">
               <IconButton variant="ghost" color="red" aria-label="Delete"
@@ -184,6 +222,30 @@ export function FilesPage({ me }: { me: Me | null }) {
   const [error, setError] = useState('');
   const [done, setDone] = useState('');
   const [confirm, setConfirm] = useState<{ text: string; go: () => void } | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+
+  /* Files from the page: dropped, or picked on a phone. */
+  const upload = (side: Side, files: File[], force = false) => {
+    const dir = side === 'amiga' ? amPath : (pc?.path ?? pcPath);
+    setError('');
+    setBusy(side);
+    (async () => {
+      for (const f of files) {
+        const r = await fetch(withMachine(`api/upload?side=${side === 'amiga' ? 'amiga' : 'local'}` +
+          `&dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(f.name)}&force=${force ? 1 : 0}`),
+        { method: 'POST', headers: { 'X-Wasabi': '1' }, body: f });
+        if (r.status === 428) {
+          const d = (await r.json()) as { error: string };
+          setConfirm({ text: `${d.error}. Upload anyway?`, go: () => upload(side, files, true) });
+          return;
+        }
+        if (!r.ok) throw new Error(((await r.json().catch(() => ({}))) as { error?: string }).error ?? `${r.status}`);
+      }
+      setDone(`Uploaded ${files.length} file(s) to ${dir || 'the Amiga'}`);
+    })()
+      .catch((e: Error) => setError(e.message))
+      .finally(() => { setBusy(null); if (side === 'amiga') loadAm(); else loadPc(); });
+  };
 
   // Listings reload when the path changes, or when `reload` is bumped
   // after a change. setState only in the callbacks, never in the effect.
@@ -275,6 +337,7 @@ export function FilesPage({ me }: { me: Me | null }) {
         <Pane side="pc" title={local} path={pc?.path ?? pcPath} setPath={setPcPath} listing={pc}
           selected={pcSel} setSelected={setPcSel} busy={busy === 'pc'}
           onReload={() => loadPc()}
+          onUpload={(f) => upload('pc', f)}
           onMkdir={(name) => run('pc', `Made ${name}`,
             () => api('api/local/mkdir', { path: `${pc?.path}/${name}` }),
             () => loadPc())} />
@@ -296,6 +359,8 @@ export function FilesPage({ me }: { me: Me | null }) {
         <Pane side="amiga" title="Amiga" path={amPath} setPath={setAmPath} listing={am}
           selected={amSel} setSelected={setAmSel} busy={busy === 'amiga'}
           onReload={() => loadAm()}
+          onUpload={(f) => upload('amiga', f)}
+          onEdit={() => { const n = [...amSel][0]; if (n) setEditing(amigaJoin(amPath, n)); }}
           onMkdir={(name) => run('amiga', `Made ${name}`,
             () => api('api/amiga/mkdir', { path: amigaJoin(amPath, name) }),
             () => loadAm())}
@@ -309,6 +374,7 @@ export function FilesPage({ me }: { me: Me | null }) {
           })} />
         </Box>
       </Grid>
+      {editing && <Editor path={editing} onClose={() => { setEditing(null); loadAm(); }} />}
       <AlertDialog.Root open={!!confirm} onOpenChange={(o) => { if (!o) setConfirm(null); }}>
         <AlertDialog.Content maxWidth="var(--wv-dialog-width)">
           <AlertDialog.Title>Are you sure?</AlertDialog.Title>
@@ -324,5 +390,85 @@ export function FilesPage({ me }: { me: Me | null }) {
         </AlertDialog.Content>
       </AlertDialog.Root>
     </Box>
+  );
+}
+
+/* --- editing an Amiga text file ----------------------------------------- */
+
+/*
+ * Small text files - S:User-Startup, a prefs script. Saving first keeps
+ * a copy of the file as it was, on this machine (Backups), and writes
+ * the new one with the same protection bits. A system place asks first.
+ */
+function Editor({ path, onClose }: { path: string; onClose: () => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const [orig, setOrig] = useState('');
+  const [backups, setBackups] = useState<string[]>([]);
+  const [note, setNote] = useState('');
+  const [error, setError] = useState('');
+  const [ask, setAsk] = useState('');
+  useEffect(() => {
+    let stop = false;
+    api<{ text: string; backups: string[] }>(`api/amiga/read?path=${encodeURIComponent(path)}`)
+      .then((r) => { if (!stop) { setText(r.text); setOrig(r.text); setBackups(r.backups); } })
+      .catch((e: Error) => { if (!stop) setError(e.message); });
+    return () => { stop = true; };
+  }, [path]);
+  const save = (force: boolean) => {
+    setError('');
+    api<{ backup: string | null; backups: string[] }>('api/amiga/write', { path, text, force })
+      .then((r) => {
+        setOrig(text ?? '');
+        setBackups(r.backups);
+        setNote(r.backup ? `Saved. The previous version is kept as ${r.backup}.` : 'Saved.');
+      })
+      .catch((e: Error) => { if (e instanceof NeedsForce) setAsk(e.message); else setError(e.message); });
+  };
+  const changed = text !== null && text !== orig;
+  return (
+    <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <Dialog.Content maxWidth="var(--wv-content-max)">
+        <Dialog.Title>{path}</Dialog.Title>
+        <Dialog.Description size="2" color="gray" mb="3">
+          Saving keeps a copy of the file as it was first, in Backups on this machine.
+        </Dialog.Description>
+        {error && <Text as="p" size="2" color="red" mb="2">{error}</Text>}
+        {text === null && !error && <Spinner />}
+        {text !== null && (
+          <TextArea className="wv-editor" value={text} onChange={(e) => setText(e.target.value)}
+            spellCheck={false} />
+        )}
+        <Flex gap="3" mt="3" align="center" wrap="wrap">
+          {backups.length > 0 && (
+            <Select.Root onValueChange={(name) => {
+              api<{ text: string }>(`api/amiga/backup?path=${encodeURIComponent(path)}&name=${encodeURIComponent(name)}`)
+                .then((r) => { setText(r.text); setNote(`Loaded ${name} - Save to put it back.`); })
+                .catch((e: Error) => setError(e.message));
+            }}>
+              <Select.Trigger placeholder="Earlier versions…" />
+              <Select.Content>
+                {backups.map((b) => <Select.Item key={b} value={b}>{b.replace('.txt', '').replace('_', ' ')}</Select.Item>)}
+              </Select.Content>
+            </Select.Root>
+          )}
+          <Text size="1" color="gray">{note}</Text>
+          <Box flexGrow="1" />
+          <Dialog.Close><Button variant="soft" color="gray">{changed ? 'Cancel' : 'Close'}</Button></Dialog.Close>
+          <Button disabled={!changed} onClick={() => save(false)}>Save</Button>
+        </Flex>
+        <AlertDialog.Root open={!!ask} onOpenChange={(o) => { if (!o) setAsk(''); }}>
+          <AlertDialog.Content maxWidth="var(--wv-dialog-width)">
+            <AlertDialog.Title>Save in a system place?</AlertDialog.Title>
+            <AlertDialog.Description size="2">{ask}. A backup is kept first.</AlertDialog.Description>
+            <Flex gap="3" mt="4" justify="end">
+              <AlertDialog.Cancel><Button variant="soft" color="gray">Cancel</Button></AlertDialog.Cancel>
+              <AlertDialog.Action>
+                <Button color="red" onClick={() => { setAsk(''); save(true); }}>Save it</Button>
+              </AlertDialog.Action>
+            </Flex>
+          </AlertDialog.Content>
+        </AlertDialog.Root>
+      </Dialog.Content>
+    </Dialog.Root>
   );
 }

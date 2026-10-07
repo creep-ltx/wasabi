@@ -375,6 +375,122 @@ class Api:
                            "(wasabi serve)", 404)
         return self.monitor
 
+    # --- editing an Amiga text file, with backups ----------------------------
+
+    EDIT_MAX = 256 * 1024
+    KEEP_BACKUPS = 20
+
+    def backup_dir(self, path):
+        """Where earlier versions of an Amiga file are kept: on this
+        machine (the NAS's Wasabi folder for the server), never on the
+        Amiga - no .bak files in S:."""
+        base = os.path.join(self.root, "Backups") if self.root else \
+            os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser(
+                "~/.local/share")), "wasabi", "backups")
+        safe = "".join(ch if ch.isalnum() or ch in "-._" else "_"
+                       for ch in path)
+        return os.path.join(base, safe)
+
+    def _entry(self, c, path):
+        """The LS entry for one path (its protection bits), or None."""
+        parent, name = amiga_split(path)
+        c.send(self.w.LS, self.w.pack_str(parent))
+        text = []
+        self.w.drain_to_end(c, text.append)
+        for line in b"".join(text).decode("latin-1").splitlines():
+            parts = line.split(" ", 6)
+            if len(parts) == 7 and parts[6].lower() == name.lower():
+                return {"dir": parts[0] == "d", "size": int(parts[1]),
+                        "prot": int(parts[2])}
+        return None
+
+    def amiga_read(self, path):
+        def get(c):
+            e = self._entry(c, path)
+            if e is None:
+                raise ApiError("%s is not there" % path, 404)
+            if e["dir"]:
+                raise ApiError("%s is a drawer" % path)
+            if e["size"] > self.EDIT_MAX:
+                raise ApiError("%s is %d KB - too big to edit here" %
+                               (path, e["size"] // 1024))
+            data = self.w.fetch(c, path)
+            if data is None:
+                raise ApiError("cannot read %s" % path)
+            if b"\0" in data:
+                raise ApiError("%s is not a text file" % path)
+            return {"path": path, "text": data.decode("latin-1"),
+                    "size": len(data), "backups": self._backups(path)}
+        return self.call(get)
+
+    def _backups(self, path):
+        d = self.backup_dir(path)
+        try:
+            names = sorted((n for n in os.listdir(d) if n.endswith(".txt")),
+                           reverse=True)
+        except OSError:
+            names = []
+        return names
+
+    def amiga_write(self, path, text, force=False):
+        """Save: back the current file up here first, then write it with
+        the same protection bits (a plain upload would reset them and
+        drop, say, the script bit of a file in S:)."""
+        self.guard(path, force, "write")
+        try:
+            data = text.replace("\r\n", "\n").encode("latin-1")
+        except UnicodeEncodeError as exc:
+            raise ApiError("the Amiga cannot store %r (not Latin-1)"
+                           % text[exc.start])
+
+        def do(c):
+            e = self._entry(c, path)
+            backup = None
+            if e is not None and not e["dir"]:
+                old = self.w.fetch(c, path)
+                if old is not None:
+                    d = self.backup_dir(path)
+                    os.makedirs(d, exist_ok=True)
+                    backup = time.strftime("%Y-%m-%d_%H%M%S") + ".txt"
+                    with open(os.path.join(d, backup), "wb") as fh:
+                        fh.write(old)
+                    for n in self._backups(path)[self.KEEP_BACKUPS:]:
+                        os.remove(os.path.join(d, n))
+            prot = e["prot"] if e is not None else self.w.PROT_DEFAULT
+            self.w.put_bytes(c, data, path, prot)
+            return {"ok": True, "backup": backup,
+                    "backups": self._backups(path)}
+        return self.call(do)
+
+    def amiga_backup(self, path, name):
+        if "/" in name or not name.endswith(".txt"):
+            raise ApiError("no such backup", 404)
+        try:
+            with open(os.path.join(self.backup_dir(path), name), "rb") as fh:
+                return {"text": fh.read().decode("latin-1")}
+        except OSError:
+            raise ApiError("no such backup", 404)
+
+    # --- uploads from the page (drag and drop, the phone's picker) ---------
+
+    UPLOAD_MAX = 512 * 1024 * 1024
+
+    def upload(self, side, folder, name, data, force=False):
+        if not name or "/" in name or ":" in name or name in (".", ".."):
+            raise ApiError("a file name may not hold / or :")
+        if side == "amiga":
+            target = amiga_join(folder, name)
+            self.guard(target, force, "write")
+            self.call(lambda c: self.w.put_bytes(c, data, target))
+            return {"ok": True, "path": target}
+        d = self.real(folder)
+        full = os.path.join(d, name)
+        self.real(self.shown(full))            # inside the root, still
+        with open(full + ".wasabi-part", "wb") as fh:
+            fh.write(data)
+        os.replace(full + ".wasabi-part", full)
+        return {"ok": True, "path": self.shown(full)}
+
     def me(self):
         return {"mode": "server" if self.root else "desktop",
                 "history": self.monitor is not None,
@@ -393,6 +509,11 @@ class Api:
             ("GET", "/api/me"): lambda: self.me(),
             ("GET", "/api/ps"): lambda: self.ps(),
             ("GET", "/api/clip"): lambda: self.clip(),
+            ("GET", "/api/amiga/read"): lambda: self.amiga_read(q("path")),
+            ("GET", "/api/amiga/backup"): lambda: self.amiga_backup(
+                q("path"), q("name")),
+            ("POST", "/api/amiga/write"): lambda: self.amiga_write(
+                body["path"], body["text"], body.get("force", False)),
             ("GET", "/api/history"): lambda: self.need_monitor().history(
                 min(48.0, max(0.1, float(q("hours", "1"))))),
             ("GET", "/api/alerts"): lambda: {
@@ -436,6 +557,13 @@ def amiga_join(d, name):
     if not d:
         return name
     return d + name if d.endswith((":", "/")) else d + "/" + name
+
+
+def amiga_split(p):
+    """'S:User-Startup' -> ('S:', 'User-Startup'); 'Work:a/b' -> ('Work:a', 'b')."""
+    i = max(p.rfind("/"), p.rfind(":"))
+    parent = p[:i + 1] if p[i:i + 1] == ":" else p[:i]
+    return parent, p[i + 1:]
 
 
 def amiga_base(p):

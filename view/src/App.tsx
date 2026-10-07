@@ -17,6 +17,7 @@ import {
 import { api, type AuthState, type Health, type Me } from './api';
 import { LoginPage } from './pages/Login';
 import { LogoutButton, RebootButton } from './ui/Machine';
+import { MachinePicker } from './ui/Machines';
 import { OverviewPage } from './pages/Overview';
 import { ScreenPage } from './pages/Screen';
 import { FilesPage } from './pages/Files';
@@ -124,6 +125,7 @@ export function App() {
         <Box px="2" pt="1" pb="4">
           <Heading size="5">Wasabi</Heading>
           <Text size="1" color="gray">Amiga remote control</Text>
+          <Box mt="3"><MachinePicker /></Box>
         </Box>
         {PAGES.map((p) => (
           <Button key={p.id} className="wv-nav-item" size="2"

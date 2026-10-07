@@ -25,6 +25,7 @@ import {
 import { api, size, type Health, type Info, type Me } from '../api';
 import { Sparkline } from '../ui/Sparkline';
 import { LogoutButton, RebootButton } from '../ui/Machine';
+import { MachinePicker } from '../ui/Machines';
 
 const EVERY = 2;          // seconds between health readings
 const KEEP = 90;          // readings kept for the sparklines: 3 minutes
@@ -164,7 +165,11 @@ export function OverviewPage({ login = false, onLogout, me }: {
   return (
     <Box className="wv-page-body">
       <Flex justify="between" align="center" mb="1" gap="3" wrap="wrap">
-        <Heading size="6">Overview</Heading>
+        <Flex gap="3" align="center">
+          <Heading size="6">Overview</Heading>
+          {/* the sidebar's picker is hidden on a phone */}
+          <Box display={{ initial: 'block', md: 'none' }}><MachinePicker /></Box>
+        </Flex>
         {me?.history && (
           <SegmentedControl.Root size="1" value={range} onValueChange={(v) => setRange(v as Range)}>
             <SegmentedControl.Item value="live">Live</SegmentedControl.Item>

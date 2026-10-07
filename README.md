@@ -1029,7 +1029,22 @@ as `quit` always has; `kill --force` (RemTask) was already explicit. A
   across either way. New folder on both sides; Delete on the Amiga side
   (folders with everything in them), always after asking. The safety
   catch holds here too: writing or deleting in a system place asks a
-  second time.
+  second time. **Drop files** on either pane to put them in that folder
+  (or **Upload** - a phone has no dragging). **Edit** a ticked Amiga
+  text file (up to 256 KB) in place: saving first keeps a copy of the
+  file as it was - on this machine, in `~/.local/share/wasabi/backups`
+  (the NAS's `Backups` folder for Wasabi phone), never as .bak files on
+  the Amiga; the last 20 versions per file, any of them one click back
+  - and writes it with its protection bits kept (a plain upload would
+  drop the script bit of a file in `S:`).
+- **More than one Amiga** - the picker at the top of the sidebar (and
+  on a phone's Overview) switches the whole app to another machine;
+  *Manage machines* adds one by address (FS-UAE on this PC is
+  `127.0.0.1`), with its own key if it has one, or by **Look for Amigas
+  on the network**. The first machine is "found automatically" - wherever
+  Wasabi finds it, so a new DHCP address does not lose it. The list is
+  `machines.json` in the config folder (private). History and alerts on
+  the NAS watch its first machine.
 - **Screenshots** - full-colour, exact grabs, kept in `~/Pictures/Wasabi`;
   a gallery, a big view, download and delete.
 - **Clipboard** (on the Screen page) - shows the Amiga's clipboard (what
@@ -1168,7 +1183,11 @@ up on the page **52 ms** later, every time — full grabs took 90-245 ms
 or the screen is changing, and 5 times a second when all is still: each
 look costs the Amiga ~20 ms of work, so an open, idle view takes ~5% of
 its CPU. Against an older daemon without `LIVE` it falls back to whole
-grabs. `wasabi grab` is unchanged and still exact. The Amiga's own
+grabs. `wasabi grab` is unchanged and still exact. The **mouse wheel**
+works the NewMouse way: each notch is raw key `$7A` (up) / `$7B` (down),
+which MultiView, Workbench drawers and MUI lists scroll to (proven in
+MultiView on the A1200; `wasabi key press wheeldown` does the same from
+the command line). The Amiga's own
 pointer is a sprite and is not in the picture - the PC's pointer stands
 in for it. Ordinary keys go as whole presses (down and
 up together) and the PC's own key repeat repeats them; only the
