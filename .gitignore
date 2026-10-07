@@ -10,3 +10,4 @@ tests/stepprobe
 tests/pcprobe
 .claude/
 view/node_modules/
+.deployed

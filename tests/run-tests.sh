@@ -904,7 +904,7 @@ out=$(curl -s -o /dev/null -w "%{http_code}" "$A/api/health")
 check "serve: nothing without logging in" "401" "$out"
 out=$(curl -s "$A/api/auth/state")
 check "serve: the first visitor is asked to choose a password" \
-      '{"required": true, "setup": true, "logged_in": false}' "$out"
+      '{"required": true, "setup": true, "logged_in": false, "version": ""}' "$out"
 out=$(curl -s -c "$ROOT/jar" "${J[@]}" -X POST -d '{"password":"correct horse"}' "$A/api/auth/setup")
 check "serve: setting it logs in" '{"ok": true}' "$out"
 out=$(curl -s "${J[@]}" -X POST -d '{"password":"another one"}' "$A/api/auth/setup")
@@ -976,6 +976,43 @@ out=$(curl -s -b "$ROOT/monjar" "http://127.0.0.1:$VPORT/api/alerts" | python3 -
 import json,sys; print(len(json.load(sys.stdin)["events"]) >= 3)')
 check "monitor: and the alerts as events for the app" "True" "$out"
 kill $VIEW_PID $NTFY_PID 2>/dev/null
+
+# --- serve: the nightly backup, and updates that apply themselves ---
+mkdir -p "$ROOT/S" "$ROOT/bk-cfg/wasabi" "$ROOT/bk-files"
+echo "c:wasabid" > "$ROOT/S/User-Startup"
+echo "the startup" > "$ROOT/S/Startup-Sequence"
+cat > "$ROOT/bk-cfg/wasabi/backup.json" <<J
+{"folders": ["S:"]}
+J
+XDG_CONFIG_HOME="$ROOT/bk-cfg" ./wasabi --host 127.0.0.1 --port $PORT --key $KEY \
+    serve --port $VPORT --files "$ROOT/bk-files" >"$ROOT/bk.log" 2>&1 &
+VIEW_PID=$!
+sleep 1.5
+A="http://127.0.0.1:$VPORT"
+J=(-H "Content-Type: application/json" -H "X-Wasabi: 1")
+curl -s -c "$ROOT/bkjar" "${J[@]}" -X POST -d '{"password":"backup-test"}' "$A/api/auth/setup" >/dev/null
+bk_run() {
+  curl -s -b "$ROOT/bkjar" "${J[@]}" -X POST -d '{}' "$A/api/backup/now" >/dev/null
+  for i in $(seq 1 20); do
+    sleep 0.5
+    r=$(curl -s -b "$ROOT/bkjar" "$A/api/backup" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["running"], (d.get("last") or {}).get("new"))')
+    case "$r" in False*) echo "${r#False }"; return;; esac
+  done
+}
+TODAY=$(date +%Y-%m-%d)
+out=$(bk_run)
+check "backup: copies the Amiga's S: to the NAS folder" "the startup" \
+      "$(cat "$ROOT/bk-files/Backups/Amiga/$TODAY/S/Startup-Sequence" 2>/dev/null)"
+mv "$ROOT/bk-files/Backups/Amiga/$TODAY" "$ROOT/bk-files/Backups/Amiga/2000-01-01"
+out=$(bk_run)
+check "backup: a later night stores nothing that did not change" "0" "$out"
+check "backup: it links last night's copy instead" "2" \
+      "$(stat -c %h "$ROOT/bk-files/Backups/Amiga/$TODAY/S/User-Startup" 2>/dev/null)"
+echo "test $$" > .deployed
+for i in $(seq 1 25); do kill -0 $VIEW_PID 2>/dev/null || break; sleep 1; done
+kill -0 $VIEW_PID 2>/dev/null; check "update: a new version stamp ends the server (Docker restarts it)" "1" "$?"
+rm -f .deployed
+kill $VIEW_PID 2>/dev/null
 
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")

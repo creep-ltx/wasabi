@@ -1117,6 +1117,19 @@ also `http://192.168.68.118:8077`).
   two minutes (and back again), a new guru. The app's Alerts card lists
   them, holds the settings and sends a test. The ntfy topic is random -
   it is the feed's only key.
+- **A nightly backup** of `S:`, `ENVARC:` and `DEVS:` (03:30, 30 nights
+  kept, both settable on the Overview's Backup card, with *Back up now*)
+  into `Backups/Amiga/<date>/` in the NAS folder. A file unchanged since
+  the night before is a hard link to that night's copy, so thirty
+  nights cost little more than one (measured: 385 files, 1.5 MB, 3 s; the
+  next night 0 new). A file that cannot be read is skipped and named; a
+  failed night is an alert. Restoring is the Files page: open the night
+  on the NAS side and copy the file back.
+- **Updates apply themselves.** `tools/deploy-nas.sh` copies the program
+  and then writes `.deployed` last; Wasabi on the NAS sees the stamp
+  change, ends, and Docker's restart policy starts it on the new code
+  (~20 s). Open pages see the new version and reload. No Portainer
+  restart after an update any more.
 
 Setting it up: `tools/deploy-nas.sh` copies the program to
 `/volume2/docker/wasabi/app` (and, the first time, the Amiga's key to

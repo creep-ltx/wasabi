@@ -284,6 +284,7 @@ export function OverviewPage({ login = false, onLogout, me }: {
             </DataList.Root>
           </Card>
           {me?.history && <AlertsCard />}
+          {me?.backup && <BackupCard />}
           {/* On a phone the sidebar is hidden: its buttons live here. */}
           <Flex gap="3" mt="4" display={{ initial: 'flex', md: 'none' }}>
             <RebootButton />
@@ -390,6 +391,96 @@ function AlertsCard() {
       ) : (
         <Text size="2" color="gray">Nothing to report.</Text>
       )}
+    </Card>
+  );
+}
+
+/* --- the nightly backup of S:, ENVARC:, DEVS: (on the NAS) ------------- */
+
+type BackupInfo = {
+  settings: { enabled: boolean; time: string; keep: number; folders: string[] };
+  last?: { ok: boolean; at: number; day: string; files?: number; new?: number; bytes?: number;
+    seconds?: number; error?: string; skipped?: string[] };
+  running: boolean; nights: string[]; folder: string;
+};
+
+function BackupCard() {
+  const [b, setB] = useState<BackupInfo | null>(null);
+  const [tick, setTick] = useState(0);
+  const [note, setNote] = useState('');
+  useEffect(() => {
+    let stop = false;
+    api<BackupInfo>('api/backup').then((r) => { if (!stop) setB(r); }).catch(() => {});
+    return () => { stop = true; };
+  }, [tick]);
+  useEffect(() => {
+    const t = window.setInterval(() => setTick((n) => n + 1), b?.running ? 3000 : 30000);
+    return () => window.clearInterval(t);
+  }, [b?.running]);
+  if (!b) return null;
+  const last = b.last;
+  const save = (next: object) => api<BackupInfo>('api/backup', next).then(setB)
+    .catch((e: Error) => setNote(e.message));
+  return (
+    <Card size="2" mt="3">
+      <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
+        <Heading size="3">Nightly backup</Heading>
+        <Flex gap="2" align="center">
+          {b.running ? <Badge color="blue">backing up…</Badge>
+            : <Badge color={b.settings.enabled ? 'green' : 'gray'}>{b.settings.enabled ? `every night at ${b.settings.time}` : 'off'}</Badge>}
+          <Button size="1" variant="soft" disabled={b.running}
+            onClick={() => api('api/backup/now', {}).then(() => setTick((n) => n + 1))}>Back up now</Button>
+          <Dialog.Root>
+            <Dialog.Trigger><Button size="1" variant="soft" color="gray">Settings</Button></Dialog.Trigger>
+            <Dialog.Content maxWidth="var(--wv-dialog-width)">
+              <Dialog.Title>Nightly backup</Dialog.Title>
+              <Dialog.Description size="2" color="gray" mb="3">
+                {b.settings.folders.join(', ')} are copied to the NAS every night. A file that did
+                not change is not stored again, so many nights cost little more than one.
+              </Dialog.Description>
+              <Flex direction="column" gap="3">
+                <Text as="label" size="2">
+                  <Flex gap="2" align="center">
+                    <Switch checked={b.settings.enabled} onCheckedChange={(v) => void save({ enabled: v })} />
+                    Back up every night
+                  </Flex>
+                </Text>
+                <Flex gap="2" align="center">
+                  <Text size="2">At</Text>
+                  <TextField.Root size="1" defaultValue={b.settings.time}
+                    onBlur={(e) => void save({ time: e.target.value })} />
+                  <Text size="2">and keep</Text>
+                  <TextField.Root size="1" type="number" defaultValue={String(b.settings.keep)}
+                    onBlur={(e) => void save({ keep: Number(e.target.value) || 30 })} />
+                  <Text size="2">nights</Text>
+                </Flex>
+                {note && <Text size="1" color="red">{note}</Text>}
+              </Flex>
+              <Flex justify="end" mt="4">
+                <Dialog.Close><Button variant="soft" color="gray">Close</Button></Dialog.Close>
+              </Flex>
+            </Dialog.Content>
+          </Dialog.Root>
+        </Flex>
+      </Flex>
+      {last ? (
+        last.ok ? (
+          <Text as="p" size="2">
+            Last: {new Date(last.at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })} -
+            {' '}{last.files} files, {last.new} new or changed ({size(Math.round((last.bytes ?? 0) / 1024))}), {last.seconds} s.
+            {last.skipped?.length ? ` Skipped ${last.skipped.length} that could not be read.` : ''}
+          </Text>
+        ) : (
+          <Callout.Root color="red" size="1">
+            <Callout.Icon><CrossCircledIcon /></Callout.Icon>
+            <Callout.Text>Last night's backup failed: {last.error}</Callout.Text>
+          </Callout.Root>
+        )
+      ) : <Text as="p" size="2" color="gray">No backup yet.</Text>}
+      <Text as="p" size="1" color="gray" mt="2">
+        {b.nights.length} night(s) kept in {b.folder} on the NAS. To bring a file back, open
+        it on the Files page (NAS side) and copy it to the Amiga.
+      </Text>
     </Card>
   );
 }

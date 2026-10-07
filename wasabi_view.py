@@ -416,7 +416,8 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
                 return self.json(200, {
                     "required": auth is not None,
                     "setup": bool(auth and auth.needs_setup()),
-                    "logged_in": self.logged_in()})
+                    "logged_in": self.logged_in(),
+                    "version": fleet.first.api.version})
             n = int(self.headers.get("Content-Length", "0") or 0)
             try:
                 body = json.loads(self.rfile.read(n) or b"{}")
@@ -813,6 +814,40 @@ def app_window(url, title, kiosk):
     return True
 
 
+STAMP = os.path.join(HERE, ".deployed")
+
+
+def read_stamp():
+    try:
+        with open(STAMP) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def watch_deploys(fleet):
+    """Updates that apply themselves (the server on the NAS): the deploy
+    script copies the program, then writes .deployed LAST. When that
+    stamp changes, this process ends, and Docker's restart policy
+    (unless-stopped restarts any exit) starts the container again on the
+    new code. Watching only the stamp means a restart never happens
+    halfway through a copy. Open pages see the new version and reload."""
+    version = read_stamp()
+    for m in fleet.machines:
+        m.api.version = version
+
+    def loop():
+        while True:
+            time.sleep(15)
+            now = read_stamp()
+            if now and now != version:
+                print("a new version was deployed (%s) - restarting to take "
+                      "it" % now, file=sys.stderr)
+                time.sleep(2)           # let the copy settle, answers finish
+                os._exit(0)
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def serve(w, args, target):
     if not os.path.isfile(os.path.join(DIST, "index.html")):
         raise w.WasabiError(
@@ -837,6 +872,9 @@ def serve(w, args, target):
         m = fleet.first
         m.api.monitor = Monitor(w, m.target, m.key, cfg_dir)
         m.api.monitor.start()
+        from wasabi_backup import Backup
+        m.api.backup = Backup(w, m, root, cfg_dir, m.api.monitor)
+        m.api.backup.start()
     handler = make_handler(w, fleet, state, args.view_port, args.listen, auth)
     try:
         httpd = ThreadingHTTPServer((args.listen, args.view_port), handler)
@@ -856,6 +894,7 @@ def serve(w, args, target):
         file=sys.stderr)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     if server:
+        watch_deploys(fleet)
         print("serving with a login%s; files in %s" % (
             " (the first visitor chooses the password)"
             if auth.needs_setup() else "", root), file=sys.stderr)

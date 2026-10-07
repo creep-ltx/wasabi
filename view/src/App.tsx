@@ -79,6 +79,20 @@ export function App() {
   }, []);
   const locked = !!auth && auth.required && !auth.logged_in;
 
+  // A new version on the NAS: the server restarts itself on it, and an
+  // open page reloads to match (it would otherwise run the old page
+  // against the new server).
+  const loaded = auth?.version;
+  useEffect(() => {
+    if (!loaded) return;
+    const t = window.setInterval(() => {
+      fetch('api/auth/state').then((r) => r.json())
+        .then((a: AuthState) => { if (a.version && a.version !== loaded) window.location.reload(); })
+        .catch(() => {});
+    }, 60000);
+    return () => window.clearInterval(t);
+  }, [loaded]);
+
   // "This window is open": the bridge ends when the last one goes
   // (unless it is a server). Kept open whatever page is showing.
   useEffect(() => {

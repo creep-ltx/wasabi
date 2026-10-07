@@ -109,5 +109,6 @@ export type MachineRow = { id: string; name: string; host: string; port: number;
   auto?: boolean; online: boolean; banner: string };
 export type Found = { host: string; port: number; name: string; banner: string; known: boolean };
 
-export type Me = { mode: 'desktop' | 'server'; local_name: string; local_home: string; history?: boolean };
-export type AuthState = { required: boolean; setup: boolean; logged_in: boolean };
+export type Me = { mode: 'desktop' | 'server'; local_name: string; local_home: string;
+  history?: boolean; backup?: boolean; version?: string };
+export type AuthState = { required: boolean; setup: boolean; logged_in: boolean; version?: string };

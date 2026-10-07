@@ -21,4 +21,8 @@ ssh nas "chmod -R go-rwx $D/config"
 ssh nas "chmod -R u+rwX,go+rX,go-w $D/files /volume2/docker/ntfy"
 ssh nas "cat > /volume2/docker/_portainer-stacks/wasabi.yml" < tools/nas-stack.yml
 ssh nas "cat > /volume2/docker/_portainer-stacks/ntfy.yml" < tools/ntfy-stack.yml
+# LAST: the version stamp. Wasabi on the NAS watches it and restarts
+# itself on the new code when it changes (Docker brings it back).
+echo "$(git describe --always --dirty) $(date -u +%Y-%m-%dT%H:%M:%SZ)" | ssh nas "cat > $D/app/.deployed"
 echo "copied to $D; the stack is /volume2/docker/_portainer-stacks/wasabi.yml"
+echo "Wasabi on the NAS takes the new version by itself within ~20 s."

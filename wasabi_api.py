@@ -40,6 +40,8 @@ class Api:
         # PC, as the desktop app on the user's own machine.
         self.root = os.path.realpath(root) if root else None
         self.monitor = None              # set by `wasabi serve`
+        self.backup = None               # set by `wasabi serve`
+        self.version = ""                # the deploy stamp, if any
         self.shots_dir = shots or (os.path.join(self.root, "Screenshots")
                                    if self.root else SHOTS)
         self.lock = threading.Lock()
@@ -369,6 +371,12 @@ class Api:
             return {"ok": True}
         return self.call(do)
 
+    def need_backup(self):
+        if not self.backup:
+            raise ApiError("the nightly backup lives on the NAS's Wasabi "
+                           "(wasabi serve)", 404)
+        return self.backup
+
     def need_monitor(self):
         if not self.monitor:
             raise ApiError("history and alerts live on the NAS's Wasabi "
@@ -494,6 +502,8 @@ class Api:
     def me(self):
         return {"mode": "server" if self.root else "desktop",
                 "history": self.monitor is not None,
+                "backup": self.backup is not None,
+                "version": self.version,
                 "local_name": "NAS" if self.root else "This PC",
                 "local_home": "/" if self.root else "~"}
 
@@ -516,6 +526,10 @@ class Api:
                 body["path"], body["text"], body.get("force", False)),
             ("GET", "/api/history"): lambda: self.need_monitor().history(
                 min(48.0, max(0.1, float(q("hours", "1"))))),
+            ("GET", "/api/backup"): lambda: self.need_backup().info(),
+            ("POST", "/api/backup"): lambda: self.need_backup().set_settings(
+                body),
+            ("POST", "/api/backup/now"): lambda: self.need_backup().start_now(),
             ("GET", "/api/alerts"): lambda: {
                 "settings": self.need_monitor().settings(),
                 "events": self.need_monitor().events()},
