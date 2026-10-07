@@ -1,0 +1,24 @@
+# Wasabi phone on the NAS - a Portainer stack (Stacks > Add stack >
+# Web editor, name: wasabi). The program comes from
+# /volume2/docker/wasabi/app (tools/deploy-nas.sh copies it there);
+# the Amiga's key and the login live in /volume2/docker/wasabi/config.
+# Phone: http://bytebandit:8077 over Tailscale (home: 192.168.68.118:8077).
+services:
+  wasabi:
+    image: python:3.13-alpine
+    container_name: wasabi
+    restart: unless-stopped
+    # The host's network: the Amiga is found on the LAN by broadcast,
+    # and the NAS firewall already limits 8077 to home and Tailscale.
+    network_mode: host
+    user: "1026:100"
+    environment:
+      - XDG_CONFIG_HOME=/config
+      - XDG_CACHE_HOME=/config/cache
+      - TZ=Europe/Stockholm
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /volume2/docker/wasabi/app:/app:ro
+      - /volume2/docker/wasabi/config:/config
+      - /volume2/docker/wasabi/files:/files
+    command: ["python3", "/app/wasabi", "serve", "--port", "8077", "--files", "/files"]

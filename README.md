@@ -1049,6 +1049,39 @@ site cannot send), and the live screen's connection must come from the
 app's own origin. It serves this PC only. The service behind the pages
 is `wasabi_api.py`; the pages are in `view/src/pages/`.
 
+## Wasabi phone
+
+The same app on a phone, served by the NAS: `wasabi serve` in a Docker
+container, reached over Tailscale at **http://bytebandit:8077** (at home
+also `http://192.168.68.118:8077`).
+
+- **A login.** The first visit chooses the password (at least 8
+  characters; stored as a salted scrypt hash); after that each phone or
+  computer logs in once a month. Tailscale keeps strangers out already;
+  the password is the second lock.
+- **Made for a phone.** A bottom bar instead of the sidebar; Files
+  shows one side at a time (Amiga | NAS); Reboot and Log out at the foot
+  of Overview. On the Screen page: tap to click, drag to drag, hold half
+  a second for the right mouse button (the Amiga's menus - keep holding,
+  slide, lift), and a key bar with Return, Backspace, Del, Esc, Tab, the
+  arrows, Help and a keyboard for text (sent through the Amiga's own
+  keymap, so å and @ come out right; "Hold Right Amiga" makes one letter
+  a menu shortcut). Turn the phone sideways for a bigger screen.
+- **Files and screenshots** use one folder on the NAS,
+  `/volume2/docker/wasabi/files`, and nothing outside it.
+- **Add to Home screen** in Chrome gives it an icon.
+
+Setting it up: `tools/deploy-nas.sh` copies the program to
+`/volume2/docker/wasabi/app` (and, the first time, the Amiga's key to
+the private `config` folder - the NAS's shares give new files to
+everyone, so the script takes that away), and writes the Portainer
+stack to `/volume2/docker/_portainer-stacks/wasabi.yml`
+(`tools/nas-stack.yml`): `python:3.13-alpine` running the program from
+that folder, on the NAS's own network so it finds the Amiga by
+broadcast, as the NAS user. In Portainer: Stacks > Add stack > name
+`wasabi` > paste the file > Deploy. After an update: run the script
+again, then restart the container in Portainer.
+
 ## The view
 
 `wasabi view` opens the Amiga's screen in a window on the PC, live, and
