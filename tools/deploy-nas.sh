@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 D=/volume2/docker/wasabi
 ssh nas "mkdir -p $D/app $D/config/wasabi $D/config/cache $D/files /volume2/docker/ntfy/cache"
-tar -cf - wasabi wasabi_view.py wasabi_api.py wasabi_logs.py wasabi_monitor.py wasabi_fleet.py view/dist | ssh nas "tar -xf - -C $D/app"
+tar -cf - wasabi wasabi_view.py wasabi_api.py wasabi_logs.py wasabi_monitor.py wasabi_fleet.py wasabi_backup.py view/dist | ssh nas "tar -xf - -C $D/app"
 # the Amiga's key and the protected volumes: the daemon refuses a client
 # without the key. Copied only the first time; kept private.
 ssh nas "test -f $D/config/wasabi/config" || {
