@@ -1117,13 +1117,16 @@ also `http://192.168.68.118:8077`).
   two minutes (and back again), a new guru. The app's Alerts card lists
   them, holds the settings and sends a test. The ntfy topic is random -
   it is the feed's only key.
-- **A nightly backup** of `S:`, `ENVARC:` and `DEVS:` (03:30, 30 nights
-  kept, both settable on the Overview's Backup card, with *Back up now*)
+- **A nightly backup** of the whole boot volume, `SYS:` (03:30, 30 nights
+  kept, and what to copy, all settable on the Overview's Backup card,
+  with *Back up now*)
   into `Backups/Amiga/<date>/` in the NAS folder. A file unchanged since
   the night before is a hard link to that night's copy, so thirty
-  nights cost little more than one (measured: 385 files, 1.5 MB, 3 s; the
-  next night 0 new). A file that cannot be read is skipped and named; a
-  failed night is an alert. Restoring is the Files page: open the night
+  nights cost little more than one. Measured on the A1200: all of SYS:,
+  1,815 files and 27.7 MB, in 13.4 s; the next night 1.2 s, nothing new,
+  33 MB for both. A drawer link looping back up stops at 24 levels. A
+  file that cannot be read is skipped and named; a failed night is an
+  alert. Restoring is the Files page: open the night
   on the NAS side and copy the file back.
 - **Updates apply themselves.** `tools/deploy-nas.sh` copies the program
   and then writes `.deployed` last; Wasabi on the NAS sees the stamp

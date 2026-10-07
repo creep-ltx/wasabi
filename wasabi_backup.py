@@ -20,8 +20,12 @@ import shutil
 import threading
 import time
 
+# The whole boot volume: AmigaOS is small (~24 MB used on the A1200),
+# and SYS: holds C:, S:, LIBS:, DEVS:, Prefs and ENVARC: alike. SYS:
+# follows whichever volume the Amiga booted from.
 DEFAULTS = {"enabled": True, "time": "03:30", "keep": 30,
-            "folders": ["S:", "ENVARC:", "DEVS:"]}
+            "folders": ["SYS:"]}
+MAX_DEPTH = 24                    # a drawer link pointing up must not loop
 
 
 class Backup:
@@ -57,9 +61,16 @@ class Backup:
                 "folder": "/Backups/Amiga"}
 
     def set_settings(self, new):
-        for k in ("enabled", "time", "keep"):
+        for k in ("enabled", "time", "keep", "folders"):
             if k in new:
                 self.cfg[k] = new[k]
+        if isinstance(self.cfg["folders"], str):
+            self.cfg["folders"] = self.cfg["folders"].split(",")
+        self.cfg["folders"] = [f.strip() if f.strip().endswith((":", "/"))
+                               else f.strip() + ":" if ":" not in f
+                               else f.strip()
+                               for f in self.cfg["folders"] if f.strip()] \
+            or list(DEFAULTS["folders"])
         self.cfg["keep"] = max(1, min(365, int(self.cfg["keep"])))
         h, m = str(self.cfg["time"]).split(":")
         self.cfg["time"] = "%02d:%02d" % (int(h) % 24, int(m) % 60)
@@ -134,9 +145,13 @@ class Backup:
         self._write(self.state_path, self.state)
         self.running = False
 
-    def _copy_tree(self, c, amiga_dir, dest, prev_dir):
+    def _copy_tree(self, c, amiga_dir, dest, prev_dir, depth=0):
         """Copy one drawer down; link files unchanged since last night.
         Returns (files, linked, bytes)."""
+        if depth > MAX_DEPTH:
+            self.skipped.append("%s (deeper than %d drawers - a drawer "
+                                "link looping back?)" % (amiga_dir, MAX_DEPTH))
+            return 0, 0, 0
         os.makedirs(dest, exist_ok=True)
         c.send(self.w.LS, self.w.pack_str(amiga_dir))
         text = []
@@ -162,7 +177,7 @@ class Backup:
             out = os.path.join(dest, name)
             if kind == "d":
                 f, l, b = self._copy_tree(c, src, out, os.path.join(
-                    prev_dir, name) if prev_dir else None)
+                    prev_dir, name) if prev_dir else None, depth + 1)
                 files, linked, nbytes = files + f, linked + l, nbytes + b
                 continue
             stamp = "%s %s %s %s" % (size, days, mins, ticks)

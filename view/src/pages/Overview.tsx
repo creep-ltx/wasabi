@@ -454,6 +454,15 @@ function BackupCard() {
                     onBlur={(e) => void save({ keep: Number(e.target.value) || 30 })} />
                   <Text size="2">nights</Text>
                 </Flex>
+                <Box>
+                  <Text as="div" size="2" mb="1">What to copy</Text>
+                  <TextField.Root size="1" defaultValue={b.settings.folders.join(', ')}
+                    onBlur={(e) => void save({ folders: e.target.value })} />
+                  <Text as="div" size="1" color="gray" mt="1">
+                    Volumes or drawers, separated by commas. SYS: is the whole boot volume -
+                    C:, S:, LIBS:, DEVS:, Prefs and ENVARC: are all in it.
+                  </Text>
+                </Box>
                 {note && <Text size="1" color="red">{note}</Text>}
               </Flex>
               <Flex justify="end" mt="4">
