@@ -746,6 +746,12 @@ def send(obj):
     d = json.dumps(obj).encode(); mask = os.urandom(4)
     s.sendall(bytes([0x81, 0x80 | len(d)]) + mask +
               bytes(c ^ mask[i & 3] for i, c in enumerate(d)))
+# like the real app: "this window is open", for as long as it is
+hello = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+hello.sendall(("GET /ws/hello HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\n"
+               "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+               "Sec-WebSocket-Version: 13\r\n\r\n"
+               % (sys.argv[1], base64.b64encode(os.urandom(16)).decode())).encode())
 got = []
 want = 3
 heads = 0
@@ -798,6 +804,29 @@ check "view: keys reach the daemon - Amiga held, E as one press, Amiga let go" \
       "$(tr '\n' ' ' < "$ROOT/keys.log" | sed 's/ $//')"
 for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 $VIEW_PID 2>/dev/null || break; sleep 1; done
 kill -0 $VIEW_PID 2>/dev/null; check "view: the bridge ends once its page has gone" "1" "$?"
+
+# The window may show a page with no live screen (Overview, Files): the
+# bridge must stay as long as the window's "hello" is open - it used to
+# quit 5 s after the Screen page was left.
+./wasabi --host 127.0.0.1 --port $PORT --key $KEY desktop --no-browser \
+    --browser --port $VPORT >"$ROOT/desk2.log" 2>&1 &
+VIEW_PID=$!
+sleep 1.5
+timeout 12 python3 - "$VPORT" <<'PY' &
+import base64, os, socket, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+s.sendall(("GET /ws/hello HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\n"
+           "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n"
+           % (sys.argv[1], base64.b64encode(os.urandom(16)).decode())).encode())
+time.sleep(9)
+PY
+HELLO_PID=$!
+sleep 8
+kill -0 $VIEW_PID 2>/dev/null; check "desktop: stays while its window is open, live screen or not" "0" "$?"
+wait $HELLO_PID 2>/dev/null
+for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 $VIEW_PID 2>/dev/null || break; sleep 1; done
+kill -0 $VIEW_PID 2>/dev/null; check "desktop: and ends once the window has gone" "1" "$?"
+kill $VIEW_PID 2>/dev/null
 kill $VIEW_PID 2>/dev/null
 
 WASABI_VIEW_NOLIVE=1 ./wasabi --host 127.0.0.1 --port $PORT --key $KEY \

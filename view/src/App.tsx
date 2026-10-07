@@ -9,6 +9,7 @@ import {
 } from '@radix-ui/themes';
 import {
   CameraIcon,
+  CodeIcon,
   DashboardIcon,
   DesktopIcon,
   FileTextIcon,
@@ -20,12 +21,14 @@ import { OverviewPage } from './pages/Overview';
 import { ScreenPage } from './pages/Screen';
 import { FilesPage } from './pages/Files';
 import { ShotsPage } from './pages/Shots';
+import { DeveloperPage } from './pages/Developer';
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: <DashboardIcon /> },
   { id: 'screen', label: 'Screen', icon: <DesktopIcon /> },
   { id: 'files', label: 'Files', icon: <FileTextIcon /> },
   { id: 'shots', label: 'Screenshots', icon: <CameraIcon /> },
+  { id: 'dev', label: 'Developer', icon: <CodeIcon /> },
 ] as const;
 type PageId = (typeof PAGES)[number]['id'];
 
@@ -74,6 +77,23 @@ export function App() {
     return () => window.removeEventListener('wasabi-login', again);
   }, []);
   const locked = !!auth && auth.required && !auth.logged_in;
+
+  // "This window is open": the bridge ends when the last one goes
+  // (unless it is a server). Kept open whatever page is showing.
+  useEffect(() => {
+    if (locked || !auth) return;
+    const u = new URL('ws/hello', window.location.href);
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    let sock: WebSocket | null = null;
+    let timer = 0;
+    let stop = false;
+    const open = () => {
+      sock = new WebSocket(u);
+      sock.onclose = () => { if (!stop) timer = window.setTimeout(open, 2000); };
+    };
+    open();
+    return () => { stop = true; window.clearTimeout(timer); sock?.close(); };
+  }, [locked, auth]);
 
   useEffect(() => {
     const on = () => setPage(pageFromHash());
@@ -131,6 +151,7 @@ export function App() {
         {page === 'screen' && <ScreenPage />}
         {page === 'files' && <FilesPage me={me} />}
         {page === 'shots' && <ShotsPage />}
+        {page === 'dev' && <DeveloperPage />}
       </Box>
       <Flex className="wv-bottom-nav" display={{ initial: 'flex', md: 'none' }}>
         {PAGES.map((p) => (

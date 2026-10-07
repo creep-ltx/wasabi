@@ -379,7 +379,8 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
          ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf"}
 
 
-def make_handler(w, target, key, server_state, api, port, listen, auth=None):
+def make_handler(w, target, key, server_state, api, port, listen, auth=None,
+                 hub=None):
     import http.cookies
     import urllib.parse
     from wasabi_api import ApiError, Auth
@@ -487,16 +488,22 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None):
             path = self.path.split("?", 1)[0]
             if path.startswith("/api/auth/"):
                 return self.auth_call("GET", path)
-            guarded = path == "/ws" or path.startswith("/shots/") or \
+            guarded = path.startswith("/ws") or path.startswith("/shots/") or \
                 (path.startswith("/api/") and path != "/api/settings")
             if guarded and not self.logged_in():
                 return self.json(401, {"error": "please log in"})
-            if path == "/ws":
+            if path in ("/ws", "/ws/logs", "/ws/run", "/ws/hello"):
                 origin = self.headers.get("Origin", "")
                 allowed = hosts | {self.headers.get("Host", "")} if auth \
                     else hosts
                 if origin and origin.split("://", 1)[-1] not in allowed:
                     return self.reply(403, "text/plain", b"wrong origin")
+                if path == "/ws/hello":
+                    return self.websocket_hello()
+                if path == "/ws/logs":
+                    return self.websocket_logs()
+                if path == "/ws/run":
+                    return self.websocket_run()
                 return self.websocket()
             if path.startswith("/shots/"):
                 try:
@@ -554,7 +561,8 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None):
             self.end_headers()
             self.wfile.write(body)
 
-        def websocket(self):
+        def upgrade(self):
+            """Answer the WebSocket handshake; the socket is ours now."""
             k = self.headers.get("Sec-WebSocket-Key", "")
             accept = base64.b64encode(
                 hashlib.sha1(k.encode() + WS_GUID).digest()).decode()
@@ -566,10 +574,105 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None):
             self.wfile.flush()
             sock = self.connection
             sock.settimeout(None)
-            ws = WebSocket(sock)
+            return WebSocket(sock)
+
+        def messages(self, ws):
+            """The page's JSON messages, until it goes."""
+            try:
+                while True:
+                    text = ws.recv()
+                    if text is None:
+                        return
+                    try:
+                        msg = json.loads(text)
+                    except ValueError:
+                        continue
+                    if isinstance(msg, dict):
+                        yield msg
+            except (OSError, ConnectionError):
+                return
+
+        def websocket_logs(self):
+            """The Developer page's log view: join the shared streams."""
+            ws = self.upgrade()
+            hub.join(ws)
+            try:
+                for msg in self.messages(ws):
+                    t = msg.get("t")
+                    if t == "start" and msg.get("stream") in ("debug", "snoop"):
+                        hub.start_stream(msg["stream"])
+                    elif t == "stop" and msg.get("stream") in ("debug", "snoop"):
+                        hub.stop_stream(msg["stream"])
+                    elif t == "snoop":
+                        hub.set_snoop(str(msg.get("task", ""))[:60],
+                                      bool(msg.get("entry")))
+            finally:
+                ws.closed = True
+                hub.leave(ws)
+                self.close_connection = True
+
+        def websocket_run(self):
+            """Run one command at a time, its output as it comes."""
+            ws = self.upgrade()
+            running = {}
+
+            def run(cmd, max_time):
+                c = None
+                try:
+                    c = w.Conn(target[0], target[1], key)
+                    rc = w.do_run(c, cmd, max_time=max_time,
+                                  sink=lambda t: ws.send_text({"t": "out",
+                                                               "text": t}))
+                    ws.send_text({"t": "exit", "rc": rc})
+                except w.TimeLimit as exc:
+                    ws.send_text({"t": "error", "msg": str(exc),
+                                  "timeout": True})
+                except (OSError, w.WasabiError) as exc:
+                    ws.send_text({"t": "error", "msg": str(exc)})
+                finally:
+                    if c:
+                        c.close()
+                    running.pop("cmd", None)
+
+            try:
+                for msg in self.messages(ws):
+                    if msg.get("t") == "run" and "cmd" not in running:
+                        cmd = str(msg.get("cmd", "")).strip()
+                        if not cmd:
+                            continue
+                        running["cmd"] = cmd
+                        mt = msg.get("max")
+                        threading.Thread(target=run, daemon=True, args=(
+                            cmd, float(mt) if mt else None)).start()
+                    elif msg.get("t") == "stop" and "cmd" in running:
+                        # Ctrl-C it, the way run --max-time does
+                        c = w.Conn(target[0], target[1], key)
+                        try:
+                            w.stop_command(c, running["cmd"])
+                        finally:
+                            c.close()
+            finally:
+                ws.closed = True
+                self.close_connection = True
+
+        def websocket_hello(self):
+            """The app keeps this open for as long as its window exists:
+            it, and nothing else, says whether the window is still there
+            (the live screen comes and goes as the page changes)."""
+            ws = self.upgrade()
+            server_state.page_opened()
+            try:
+                for _ in self.messages(ws):
+                    pass
+            finally:
+                ws.closed = True
+                server_state.page_closed()
+                self.close_connection = True
+
+        def websocket(self):
+            ws = self.upgrade()
             session = Session(w, target, key, ws)
             worker = threading.Thread(target=session.run, daemon=True)
-            server_state.page_opened()
             worker.start()
             try:
                 while True:
@@ -588,7 +691,6 @@ def make_handler(w, target, key, server_state, api, port, listen, auth=None):
                 session.stop()
                 worker.join(timeout=3)
                 ws.closed = True
-                server_state.page_closed()
                 self.close_connection = True
 
     return Handler
@@ -686,8 +788,10 @@ def serve(w, args, target):
     if root:
         os.makedirs(root, exist_ok=True)
     api = Api(w, target, args.key, getattr(args, "protect", set()), root=root)
+    from wasabi_logs import LogHub
+    hub = LogHub(w, target, args.key)
     handler = make_handler(w, target, args.key, state, api, args.view_port,
-                           args.listen, auth)
+                           args.listen, auth, hub)
     try:
         httpd = ThreadingHTTPServer((args.listen, args.view_port), handler)
     except OSError as exc:

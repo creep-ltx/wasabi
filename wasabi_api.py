@@ -18,6 +18,7 @@ import hmac
 import json
 import os
 import secrets
+import struct
 import threading
 import time
 
@@ -312,6 +313,45 @@ class Api:
             return {"ok": True}
         return self.call(do)
 
+    # --- the Developer page ---------------------------------------------
+
+    def ps(self):
+        def get(c):
+            rows, has_free = self.w.ps_rows(c)
+            return {"tasks": [{
+                "addr": r[0], "kind": "process" if r[1] == "p" else "task",
+                "pri": r[2], "state": r[3], "stack": r[4],
+                "free": r[5] if r[5] >= 0 else None,
+                "cli": r[6] if r[6] >= 0 else None, "name": r[7],
+                "command": r[8],
+                "tight": bool(r[5] >= 0 and self.w.stack_tight(r[5], r[4]))}
+                for r in rows], "has_free": has_free}
+        return self.call(get)
+
+    def kill(self, addr, force=False):
+        if not str(addr).lower().startswith("0x"):
+            raise ApiError("name the task by its address")
+
+        def do(c):
+            c.send(self.w.KILL, struct.pack(">I", 1 if force else 0) +
+                   self.w.pack_str(addr))
+            c.expect_ok()
+            return {"ok": True}
+        return self.call(do)
+
+    def screens(self):
+        def get(c):
+            screens, _ = self.w.list_windows(c)
+            return {"screens": screens}
+        return self.call(get)
+
+    def screen_front(self, title):
+        def do(c):
+            c.send(self.w.SCREEN, struct.pack(">I", 0) + self.w.pack_str(title))
+            self.w.drain_to_end(c, lambda b: None)
+            return {"ok": True}
+        return self.call(do)
+
     def me(self):
         return {"mode": "server" if self.root else "desktop",
                 "local_name": "NAS" if self.root else "This PC",
@@ -327,6 +367,12 @@ class Api:
             ("GET", "/api/local/ls"): lambda: self.local_ls(q("path")),
             ("GET", "/api/shots"): lambda: self.shots(),
             ("GET", "/api/me"): lambda: self.me(),
+            ("GET", "/api/ps"): lambda: self.ps(),
+            ("GET", "/api/screens"): lambda: self.screens(),
+            ("POST", "/api/kill"): lambda: self.kill(body["addr"],
+                                                     body.get("force", False)),
+            ("POST", "/api/screen/front"): lambda: self.screen_front(
+                body["title"]),
             ("POST", "/api/copy/to-amiga"): lambda: self.to_amiga(
                 body["paths"], body["dir"], body.get("force", False)),
             ("POST", "/api/copy/to-pc"): lambda: self.to_pc(

@@ -34,6 +34,13 @@
   --wv-pane-height: 62vh;
   --wv-thumb-min: 240px;
   --wv-shot-max-h: 78vh;
+  --wv-log-height: 58vh;
+
+  /* Real values, not Radix's variables: those are defined inside the
+   * .radix-themes element, so a token on :root pointing at them comes
+   * out empty (seen: the log fell back to a proportional font). */
+  --wv-font-mono: ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", menlo, monospace;
+  --wv-font-small: 12px;
 
   --wv-hairline: 1px;
   --wv-radius-round: 50%;

@@ -222,3 +222,32 @@ body,
   background: var(--wv-color-bar);
   padding: var(--wv-bar-pad);
 }
+
+/* --- the Developer page ------------------------------------------------ */
+
+.wv-log {
+  height: var(--wv-log-height);
+  overflow: auto;
+  font-family: var(--wv-font-mono);
+  font-size: var(--wv-font-small);
+  line-height: var(--line-height-1);
+  scrollbar-color: var(--gray-a6) transparent;
+}
+
+.wv-log-line {
+  white-space: pre;
+}
+
+.wv-pre {
+  white-space: pre;
+  font-size: var(--wv-font-small);
+}
+
+.wv-tasks {
+  max-height: var(--wv-log-height);
+  overflow: auto;
+}
+
+.wv-keep-tab[data-state="inactive"] {
+  display: none;
+}

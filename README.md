@@ -1029,6 +1029,20 @@ as `quit` always has; `kill --force` (RemTask) was already explicit. A
   second time.
 - **Screenshots** - full-colour, exact grabs, kept in `~/Pictures/Wasabi`;
   a gallery, a big view, download and delete.
+- **Developer** - four tabs:
+  - **Logs**: the debug output (serial / KPrintF) and the DOS calls
+    (snoop) as they happen, side by side, timestamped; tick boxes hide
+    Wasabi's own traffic and routine noise (the terminal's `--ignore-wasabi`
+    and `--output minimal`), a snoop task filter and entry logging, find,
+    pause, clear, save as text. The Amiga gives each stream to one
+    listener, so the bridge holds one subscription and shares it with
+    every open window; if a terminal has it, the page says so and waits.
+  - **Tasks**: every task, refreshed every 3 s, stack headroom with the
+    tight ones marked; Ctrl-C, or Remove by force after a warning.
+  - **Run**: an AmigaDOS command with its output as it comes, the return
+    code, a time limit (Ctrl-C after it) and a Stop button; recent
+    commands to click again. Not checked: it does what it says.
+  - **Screens**: every screen and its windows; bring one to the front.
 
 **Reboot Amiga** sits at the foot of the sidebar, behind a confirmation.
 
