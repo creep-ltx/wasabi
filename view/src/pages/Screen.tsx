@@ -8,6 +8,7 @@ import {
   Flex,
   Select,
   Text,
+  TextArea,
   TextField,
 } from '@radix-ui/themes';
 import {
@@ -18,6 +19,7 @@ import {
   CameraIcon,
   EnterFullScreenIcon,
   GearIcon,
+  ClipboardIcon,
   KeyboardIcon,
 } from '@radix-ui/react-icons';
 import { AmigaLink, type LinkStatus } from '../amiga/link';
@@ -167,6 +169,7 @@ export function ScreenPage({ bare = false }: { bare?: boolean }) {
             <EnterFullScreenIcon /> Full screen
           </Button>
         </Box>
+        <ClipboardDialog />
         {settings && (
           <SettingsDialog settings={settings} onChange={update} />
         )}
@@ -324,5 +327,81 @@ function KeyBar({ link }: { link: RefObject<AmigaLink | null> }) {
         </Button>
       ))}
     </Flex>
+  );
+}
+
+/*
+ * The two clipboards: the Amiga's (what its Copy put there, what Right
+ * Amiga+V pastes) and this device's. The browser lets a page use the
+ * device's clipboard only on a secure page (this PC's own app is one;
+ * the phone over plain http is not) - there the text box stands in.
+ */
+function ClipboardDialog() {
+  const [amiga, setAmiga] = useState('');
+  const [send, setSend] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const deviceClip = window.isSecureContext && !!navigator.clipboard;
+
+  const load = () => {
+    setBusy(true);
+    api<{ text: string }>('api/clip')
+      .then((r) => { setAmiga(r.text); setNote(''); })
+      .catch((e: Error) => setNote(e.message))
+      .finally(() => setBusy(false));
+  };
+  const put = (paste: boolean) => {
+    api('api/clip', { text: send, paste })
+      .then(() => setNote(paste ? 'Pasted into the Amiga\'s active window' : 'On the Amiga\'s clipboard'))
+      .catch((e: Error) => setNote(e.message));
+  };
+  return (
+    <Dialog.Root onOpenChange={(o) => { if (o) load(); }}>
+      <Dialog.Trigger>
+        <Button size="1" variant="soft"><ClipboardIcon /> Clipboard</Button>
+      </Dialog.Trigger>
+      <Dialog.Content maxWidth="var(--wv-dialog-wide)">
+        <Dialog.Title>Clipboard</Dialog.Title>
+        <Dialog.Description size="2" color="gray" mb="3">
+          The Amiga's clipboard is what Copy put there and what Right Amiga+V pastes.
+        </Dialog.Description>
+        <Flex direction="column" gap="2">
+          <Text size="2" weight="medium">On the Amiga's clipboard</Text>
+          <TextArea readOnly value={busy ? 'Reading…' : amiga} placeholder="(empty)" rows={4} />
+          <Flex gap="2">
+            <Button size="1" variant="soft" color="gray" onClick={load}>Read again</Button>
+            {deviceClip && (
+              <Button size="1" variant="soft" disabled={!amiga} onClick={() => {
+                void navigator.clipboard.writeText(amiga).then(() => setNote('Copied to this device'));
+              }}>Copy to this device</Button>
+            )}
+            <Button size="1" variant="soft" disabled={!amiga} onClick={() => setSend(amiga)}>
+              Edit below
+            </Button>
+          </Flex>
+          <Text size="2" weight="medium" mt="3">Send to the Amiga</Text>
+          <TextArea value={send} onChange={(e) => setSend(e.target.value)} rows={4}
+            placeholder={deviceClip ? 'Type or paste here, or take this device\'s clipboard' : 'Type or paste here'} />
+          <Flex gap="2" wrap="wrap">
+            {deviceClip && (
+              <Button size="1" variant="soft" color="gray" onClick={() => {
+                navigator.clipboard.readText().then(setSend).catch(() =>
+                  setNote('This browser would not hand over its clipboard - paste into the box instead'));
+              }}>Take this device's clipboard</Button>
+            )}
+            <Button size="1" variant="soft" disabled={!send} onClick={() => put(false)}>
+              Put on the Amiga clipboard
+            </Button>
+            <Button size="1" disabled={!send} onClick={() => put(true)}>
+              …and paste it (Right Amiga+V)
+            </Button>
+          </Flex>
+          {note && <Text size="1" color="gray">{note}</Text>}
+        </Flex>
+        <Flex justify="end" mt="4">
+          <Dialog.Close><Button variant="soft" color="gray">Close</Button></Dialog.Close>
+        </Flex>
+      </Dialog.Content>
+    </Dialog.Root>
   );
 }

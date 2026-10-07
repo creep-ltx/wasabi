@@ -1,0 +1,19 @@
+# ntfy on the NAS - where Wasabi sends its alerts, and where the ntfy app
+# on the phone picks them up (over Tailscale: http://bytebandit:8090).
+# Portainer: Stacks > Add stack > Web editor, name: ntfy.
+services:
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: ntfy
+    restart: unless-stopped
+    command: ["serve"]
+    user: "1026:100"
+    environment:
+      - TZ=Europe/Stockholm
+      - NTFY_BASE_URL=http://bytebandit:8090
+      - NTFY_CACHE_FILE=/var/cache/ntfy/cache.db
+      - NTFY_CACHE_DURATION=72h
+    ports:
+      - "8090:80"
+    volumes:
+      - /volume2/docker/ntfy/cache:/var/cache/ntfy

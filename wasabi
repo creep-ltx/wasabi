@@ -33,7 +33,7 @@ RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN, MOUSE = 0x46, 0x47, 0x48, 0x49, 0x4A
-KEY, WINDOWS, HEALTH, LIVE = 0x4B, 0x4C, 0x4D, 0x4E
+KEY, WINDOWS, HEALTH, LIVE, CLIP = 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
 
 # Amiga DateStamp epoch.
 AMIGA_EPOCH = 252460800  # 1978-01-01 00:00:00 UTC as a Unix timestamp
@@ -580,6 +580,11 @@ def cmd_get(conn, args):
 
 
 def cmd_run(conn, args):
+    if args.detach and conn.caps and "detach" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) cannot start a command without waiting - "
+            "update it with 'wasabi update wasabid', or type: "
+            "wasabi run \"Run >NIL: %s\"" % (conn.banner, args.command))
     out = [] if args.json else None
     try:
         rc = do_run(conn, args.command, merge=args.merge,
@@ -1883,6 +1888,42 @@ def cmd_view(args):
     return wasabi_view.serve(sys.modules[__name__], args, target)
 
 
+def clip_get(conn):
+    """The Amiga clipboard's text (Latin-1 on the Amiga), or ''."""
+    conn.send(CLIP, struct.pack(">I", 0))
+    out = []
+    drain_to_end(conn, out.append)
+    return b"".join(out).decode("latin-1")
+
+
+def clip_set(conn, text):
+    data = text.encode("latin-1", "replace")
+    conn.send(CLIP, struct.pack(">I", 1) + data)
+    conn.expect_ok()
+
+
+def cmd_clip(conn, args):
+    """Read or set the Amiga's clipboard: what Copy put there, and what
+    Paste (Right Amiga+V) will give."""
+    if conn.caps and "clip" not in conn.caps:
+        raise WasabiError("this daemon (%s) has no clipboard - update it "
+                          "with 'wasabi update wasabid'" % conn.banner)
+    if args.action == "get":
+        text = clip_get(conn)
+        if args.json:
+            emit_json({"text": text})
+        else:
+            sys.stdout.write(text)
+            if text and not text.endswith("\n"):
+                sys.stdout.write("\n")
+        return 0
+    text = args.text if args.text is not None and args.text != "-" \
+        else sys.stdin.read()
+    clip_set(conn, text)
+    print("put %d character(s) on the Amiga's clipboard" % len(text),
+          file=sys.stderr)
+
+
 def cmd_mouse(conn, args):
     """Move the pointer and click - drive GUIs remotely.
 
@@ -2607,11 +2648,13 @@ def main(argv=None):
     s = sub.add_parser("run", help="execute a command, streaming its output")
     s.add_argument("command")
     s.add_argument("--merge", action="store_true",
-                   help="merge stderr into stdout (wasabid ignores this "
-                        "for now - output already arrives merged)")
+                   help="accepted, and always so: AmigaOS 3 gives a "
+                        "command no separate error channel (that is new "
+                        "in OS 4), so its output is one stream")
     s.add_argument("--detach", action="store_true",
-                   help="do not wait (wasabid ignores this for now - "
-                        "use: wasabi run \"Run CMD\" instead)")
+                   help="start it and return at once - for programs with "
+                        "a window, which never end by themselves; their "
+                        "output goes to a file in T: (named on stderr)")
     s.add_argument("--max-time", type=float, metavar="SECONDS",
                    help="stop the command with Ctrl-C if it runs longer; "
                         "exit code %d" % EXIT_TIME_LIMIT)
@@ -2806,6 +2849,12 @@ def main(argv=None):
                             "window is possible")
         s.set_defaults(fn=cmd_view, no_conn=True, mode=mode)
 
+    s = sub.add_parser("clip", help="read or set the Amiga's clipboard")
+    s.add_argument("action", choices=["get", "set"])
+    s.add_argument("text", nargs="?", default=None,
+                   help="set: the text (or '-' / nothing: read it from stdin)")
+    s.set_defaults(fn=cmd_clip)
+
     s = sub.add_parser("serve", help="the desktop app as a server with a "
                        "login - for Wasabi phone, on the NAS")
     s.add_argument("--port", dest="view_port", type=int, default=8077,
@@ -2908,7 +2957,8 @@ def main(argv=None):
              "quit": "quit", "update": "install",
              "grab": "grab", "screen": "screen",
              "mouse": "mouse", "key": "key",
-             "windows": "windows", "health": "health"}.get(args.cmd)
+             "windows": "windows", "health": "health",
+             "clip": "clip"}.get(args.cmd)
     if args.cmd == "wait":
         needs = {"window": "windows", "change": "grab",
                  "still": "grab"}.get(args.what)

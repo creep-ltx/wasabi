@@ -20,6 +20,7 @@
   --wv-bar-pad: 4px;
   --wv-focus-width: 2px;
   --wv-dialog-width: 440px;
+  --wv-dialog-wide: 560px;
   --wv-radius-none: 0;
 
   /* One CSS pixel: the page measures the screen's size in numbers and

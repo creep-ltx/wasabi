@@ -788,6 +788,12 @@ def serve(w, args, target):
     if root:
         os.makedirs(root, exist_ok=True)
     api = Api(w, target, args.key, getattr(args, "protect", set()), root=root)
+    if server:                          # history and alerts: the NAS only
+        from wasabi_monitor import Monitor
+        api.monitor = Monitor(w, target, args.key, os.path.join(
+            os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+            "wasabi"))
+        api.monitor.start()
     from wasabi_logs import LogHub
     hub = LogHub(w, target, args.key)
     handler = make_handler(w, target, args.key, state, api, args.view_port,

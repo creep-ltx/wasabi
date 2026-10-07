@@ -39,6 +39,7 @@ class Api:
         # side is then that folder and nothing above it. None: the whole
         # PC, as the desktop app on the user's own machine.
         self.root = os.path.realpath(root) if root else None
+        self.monitor = None              # set by `wasabi serve`
         self.shots_dir = shots or (os.path.join(self.root, "Screenshots")
                                    if self.root else SHOTS)
         self.lock = threading.Lock()
@@ -352,8 +353,31 @@ class Api:
             return {"ok": True}
         return self.call(do)
 
+    def clip(self):
+        return self.call(lambda c: {"text": self.w.clip_get(c)})
+
+    def clip_put(self, text, paste=False):
+        """Put text on the Amiga's clipboard; paste=True also presses
+        Right Amiga+V, which pastes it into the active window."""
+        def do(c):
+            self.w.clip_set(c, str(text)[:60000])
+            if paste:
+                c.send(self.w.KEY, struct.pack(">HHHHHHHHH", 0,
+                                               0x67, 0x80, 0x34, 0x80,
+                                               0xB4, 0x80, 0xE7, 0))
+                c.expect_ok()
+            return {"ok": True}
+        return self.call(do)
+
+    def need_monitor(self):
+        if not self.monitor:
+            raise ApiError("history and alerts live on the NAS's Wasabi "
+                           "(wasabi serve)", 404)
+        return self.monitor
+
     def me(self):
         return {"mode": "server" if self.root else "desktop",
+                "history": self.monitor is not None,
                 "local_name": "NAS" if self.root else "This PC",
                 "local_home": "/" if self.root else "~"}
 
@@ -368,6 +392,17 @@ class Api:
             ("GET", "/api/shots"): lambda: self.shots(),
             ("GET", "/api/me"): lambda: self.me(),
             ("GET", "/api/ps"): lambda: self.ps(),
+            ("GET", "/api/clip"): lambda: self.clip(),
+            ("GET", "/api/history"): lambda: self.need_monitor().history(
+                min(48.0, max(0.1, float(q("hours", "1"))))),
+            ("GET", "/api/alerts"): lambda: {
+                "settings": self.need_monitor().settings(),
+                "events": self.need_monitor().events()},
+            ("POST", "/api/alerts"): lambda: self.need_monitor().set_settings(
+                body),
+            ("POST", "/api/alerts/test"): lambda: self.need_monitor().test(),
+            ("POST", "/api/clip"): lambda: self.clip_put(
+                body["text"], body.get("paste", False)),
             ("GET", "/api/screens"): lambda: self.screens(),
             ("POST", "/api/kill"): lambda: self.kill(body["addr"],
                                                      body.get("force", False)),

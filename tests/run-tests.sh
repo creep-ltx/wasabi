@@ -528,6 +528,8 @@ out=$($WOLD key press return 2>&1 | grep -c "update it")
 check "a daemon without 'key' is named as too old" "1" "$out"
 out=$($WOLD health 2>&1 | grep -c "update it")
 check "a daemon without 'health' is named as too old" "1" "$out"
+out=$($WOLD clip get 2>&1 | grep -c "update it")
+check "a daemon without 'clip' is named as too old" "1" "$out"
 kill "$MOCK4_PID" 2>/dev/null
 
 $W kill Wait >/dev/null 2>&1
@@ -894,6 +896,66 @@ check "serve: logged in, it works" "51.5" "$out"
 out=$(curl -s -b "$ROOT/jar" "$A/api/local/ls?path=/../../etc" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error"))')
 check "serve: the files folder cannot be left" "that is outside the Wasabi folder" "$out"
 kill $VIEW_PID 2>/dev/null
+
+# --- clip: the Amiga's clipboard, both ways ---
+$W clip set "från PC:n @{}" >/dev/null 2>&1
+check "clip set, then get, round-trips Latin-1 text" "från PC:n @{}" "$($W clip get 2>/dev/null)"
+printf 'from stdin\n' | $W clip set >/dev/null 2>&1
+check "clip set with no text reads stdin" "from stdin" "$($W clip get 2>/dev/null)"
+
+# --- serve: history and alerts (the monitor), against a fake ntfy ---
+NPORT=$((PORT+9))
+python3 - "$NPORT" "$ROOT/ntfy.log" <<'PY' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        open(sys.argv[2], "ab").write(body + b"\n")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+NTFY_PID=$!
+mkdir -p "$ROOT/mon-cfg/wasabi"
+cat > "$ROOT/mon-cfg/wasabi/alerts.json" <<J
+{"ntfy_url": "http://127.0.0.1:$NPORT", "topic": "wasabi-test", "temp_c": 50}
+J
+XDG_CONFIG_HOME="$ROOT/mon-cfg" WASABI_MONITOR_EVERY=1 ./wasabi --host 127.0.0.1 \
+    --port $PORT --key $KEY serve --port $VPORT --files "$ROOT/srv-files" \
+    >"$ROOT/mon.log" 2>&1 &
+VIEW_PID=$!
+sleep 3
+grep -c '"title": "The Amiga.s Pi is hot: 51.5 \\u00b0C"' "$ROOT/ntfy.log" >/dev/null 2>&1
+out=$(python3 -c 'import json,sys; print([json.loads(l)["title"] for l in open(sys.argv[1])])' "$ROOT/ntfy.log" 2>/dev/null)
+check "monitor: over the temperature limit sends an alert" "1" \
+      "$(echo "$out" | grep -c "The Amiga.s Pi is hot: 51.5 °C")"
+check "monitor: with the topic and °C intact" "wasabi-test" \
+      "$(head -1 "$ROOT/ntfy.log" | python3 -c 'import json,sys; print(json.load(sys.stdin)["topic"])')"
+kill -STOP $MOCK_PID
+sleep 9
+kill -CONT $MOCK_PID
+sleep 3
+out=$(python3 -c 'import json,sys; print([json.loads(l)["title"] for l in open(sys.argv[1])])' "$ROOT/ntfy.log")
+check "monitor: an Amiga that stops answering is reported" "1" "$(echo "$out" | grep -c "stopped answering")"
+check "monitor: and so is its return" "1" "$(echo "$out" | grep -c "is back")"
+printf 'ALERT #00000004 in task "test"\n' > "$ROOT/T-lastguru"
+mkdir -p "$ROOT/T" && cp "$ROOT/T-lastguru" "$ROOT/T/lastguru"
+sleep 3
+out=$(python3 -c 'import json,sys; print([json.loads(l)["title"] for l in open(sys.argv[1])])' "$ROOT/ntfy.log")
+check "monitor: a new guru is reported" "1" "$(echo "$out" | grep -c "Guru Meditation")"
+curl -s -c "$ROOT/monjar" -H "Content-Type: application/json" -H "X-Wasabi: 1" \
+     -X POST -d '{"password":"monitor-test"}' "http://127.0.0.1:$VPORT/api/auth/setup" >/dev/null
+out=$(curl -s -b "$ROOT/monjar" "http://127.0.0.1:$VPORT/api/history?hours=1" | python3 -c '
+import json,sys
+d = json.load(sys.stdin)
+r = d["readings"]
+print(len(r) >= 5, any(x[1] == 0 for x in r), any(x[2] == 51.5 for x in r))')
+check "monitor: keeps a history - readings, the silent ones too, the temperature" \
+      "True True True" "$out"
+out=$(curl -s -b "$ROOT/monjar" "http://127.0.0.1:$VPORT/api/alerts" | python3 -c '
+import json,sys; print(len(json.load(sys.stdin)["events"]) >= 3)')
+check "monitor: and the alerts as events for the app" "True" "$out"
+kill $VIEW_PID $NTFY_PID 2>/dev/null
 
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")

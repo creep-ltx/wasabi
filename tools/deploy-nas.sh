@@ -5,8 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 D=/volume2/docker/wasabi
-ssh nas "mkdir -p $D/app $D/config/wasabi $D/config/cache $D/files"
-tar -cf - wasabi wasabi_view.py wasabi_api.py wasabi_logs.py view/dist | ssh nas "tar -xf - -C $D/app"
+ssh nas "mkdir -p $D/app $D/config/wasabi $D/config/cache $D/files /volume2/docker/ntfy/cache"
+tar -cf - wasabi wasabi_view.py wasabi_api.py wasabi_logs.py wasabi_monitor.py view/dist | ssh nas "tar -xf - -C $D/app"
 # the Amiga's key and the protected volumes: the daemon refuses a client
 # without the key. Copied only the first time; kept private.
 ssh nas "test -f $D/config/wasabi/config" || {
@@ -16,4 +16,5 @@ ssh nas "test -f $D/config/wasabi/config" || {
 # the login's password hash must not be. chmod removes those rules.
 ssh nas "chmod -R go-rwx $D/config"
 ssh nas "cat > /volume2/docker/_portainer-stacks/wasabi.yml" < tools/nas-stack.yml
+ssh nas "cat > /volume2/docker/_portainer-stacks/ntfy.yml" < tools/ntfy-stack.yml
 echo "copied to $D; the stack is /volume2/docker/_portainer-stacks/wasabi.yml"

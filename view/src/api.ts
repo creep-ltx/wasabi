@@ -81,5 +81,5 @@ export function bytes(n: number | null): string {
   return size(Math.round(n / 1024));
 }
 
-export type Me = { mode: 'desktop' | 'server'; local_name: string; local_home: string };
+export type Me = { mode: 'desktop' | 'server'; local_name: string; local_home: string; history?: boolean };
 export type AuthState = { required: boolean; setup: boolean; logged_in: boolean };

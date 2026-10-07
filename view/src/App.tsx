@@ -146,7 +146,7 @@ export function App() {
       </Flex>
       <Box className="wv-content">
         {page === 'overview' && (
-          <OverviewPage login={auth.required} onLogout={() => setAuthTick((n) => n + 1)} />
+          <OverviewPage login={auth.required} me={me} onLogout={() => setAuthTick((n) => n + 1)} />
         )}
         {page === 'screen' && <ScreenPage />}
         {page === 'files' && <FilesPage me={me} />}

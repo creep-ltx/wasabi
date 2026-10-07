@@ -2,21 +2,27 @@ import { useEffect, useState, type ReactNode } from 'react';
 import {
   Badge,
   Box,
+  Button,
   Callout,
+  Code,
   Card,
   DataList,
+  Dialog,
   Flex,
   Grid,
   Heading,
   Progress,
+  SegmentedControl,
+  Switch,
   Text,
+  TextField,
 } from '@radix-ui/themes';
 import {
   CheckCircledIcon,
   CrossCircledIcon,
   ExclamationTriangleIcon,
 } from '@radix-ui/react-icons';
-import { api, size, type Health, type Info } from '../api';
+import { api, size, type Health, type Info, type Me } from '../api';
 import { Sparkline } from '../ui/Sparkline';
 import { LogoutButton, RebootButton } from '../ui/Machine';
 
@@ -96,9 +102,28 @@ function Meter({ label, free, total, note }: {
   );
 }
 
-export function OverviewPage({ login = false, onLogout }: {
-  login?: boolean; onLogout?: () => void;
+type Range = 'live' | '1' | '24';
+type History = { every: number; readings: [number, number, number | null, number | null][] };
+
+export function OverviewPage({ login = false, onLogout, me }: {
+  login?: boolean; onLogout?: () => void; me?: Me | null;
 }) {
+  const [range, setRange] = useState<Range>('live');
+  const [hist, setHist] = useState<History | null>(null);
+  // The NAS keeps a day of readings; the PC app has only what this page
+  // has seen, so the switch shows only where there is history.
+  useEffect(() => {
+    if (range === 'live') return;
+    let stop = false;
+    const load = () => api<History>(`api/history?hours=${range}`)
+      .then((h) => { if (!stop) setHist(h); }).catch(() => {});
+    void load();
+    const t = window.setInterval(load, 30000);
+    return () => { stop = true; window.clearInterval(t); };
+  }, [range]);
+  const histTemps = (hist?.readings ?? []).map((r) => r[2]).filter((v): v is number => v !== null);
+  const histMips = (hist?.readings ?? []).map((r) => r[3]).filter((v): v is number => v !== null);
+  const live = range === 'live' || !hist;
   const [h, setH] = useState<Health | null>(null);
   const [info, setInfo] = useState<Info | null>(null);
   const [error, setError] = useState('');
@@ -138,7 +163,16 @@ export function OverviewPage({ login = false, onLogout }: {
 
   return (
     <Box className="wv-page-body">
-      <Heading size="6" mb="1">Overview</Heading>
+      <Flex justify="between" align="center" mb="1" gap="3" wrap="wrap">
+        <Heading size="6">Overview</Heading>
+        {me?.history && (
+          <SegmentedControl.Root size="1" value={range} onValueChange={(v) => setRange(v as Range)}>
+            <SegmentedControl.Item value="live">Live</SegmentedControl.Item>
+            <SegmentedControl.Item value="1">Last hour</SegmentedControl.Item>
+            <SegmentedControl.Item value="24">Last day</SegmentedControl.Item>
+          </SegmentedControl.Root>
+        )}
+      </Flex>
       <Text as="p" size="2" color="gray" mb="4">
         {info ? `${info.system ?? 'AmigaOS'} · ${info.banner} · ${info.host}` : 'Reading the Amiga…'}
       </Text>
@@ -152,13 +186,15 @@ export function OverviewPage({ login = false, onLogout }: {
         <>
           <Box className="wv-tiles" mb="3">
             <Tile label="Temperature" value={h.temp_c?.toFixed(1) ?? '—'} unit="°C">
-              <Sparkline values={temps} every={EVERY} unit="°C" label="Temperature" minSpan={10} />
+              <Sparkline values={live ? temps : histTemps} every={live ? EVERY : hist.every}
+                unit="°C" label="Temperature" minSpan={10} />
               {h.temp_max_c !== undefined && (
                 <Text as="div" size="1" color="gray" mt="1">The Pi slows down at {h.temp_max_c.toFixed(0)} °C</Text>
               )}
             </Tile>
             <Tile label="68k CPU" value={h.mips_68k?.toFixed(1) ?? '…'} unit="MIPS">
-              <Sparkline values={mips} every={EVERY} unit="MIPS" label="68k CPU" minSpan={100} floor={0} />
+              <Sparkline values={live ? mips : histMips} every={live ? EVERY : hist.every}
+                unit="MIPS" label="68k CPU" minSpan={100} floor={0} />
               <Text as="div" size="1" color="gray" mt="1">Near 0 when the Amiga is idle</Text>
             </Tile>
             <Power h={h} />
@@ -242,6 +278,7 @@ export function OverviewPage({ login = false, onLogout }: {
               </DataList.Item>
             </DataList.Root>
           </Card>
+          {me?.history && <AlertsCard />}
           {/* On a phone the sidebar is hidden: its buttons live here. */}
           <Flex gap="3" mt="4" display={{ initial: 'flex', md: 'none' }}>
             <RebootButton />
@@ -250,5 +287,104 @@ export function OverviewPage({ login = false, onLogout }: {
         </>
       )}
     </Box>
+  );
+}
+
+/* --- alerts (Wasabi phone: the NAS watches and tells the phone) ------- */
+
+type AlertSettings = { enabled: boolean; ntfy_url: string; phone_url: string; topic: string; temp_c: number };
+type AlertEvent = { ts: number; kind: string; text: string };
+
+function AlertsCard() {
+  const [cfg, setCfg] = useState<AlertSettings | null>(null);
+  const [events, setEvents] = useState<AlertEvent[]>([]);
+  const [tick, setTick] = useState(0);
+  const [note, setNote] = useState('');
+  useEffect(() => {
+    let stop = false;
+    api<{ settings: AlertSettings; events: AlertEvent[] }>('api/alerts')
+      .then((r) => { if (!stop) { setCfg(r.settings); setEvents(r.events); } })
+      .catch(() => {});
+    return () => { stop = true; };
+  }, [tick]);
+  useEffect(() => {
+    const t = window.setInterval(() => setTick((n) => n + 1), 30000);
+    return () => window.clearInterval(t);
+  }, []);
+  const save = (next: Partial<AlertSettings>) => api<AlertSettings>('api/alerts', next)
+    .then(setCfg).catch((e: Error) => setNote(e.message));
+  if (!cfg) return null;
+  const feed = `${cfg.phone_url.replace(/\/$/, '')}/${cfg.topic}`;
+  return (
+    <Card size="2" mt="3">
+      <Flex justify="between" align="center" mb="3" gap="3">
+        <Heading size="3">Alerts</Heading>
+        <Flex gap="2" align="center">
+          <Badge color={cfg.enabled ? 'green' : 'gray'}>{cfg.enabled ? 'on' : 'off'}</Badge>
+          <Dialog.Root>
+            <Dialog.Trigger><Button size="1" variant="soft">Settings</Button></Dialog.Trigger>
+            <Dialog.Content maxWidth="var(--wv-dialog-wide)">
+              <Dialog.Title>Alerts</Dialog.Title>
+              <Dialog.Description size="2" color="gray" mb="3">
+                The NAS checks the Amiga every 30 seconds and tells your phone when it gets too
+                hot, has a power or heat problem, stops answering (and comes back), or shows a guru.
+              </Dialog.Description>
+              <Flex direction="column" gap="3">
+                <Text as="label" size="2">
+                  <Flex gap="2" align="center">
+                    <Switch checked={cfg.enabled} onCheckedChange={(v) => void save({ enabled: v })} />
+                    Send alerts to the phone
+                  </Flex>
+                </Text>
+                <Flex gap="2" align="center">
+                  <Text size="2">Too hot at</Text>
+                  <TextField.Root size="1" type="number" defaultValue={String(cfg.temp_c)}
+                    onBlur={(e) => void save({ temp_c: Number(e.target.value) || 75 })} />
+                  <Text size="2">°C</Text>
+                </Flex>
+                <Box>
+                  <Text as="div" size="2" weight="medium" mb="1">On your phone</Text>
+                  <Text as="div" size="2" color="gray">
+                    Install the free <Text weight="medium">ntfy</Text> app, tap +, turn on
+                    "Use another server", and enter:
+                  </Text>
+                  <Text as="div" size="2" mt="1">Server: <Code>{cfg.phone_url}</Code></Text>
+                  <Text as="div" size="2">Topic: <Code>{cfg.topic}</Code></Text>
+                  <Text as="div" size="1" color="gray" mt="1">
+                    The topic is the feed's only key, so it is random. Full address: {feed}
+                  </Text>
+                </Box>
+                <Flex gap="2">
+                  <Button size="1" variant="soft" onClick={() => api<{ sent: boolean }>('api/alerts/test', {})
+                    .then((r) => setNote(r.sent ? 'Test sent - check your phone' :
+                      'Could not reach ntfy - is its container running on the NAS?'))
+                    .catch((e: Error) => setNote(e.message))}>
+                    Send a test alert
+                  </Button>
+                </Flex>
+                {note && <Text size="1" color="gray">{note}</Text>}
+              </Flex>
+              <Flex justify="end" mt="4">
+                <Dialog.Close><Button variant="soft" color="gray">Close</Button></Dialog.Close>
+              </Flex>
+            </Dialog.Content>
+          </Dialog.Root>
+        </Flex>
+      </Flex>
+      {events.length ? (
+        <Flex direction="column" gap="2">
+          {events.slice(0, 8).map((e) => (
+            <Flex key={e.ts} gap="3">
+              <Text size="1" color="gray" className="wv-nowrap">
+                {new Date(e.ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+              </Text>
+              <Text size="2">{e.text}</Text>
+            </Flex>
+          ))}
+        </Flex>
+      ) : (
+        <Text size="2" color="gray">Nothing to report.</Text>
+      )}
+    </Card>
   );
 }

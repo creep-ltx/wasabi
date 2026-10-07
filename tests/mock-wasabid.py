@@ -41,7 +41,7 @@ RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
-KEYIN, WINDOWS, HEALTH, LIVE = 0x4B, 0x4C, 0x4D, 0x4E
+KEYIN, WINDOWS, HEALTH, LIVE, CLIP = 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -54,7 +54,7 @@ BANNER = None
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
-        "hb,guru,snoopentry,psfree,key,windows,health,live")
+        "hb,guru,snoopentry,psfree,key,windows,health,live,clip,detach")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -260,6 +260,8 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_health()
         elif tag == LIVE:
             self.do_live(payload)
+        elif tag == CLIP:
+            self.do_clip(payload)
         elif tag == PS:
             self.do_ps(payload)
         elif tag == KILL:
@@ -525,6 +527,16 @@ class Handler(socketserver.BaseRequestHandler):
         with open(os.path.join(ROOT, "keys.log"), "a") as f:
             f.write(payload.hex() + "\n")
         self.send(OK)
+
+    CLIPBOARD = [b""]                    # shared by every connection
+
+    def do_clip(self, payload):
+        """The Amiga clipboard as text: op 0 read, op 1 write."""
+        (op,) = struct.unpack_from(">I", payload, 0)
+        if op == 1:
+            self.CLIPBOARD[0] = payload[4:]
+            return self.send(OK)
+        self.send_data(self.CLIPBOARD[0])
 
     def do_live(self, payload):
         """The daemon's LIVE on an 8x4 RGB565 screen: everything when

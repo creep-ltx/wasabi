@@ -144,9 +144,12 @@ wasabi info                  version, RAM, volumes, and what it can do
 wasabi ls [PATH]             list a drawer; no path lists the volumes
 wasabi put LOCAL REMOTE      upload a file (--force in a system place)
 wasabi get REMOTE LOCAL      download a file ('-' for stdout)
-wasabi run "CMD" [--max-time S]
+wasabi run "CMD" [--max-time S] [--detach]
                              execute, stream output, return its exit code;
-                             Ctrl-C it if it runs past S seconds
+                             Ctrl-C it if it runs past S seconds; --detach
+                             starts it and returns at once (output to T:)
+wasabi clip get | set [TEXT|-]
+                             read or set the Amiga's clipboard
 wasabi deploy L R [--run C] [--reboot | --restart] [--force]
 wasabi del PATH [--force] / mkdir PATH
 wasabi reboot --yes [--wait [S]]  reboot; --wait until it answers again
@@ -1029,6 +1032,12 @@ as `quit` always has; `kill --force` (RemTask) was already explicit. A
   second time.
 - **Screenshots** - full-colour, exact grabs, kept in `~/Pictures/Wasabi`;
   a gallery, a big view, download and delete.
+- **Clipboard** (on the Screen page) - shows the Amiga's clipboard (what
+  its Copy put there) with "Copy to this device", and sends text to it,
+  optionally pasting it into the active window with Right Amiga+V. The
+  browser lets a page touch this device's clipboard only on a secure
+  page (this PC's app is one; the phone over plain http is not), so the
+  text boxes stand in there.
 - **Developer** - four tabs:
   - **Logs**: the debug output (serial / KPrintF) and the DOS calls
     (snoop) as they happen, side by side, timestamped; tick boxes hide
@@ -1084,6 +1093,15 @@ also `http://192.168.68.118:8077`).
 - **Files and screenshots** use one folder on the NAS,
   `/volume2/docker/wasabi/files`, and nothing outside it.
 - **Add to Home screen** in Chrome gives it an icon.
+- **History and alerts.** The NAS reads the Amiga's health every 30 s and
+  keeps a day of it: Overview gets *Live / Last hour / Last day*. It also
+  watches, and tells the phone through **ntfy** (a second small
+  container on the NAS, `tools/ntfy-stack.yml`, port 8090, and the free
+  ntfy app): too hot (default 75 °C, set in the app), a power or heat
+  problem now or newly recorded since the Pi started, not answering for
+  two minutes (and back again), a new guru. The app's Alerts card lists
+  them, holds the settings and sends a test. The ntfy topic is random -
+  it is the feed's only key.
 
 Setting it up: `tools/deploy-nas.sh` copies the program to
 `/volume2/docker/wasabi/app` (and, the first time, the Amiga's key to
@@ -1095,6 +1113,22 @@ that folder, on the NAS's own network so it finds the Amiga by
 broadcast, as the NAS user. In Portainer: Stacks > Add stack > name
 `wasabi` > paste the file > Deploy. After an update: run the script
 again, then restart the container in Portainer.
+
+## Starting programs, and the clipboard
+
+`wasabi run --detach "SYS:Utilities/Clock"` starts a program and returns
+at once - right for anything with a window, which never ends by itself
+and would hold the one run slot (no more `Run >NIL:` in front). Its
+output goes to a file in `T:` named on stderr. Plain `run` keeps waiting,
+as before. A command's errors and its output come as one stream: the
+separate error channel for commands (`SYS_Error`) is new in AmigaOS 4,
+not in 3.2, and 3.x programs print their errors to normal output anyway.
+
+`wasabi clip get` prints the Amiga's clipboard; `wasabi clip set TEXT`
+(or `-` / nothing for stdin) puts text there, as IFF FTXT - the format
+every Amiga program reads. Proven both ways on the A1200: a clip set
+from the PC pasted into a Shell with Right Amiga+V, and text selected and
+copied in a Shell came back to the PC.
 
 ## The view
 

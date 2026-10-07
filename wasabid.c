@@ -16,6 +16,7 @@
 #include <exec/memory.h>
 #include <devices/input.h>
 #include <devices/inputevent.h>
+#include <devices/clipboard.h>
 #include <dos/dos.h>
 #include <dos/dostags.h>
 #include <dos/dosextens.h>
@@ -50,10 +51,10 @@
 #include "patches.h"                 /* everything that hijacks a vector */
 #include "health.h"                  /* the machine's vital signs */
 
-#define VERSION_STR "wasabid 0.3b4"
+#define VERSION_STR "wasabid 0.3b5"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.3b4 (6.10.2026)";
+    "$VER: wasabid 0.3b5 (7.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -75,7 +76,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health,live"
+                 "key,windows,health,live,clip,detach"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -126,6 +127,7 @@ typedef char welcome_fits_its_buffer[
 #define T_WINDOWS 0x4c
 #define T_HEALTH  0x4d
 #define T_LIVE    0x4e
+#define T_CLIP    0x4f
 
 struct Library *SocketBase;
 /*
@@ -1426,6 +1428,172 @@ static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
     if (prot != 0xFFFFFFFFUL)
         SetProtection((STRPTR)path, (LONG)prot);
     return send_frame(fd, T_OK, NULL, 0);
+}
+
+
+/* --- RUN, detached: start it, answer at once ----------------------- */
+
+/*
+ * A program with a window never ends by itself, and the one run slot
+ * waits for its command to end - so starting a GUI program used to need
+ * `Run >NIL:` typed in front. Detached, the command is handed to a new
+ * Shell with SYS_Asynch, which closes its input and output when it
+ * ends; it takes no run slot, and its output goes to a file in T: whose
+ * name the client is told, to read later with GET.
+ *
+ * Separate stderr (RUN flag bit 0) stays unhonoured, for a reason: the
+ * error channel for SystemTags, SYS_Error, is new in V50 (OS 4) - not
+ * in 3.2's V47 - and 3.x programs print their errors to Output()
+ * anyway.
+ */
+static BOOL cmd_run_detached(int fd, const char *cmd)
+{
+    static LONG serial;
+    char name[48], note[100];
+    BPTR in, out;
+    LONG rc, n;
+    UBYTE ex[8];
+
+    sprintf(name, "T:wasabi-bg-%ld", (long)++serial);
+    in = Open("NIL:", MODE_OLDFILE);
+    out = Open(name, MODE_NEWFILE);
+    if (!in || !out) {
+        if (in) Close(in);
+        if (out) Close(out);
+        return send_err(fd, "cannot open the output file in T:");
+    }
+    rc = SystemTags((STRPTR)cmd,
+                    SYS_Input, (ULONG)in,
+                    SYS_Output, (ULONG)out,
+                    SYS_Asynch, TRUE,
+                    SYS_UserShell, TRUE,
+                    TAG_DONE);
+    if (rc == -1) {                      /* not started: the files are ours */
+        Close(in);
+        Close(out);
+        DeleteFile(name);
+        return send_err(fd, "could not start the command");
+    }
+    n = sprintf(note, "[started in the background; its output goes to %s]\n",
+                name);
+    if (!send_frame(fd, T_STDERR, note, n))
+        return FALSE;
+    put_be32(ex, 0);
+    put_be32(ex + 4, 0);
+    return send_frame(fd, T_EXIT, ex, 8);
+}
+
+/* --- CLIP: the Amiga's clipboard, as text ------------------------- */
+
+/*
+ * Unit 0 (PRIMARY_CLIP), the one every program uses; text as IFF FORM
+ * FTXT with one CHRS chunk, LF line ends - the format the whole console
+ * family shares (Knowledge/amiga/clipboard-and-selection.md). Opened
+ * per command, not kept: nothing here should hold a device open
+ * between commands it may never be sent.
+ *
+ * op 0, read: DATA with the text (Latin-1), then END; nothing on the
+ * clipboard, or no text on it, is an empty answer. The read is always
+ * run dry - a clip left half-read stays held and blocks the next writer.
+ * op 1, write: the rest of the payload is the text; CMD_UPDATE after
+ * the write publishes it.
+ */
+#define CLIP_KEEP (60 * 1024)
+
+static ULONG get_be32u(const UBYTE *b)
+{
+    return ((ULONG)b[0] << 24) | ((ULONG)b[1] << 16) | ((ULONG)b[2] << 8) | b[3];
+}
+
+static BOOL cmd_clip(int fd, ULONG op, const UBYTE *text, LONG tlen)
+{
+    struct MsgPort *mp;
+    struct IOClipReq *io;
+    UBYTE *buf;
+    static UBYTE scratch[256];
+    LONG got = 0, size;
+    BOOL ok = TRUE;
+
+    if (op > 1)
+        return send_perr(fd, "bad CLIP op");
+    if (op == 1 && tlen > CLIP_KEEP)
+        return send_perr(fd, "that is too much text for one clip");
+    size = op == 1 ? 20 + tlen + 1 : CLIP_KEEP + 64;
+    buf = AllocMem(size, MEMF_ANY | MEMF_CLEAR);
+    mp = CreateMsgPort();
+    io = mp ? (struct IOClipReq *)CreateIORequest(mp, sizeof(*io)) : NULL;
+    if (!buf || !io || OpenDevice("clipboard.device", PRIMARY_CLIP,
+                                  (struct IORequest *)io, 0) != 0) {
+        if (io) DeleteIORequest((struct IORequest *)io);
+        if (mp) DeleteMsgPort(mp);
+        if (buf) FreeMem(buf, size);
+        return send_err(fd, "cannot open clipboard.device");
+    }
+
+    if (op == 1) {
+        LONG pad = tlen & 1;
+        put_be32(buf, 0x464F524DUL);               /* FORM */
+        put_be32(buf + 4, 12 + tlen + pad);
+        put_be32(buf + 8, 0x46545854UL);           /* FTXT */
+        put_be32(buf + 12, 0x43485253UL);          /* CHRS */
+        put_be32(buf + 16, tlen);                  /* not padded */
+        memcpy(buf + 20, text, tlen);
+        io->io_Command = CMD_WRITE;
+        io->io_Data = (STRPTR)buf;
+        io->io_Length = 20 + tlen + pad;
+        io->io_Offset = 0;
+        io->io_ClipID = 0;
+        DoIO((struct IORequest *)io);
+        ok = io->io_Error == 0;
+        if (ok) {
+            io->io_Command = CMD_UPDATE;           /* publishes it */
+            DoIO((struct IORequest *)io);
+            ok = io->io_Error == 0;
+        }
+    } else {
+        io->io_Command = CMD_READ;
+        io->io_Data = (STRPTR)buf;
+        io->io_Length = CLIP_KEEP + 64;
+        io->io_Offset = 0;
+        io->io_ClipID = 0;
+        DoIO((struct IORequest *)io);
+        got = io->io_Error ? 0 : (LONG)io->io_Actual;
+        do {                                       /* run it dry */
+            io->io_Command = CMD_READ;
+            io->io_Data = (STRPTR)scratch;
+            io->io_Length = sizeof(scratch);
+            DoIO((struct IORequest *)io);
+        } while (io->io_Error == 0 && io->io_Actual > 0);
+    }
+    CloseDevice((struct IORequest *)io);
+    DeleteIORequest((struct IORequest *)io);
+    DeleteMsgPort(mp);
+
+    if (op == 1) {
+        FreeMem(buf, size);
+        return ok ? send_frame(fd, T_OK, NULL, 0)
+                  : send_err(fd, "the clipboard refused the write");
+    }
+    /* Find the text: FORM....FTXT, then walk the chunks for CHRS. */
+    if (got >= 12 && get_be32u(buf) == 0x464F524DUL &&
+        get_be32u(buf + 8) == 0x46545854UL) {
+        LONG o = 12;
+        while (o + 8 <= got) {
+            ULONG id = get_be32u(buf + o), sz = get_be32u(buf + o + 4);
+            if (id == 0x43485253UL) {
+                LONG n = (LONG)sz, at = o + 8;
+                if (n > got - at)
+                    n = got - at;                  /* trust bytes, not sizes */
+                for (o = 0; ok && o < n; o += MAX_PAYLOAD)
+                    ok = send_frame(fd, T_DATA, buf + at + o,
+                                    n - o > MAX_PAYLOAD ? MAX_PAYLOAD : n - o);
+                break;
+            }
+            o += 8 + sz + (sz & 1);                /* chunks are even */
+        }
+    }
+    FreeMem(buf, size);
+    return ok ? send_frame(fd, T_END, NULL, 0) : FALSE;
 }
 
 /* --- remote mouse: move the pointer, click, doubleclick ------------ */
@@ -3043,6 +3211,8 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         char cmd[512];
         if (len < 4 || !get_str(p, len, 4, cmd, sizeof(cmd)))
             return send_perr(fd, "bad RUN header");
+        if (get_be32(p) & 2)             /* detach: start it and answer */
+            return cmd_run_detached(fd, cmd);
         if (g_job_active)
             return send_perr(fd, "another command is already running");
         if (!start_run(cl, cmd))
@@ -3092,6 +3262,11 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
 
     case T_WINDOWS:
         return cmd_windows(fd);
+
+    case T_CLIP:
+        if (len < 4)
+            return send_perr(fd, "bad CLIP header");
+        return cmd_clip(fd, get_be32(p), p + 4, len - 4);
 
     case T_LIVE:
         return cmd_live(cl, fd, len >= 4 ? get_be32(p) : 0);

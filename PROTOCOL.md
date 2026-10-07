@@ -113,6 +113,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x4C | WINDOWS  | C→S | (empty) |
 | 0x4D | HEALTH   | C→S | (empty) |
 | 0x4E | LIVE     | C→S | `u32 flags` |
+| 0x4F | CLIP     | C→S | `u32 op` (0 read, 1 write), then the text for a write |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -141,7 +142,7 @@ assuming silence means yes.
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
 `speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry,psfree,`
-`mouse,key,windows,health,live` for a current build. Self-update makes version skew
+`mouse,key,windows,health,live,clip,detach` for a current build. Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -211,13 +212,14 @@ Server replies with `DATA` frames then `END`, or a single `ERR`.
 | 0   | merge stderr into stdout |
 | 1   | do not wait — detach and reply `EXIT 0` at once |
 
-**Today's `wasabid` ignores both flags**: output arrives merged on
-`STDOUT` (one redirected file carries everything `SystemTagList()`
-produces) and the daemon always waits for the command. The flags are
-reserved wire protocol, honoured by the host mock; a daemon that grows
-real stderr separation or detach will find clients already sending them.
-To run something without waiting, use the shell's own detach:
-`wasabi run "Run <command>"` returns as soon as `Run` has spawned it.
+**Bit 1, detach** (caps `detach`, wasabid 0.3b5): the command goes to a
+new Shell with `SYS_Asynch`, its input `NIL:` and its output a new file
+`T:wasabi-bg-<n>`, both closed by DOS when it ends. The daemon answers
+at once with one `STDERR` line naming that file, then `EXIT 0` (non-zero
+`ERR` if it could not start). It takes no run slot. **Bit 0, separate
+stderr, stays unhonoured, and will on 3.x**: the error handle for
+`SystemTags`, `SYS_Error`, is V50 (OS 4), not V47, and 3.x programs
+write their errors to `Output()` - output arrives merged on `STDOUT`.
 
 The server runs the command through `SystemTagList()` with its input and
 output redirected, and forwards whatever appears as `STDOUT`/`STDERR`
@@ -713,6 +715,17 @@ copied out and converted pixel by pixel, 62 ms. Card memory is slow to
 read from the 68k side under Emu68 (one longword a pixel: 29 ms for the
 whole screen, against 5 ms for the same loop in fast RAM). Formats the
 direct road does not know, and native screens, take `ReadPixelArray`.
+
+### CLIP — the clipboard, as text
+
+`op 0` reads: `DATA` with the text (Latin-1), then `END`; an empty or
+non-text clipboard is an empty answer. `op 1` writes the rest of the
+payload (up to 60 KB). Unit 0 (`PRIMARY_CLIP`), IFF `FORM FTXT` with one
+`CHRS` chunk, opened per command. A write is followed by `CMD_UPDATE`
+(without it no other program sees the clip); a read is always run dry
+(a clip left half-read stays held and blocks the next writer); the
+`CHRS` chunk is found by walking the chunks, its length clamped to what
+was actually read.
 
 ### HEALTH — the machine's vital signs
 
