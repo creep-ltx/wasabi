@@ -13,8 +13,12 @@ ssh nas "test -f $D/config/wasabi/config" || {
     ssh nas "umask 077; cat > $D/config/wasabi/config" < "${XDG_CONFIG_HOME:-$HOME/.config}/wasabi/config"
 }
 # The NAS's shares give every new file to everyone (ACLs); the key and
-# the login's password hash must not be. chmod removes those rules.
+# the login's password hash must not be. chmod removes those rules - and
+# must for the folders the containers WRITE too: their user (1026) is not
+# matched by those ACLs, so files/ and ntfy's cache gave "Permission
+# denied" until plain modes replaced them.
 ssh nas "chmod -R go-rwx $D/config"
+ssh nas "chmod -R u+rwX,go+rX,go-w $D/files /volume2/docker/ntfy"
 ssh nas "cat > /volume2/docker/_portainer-stacks/wasabi.yml" < tools/nas-stack.yml
 ssh nas "cat > /volume2/docker/_portainer-stacks/ntfy.yml" < tools/ntfy-stack.yml
 echo "copied to $D; the stack is /volume2/docker/_portainer-stacks/wasabi.yml"

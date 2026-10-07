@@ -13,7 +13,10 @@ services:
       - NTFY_BASE_URL=http://bytebandit:8090
       - NTFY_CACHE_FILE=/var/cache/ntfy/cache.db
       - NTFY_CACHE_DURATION=72h
+      # Not ntfy's usual :80 - as the NAS user (not root) it may not open
+      # a port under 1024: "listen tcp :80: bind: permission denied".
+      - NTFY_LISTEN_HTTP=:8090
     ports:
-      - "8090:80"
+      - "8090:8090"
     volumes:
       - /volume2/docker/ntfy/cache:/var/cache/ntfy
