@@ -51,10 +51,10 @@
 #include "patches.h"                 /* everything that hijacks a vector */
 #include "health.h"                  /* the machine's vital signs */
 
-#define VERSION_STR "wasabid 0.3b5"
+#define VERSION_STR "wasabid 0.3b6"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.3b5 (7.10.2026)";
+    "$VER: wasabid 0.3b6 (8.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -1454,9 +1454,14 @@ static BOOL cmd_run_detached(int fd, const char *cmd)
     LONG rc, n;
     UBYTE ex[8];
 
-    sprintf(name, "T:wasabi-bg-%ld", (long)++serial);
     in = Open("NIL:", MODE_OLDFILE);
-    out = Open(name, MODE_NEWFILE);
+    /* The numbering restarts with the daemon, and a program started by
+     * the last one may still hold its file open: take the next free. */
+    out = 0;
+    for (n = 0; !out && n < 50; n++) {
+        sprintf(name, "T:wasabi-bg-%ld", (long)++serial);
+        out = Open(name, MODE_NEWFILE);
+    }
     if (!in || !out) {
         if (in) Close(in);
         if (out) Close(out);
@@ -1589,6 +1594,10 @@ static BOOL cmd_clip(int fd, ULONG op, const UBYTE *text, LONG tlen)
                                     n - o > MAX_PAYLOAD ? MAX_PAYLOAD : n - o);
                 break;
             }
+            /* A corrupt clip may declare any size: past the bytes in hand,
+             * stop - the sum used to wrap negative and read before buf. */
+            if (sz > (ULONG)(got - o - 8))
+                break;
             o += 8 + sz + (sz & 1);                /* chunks are even */
         }
     }
@@ -2180,6 +2189,7 @@ static BOOL live_send_rect(int fd, struct LiveState *ls, UBYTE *out,
 #define LIVE_MAXRECT 512
 static struct { UWORD x0, x1, y0, y1; } g_rects[LIVE_MAXRECT];
 static LONG g_nrects;
+static LONG g_overflow_y;               /* -1, or where the list ran out */
 
 struct LiveScan {                       /* the rectangle being built */
     LONG ry0, rx0, rx1, bpp, w;
@@ -2195,10 +2205,14 @@ static void live_close(struct LiveScan *sc, LONG yend)
         g_rects[g_nrects].y0 = sc->ry0;
         g_rects[g_nrects].y1 = yend;
         g_nrects++;
-    } else {                            /* list full: widen the last one */
-        g_rects[LIVE_MAXRECT - 1].x0 = 0;
-        g_rects[LIVE_MAXRECT - 1].x1 = sc->w;
-        g_rects[LIVE_MAXRECT - 1].y1 = yend;
+    } else if (g_overflow_y < 0) {
+        /* List full: everything from here down goes as whole-width
+         * bands, each sized to fit one frame (live_send_bands). This
+         * used to widen the last rectangle to the bottom instead - a
+         * rectangle far bigger than the 64 KB send buffer, and the copy
+         * into it overran the heap (audit 4: reachable on a screen over
+         * 1024 lines tall with alternating changed rows). */
+        g_overflow_y = sc->ry0;
     }
     sc->ry0 = -1;
 }
@@ -2400,6 +2414,7 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
         return send_err(fd, "out of memory for the live view");
     }
     g_nrects = 0;
+    g_overflow_y = -1;
     scan.ry0 = -1;
     scan.bpp = bpp;
     scan.w = w;
@@ -2460,6 +2475,11 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
              * maths for a pixel that did not change; only the changed
              * span is converted to RGB565.
              */
+            /* An odd-width 16-bit screen ends in half a longword, which
+             * the longword compare would never look at: let it take the
+             * per-pixel road, which sees every pixel. */
+            if (pbytes == 2 && (w & 1))
+                pbytes = 0;
             if (pbytes) {
                 ULONG need = w * h * pbytes;
                 if (full || !ls->raw || ls->rawpf != pf || ls->rawsize != need) {
@@ -2470,9 +2490,13 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
                     ls->rawpf = pf;
                     full = TRUE;        /* nothing to compare against */
                 }
-                if (!ls->raw)
-                    pbytes = 0;         /* no memory: per-pixel road */
-                n = w * pbytes;
+                if (ls->raw)
+                    n = w * pbytes;
+                else
+                    pbytes = 0;         /* no memory: per-pixel road, with
+                                         * the row length set above - not
+                                         * 0, which copied nothing and
+                                         * compared stale data */
             }
             for (y = 0; y < (LONG)h; y++) {
                 LONG first, last;
@@ -2514,6 +2538,7 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
             }
             /* fell back part-way: start the comparison again cleanly */
             g_nrects = 0;
+            g_overflow_y = -1;
             scan.ry0 = -1;
         } else if (lock) {
             __UnLockBitMap_base(g_cgfx, lock);
@@ -2578,6 +2603,13 @@ send:
     for (i = 0; ok && i < g_nrects; i++)
         ok = live_send_rect(fd, ls, out, g_rects[i].x0, g_rects[i].x1,
                             g_rects[i].y0, g_rects[i].y1);
+    if (ok && g_overflow_y >= 0) {      /* the rest, in bands that fit */
+        LONG rows = LIVE_RECT_MAX / ((LONG)w * bpp);
+        if (rows < 1) rows = 1;
+        for (y = g_overflow_y; ok && y < (LONG)h; y += rows)
+            ok = live_send_rect(fd, ls, out, 0, w, y,
+                                y + rows < (LONG)h ? y + rows : (LONG)h);
+    }
 done:
     if (src) FreeMem(src, srcsize);
     FreeMem(out, LIVE_RECT_MAX + 16);
@@ -3848,9 +3880,13 @@ out:
                "(someone patched over it). Staying resident: this binary "
                "must not unload. Reboot when convenient.\n");
     }
-    for (i = 0; i < MAX_CLIENTS; i++)
+    for (i = 0; i < MAX_CLIENTS; i++) {
+        live_free(i);                   /* ~7 MB per live viewer at 1280x960:
+                                         * AllocMem is not given back when a
+                                         * program ends (audit 4) */
         if (g_clients[i].fd >= 0)
             CloseSocket(g_clients[i].fd);
+    }
     if (disco_fd >= 0) CloseSocket(disco_fd);
     if (listen_fd >= 0) CloseSocket(listen_fd);
     FreeMem(payload, MAX_PAYLOAD);

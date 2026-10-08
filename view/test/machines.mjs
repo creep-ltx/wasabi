@@ -25,7 +25,7 @@ try {
   await p.evaluate(() => localStorage.removeItem('wasabi-machine'));
   await p.reload();
   await p.waitForFunction(() => document.body.innerText.includes('Kickstart'), { timeout: 20000 });
-  check('the first machine is the real A1200', (await text()).includes('wasabid 0.3b5'));
+  check('the first machine is the real A1200', /(?<!mock-)wasabid 0\.\d/.test(await text()));
 
   // add the fake one by address, with its own key
   await p.waitForSelector('button[aria-label="Machine"]', { visible: true, timeout: 10000 });
@@ -61,9 +61,19 @@ try {
   await p.waitForSelector('button[aria-label="Machine"]', { visible: true, timeout: 10000 });
   await p.click('button[aria-label="Machine"]');
   await clickText('[role="option"]', '● Amiga');
-  await p.waitForFunction(() => document.body.innerText.includes('0.3b5'), { timeout: 20000 }).catch(() => {});
-  check('switching back shows the A1200 again', (await text()).includes('wasabid 0.3b5'));
+  await p.waitForFunction(() => /(?<!mock-)wasabid 0\.\d/.test(document.body.innerText), { timeout: 20000 }).catch(() => {});
+  check('switching back shows the A1200 again', /(?<!mock-)wasabid 0\.\d/.test(await text()));
   check('no page errors', !errors.length, errors.join(' | '));
+  // leave the machine list as it was
+  await p.evaluate(async () => {
+    const r = await fetch('api/machines');
+    for (const m of (await r.json()).machines) {
+      if (m.name === 'Fake Amiga') {
+        await fetch('api/machines', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Wasabi': '1' },
+          body: JSON.stringify({ action: 'remove', id: m.id }) });
+      }
+    }
+  });
 } finally {
   await b.close();
 }

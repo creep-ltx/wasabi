@@ -188,6 +188,8 @@ class Api:
         copied = []
 
         def put_tree(c, src, dst):
+            if os.path.islink(src) and self.root is not None:
+                return                   # a link could lead out of the root
             if os.path.isdir(src):
                 c.send(self.w.MKDIR, self.w.pack_str(dst))
                 try:
@@ -215,7 +217,22 @@ class Api:
         local_dir = self.real(local_dir)
         copied = []
 
+        def inside(dst):
+            # Every destination is checked, not just the folder: an
+            # Amiga name "..", or a "/" that the base name came out as,
+            # made os.path.join() climb out of the Wasabi folder, and
+            # a symlink already in the folder could lead out (audit 4).
+            if os.path.basename(dst) in ("", ".", ".."):
+                raise ApiError("%s is not a usable file name here"
+                               % os.path.basename(dst), 400)
+            if os.path.islink(dst):
+                raise ApiError("%s is a link; not copying over it"
+                               % self.shown(dst), 403)
+            if self.root is not None:
+                self.real(self.shown(os.path.abspath(dst)))
+
         def get_tree(c, src, dst, isdir):
+            inside(dst)
             if isdir:
                 os.makedirs(dst, exist_ok=True)
                 for e in self.amiga_ls(src)["entries"]:
@@ -459,7 +476,11 @@ class Api:
                 if old is not None:
                     d = self.backup_dir(path)
                     os.makedirs(d, exist_ok=True)
-                    backup = time.strftime("%Y-%m-%d_%H%M%S") + ".txt"
+                    stamp = time.strftime("%Y-%m-%d_%H%M%S")
+                    backup, n = stamp + ".txt", 1
+                    while os.path.exists(os.path.join(d, backup)):
+                        n += 1          # two saves in one second
+                        backup = "%s-%d.txt" % (stamp, n)
                     with open(os.path.join(d, backup), "wb") as fh:
                         fh.write(old)
                     for n in self._backups(path)[self.KEEP_BACKUPS:]:
@@ -567,6 +588,20 @@ class Api:
             raise ApiError("bad request")
 
 
+def write_private(path, text):
+    """Write a file only its owner can read, atomically. The file is
+    created 0600, not chmod'ed after the secret is in it (audit 4)."""
+    tmp = path + ".tmp"
+    try:
+        os.remove(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
 def amiga_join(d, name):
     if not d:
         return name
@@ -576,6 +611,8 @@ def amiga_join(d, name):
 def amiga_split(p):
     """'S:User-Startup' -> ('S:', 'User-Startup'); 'Work:a/b' -> ('Work:a', 'b')."""
     i = max(p.rfind("/"), p.rfind(":"))
+    if i < 0:
+        return "", p                     # a bare name: the current drawer
     parent = p[:i + 1] if p[i:i + 1] == ":" else p[:i]
     return parent, p[i + 1:]
 
@@ -622,6 +659,7 @@ class Auth:
         self.pw_file = os.path.join(folder, "view-password")
         self.ss_file = os.path.join(folder, "view-sessions.json")
         self.lock = threading.Lock()
+        self.setup_lock = threading.Lock()
         try:
             with open(self.ss_file) as fh:
                 self.sessions = {k: v for k, v in json.load(fh).items()
@@ -638,16 +676,14 @@ class Auth:
                               dklen=32)
 
     def setup(self, pw):
-        if not self.needs_setup():
-            raise ApiError("a password is already set", 409)
-        if len(pw) < 8:
+        if not isinstance(pw, str) or len(pw) < 8:
             raise ApiError("choose at least 8 characters")
         salt = secrets.token_bytes(16)
-        tmp = self.pw_file + ".tmp"
-        with open(tmp, "w") as fh:
-            fh.write("scrypt$%s$%s\n" % (salt.hex(), self._hash(pw, salt).hex()))
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.pw_file)
+        line = "scrypt$%s$%s\n" % (salt.hex(), self._hash(pw, salt).hex())
+        with self.setup_lock:            # two first visitors at once:
+            if not self.needs_setup():   # only one sets the password
+                raise ApiError("a password is already set", 409)
+            write_private(self.pw_file, line)
         return self._new_session()
 
     def login(self, pw):
@@ -670,11 +706,7 @@ class Auth:
         return token
 
     def _save(self):
-        tmp = self.ss_file + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(self.sessions, fh)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.ss_file)
+        write_private(self.ss_file, json.dumps(self.sessions))
 
     def check(self, token):
         with self.lock:

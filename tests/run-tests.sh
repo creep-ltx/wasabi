@@ -1008,6 +1008,55 @@ out=$(bk_run)
 check "backup: a later night stores nothing that did not change" "0" "$out"
 check "backup: it links last night's copy instead" "2" \
       "$(stat -c %h "$ROOT/bk-files/Backups/Amiga/$TODAY/S/User-Startup" 2>/dev/null)"
+# --- audit 4: what a broken or hostile request must not do ---
+raw_req() { # raw HTTP request text -> status code
+  python3 - "$VPORT" "$1" <<'PY'
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
+s.sendall(sys.argv[2].encode().replace(b"\\n", b"\r\n"))
+try:
+    print(s.recv(200).split(b" ")[1].decode())
+except (socket.timeout, IndexError):
+    print("no answer")
+PY
+}
+out=$(raw_req 'POST /api/auth/login HTTP/1.1\nHost: x\nContent-Length: -5\nX-Wasabi: 1\n\n')
+check "audit4: a negative Content-Length is refused before login" "400" "$out"
+out=$(raw_req 'POST /api/auth/login HTTP/1.1\nHost: x\nContent-Length: 99999999999\nX-Wasabi: 1\n\n')
+check "audit4: and so is a huge one" "413" "$out"
+out=$(curl -s -o /dev/null -w "%{http_code}" "$A/api/settings")
+check "audit4: settings need a login on the server" "401" "$out"
+tok=$(awk '$6=="wasabi_session"{print $7}' "$ROOT/bkjar")
+out=$(curl -s -o /dev/null -w "%{http_code}" -H "Cookie: bad\"cookie=x y; wasabi_session=$tok" "$A/api/backup")
+check "audit4: another app's odd cookie does not log us out" "200" "$out"
+out=$(curl -s -o /dev/null -w "%{http_code}" -b "$ROOT/bkjar" "${J[@]}" -X POST -d '{"time":"3","keep":"x"}' "$A/api/backup")
+check "audit4: nonsense backup settings are refused" "400" "$out"
+out=$(curl -s -b "$ROOT/bkjar" "$A/api/backup" | python3 -c 'import json,sys; s=json.load(sys.stdin)["settings"]; print(s["time"], s["keep"])')
+check "audit4: and the old ones stay" "03:30 30" "$out"
+out=$(curl -s -o /dev/null -w "%{http_code}" -b "$ROOT/bkjar" "${J[@]}" -X POST -d '{"temp_c":"hot"}' "$A/api/alerts")
+check "audit4: nonsense alert settings are refused" "400" "$out"
+out=$(curl -s -o /dev/null -w "%{http_code}" -b "$ROOT/bkjar" "${J[@]}" -X POST -d '[1,2]' "$A/api/backup")
+check "audit4: a JSON list body is an answer, not a dropped connection" "400" "$out"
+for bad in '/' '..' 'S:..'; do
+  out=$(curl -s -o /dev/null -w "%{http_code}" -b "$ROOT/bkjar" "${J[@]}" -X POST \
+        -d "{\"items\":[{\"path\":\"$bad\",\"dir\":false}],\"dir\":\"/\"}" "$A/api/copy/to-pc")
+  check "audit4: copying Amiga '$bad' to the NAS cannot leave the folder" "400" "$out"
+done
+ln -s /tmp "$ROOT/bk-files/out-link"
+out=$(curl -s -o /dev/null -w "%{http_code}" -b "$ROOT/bkjar" "${J[@]}" -X POST \
+      -d '{"items":[{"path":"S:Startup-Sequence","dir":false}],"dir":"/out-link"}' "$A/api/copy/to-pc")
+check "audit4: nor through a link in it" "403" "$out"
+rm -f "$ROOT/bk-files/out-link"
+out=$(stat -c %a "$ROOT/bk-cfg/wasabi/view-password" 2>/dev/null || find "$ROOT/bk-cfg" -name view-password -exec stat -c %a {} \;)
+check "audit4: the password file is private" "600" "$out"
+out=$(python3 - <<'PY'
+import sys; sys.path.insert(0, ".")
+from wasabi_api import amiga_split
+print(amiga_split("Startup"), amiga_split("S:a/b"))
+PY
+)
+check "audit4: a bare Amiga name splits sanely" "('', 'Startup') ('S:a', 'b')" "$out"
+
 echo "test $$" > .deployed
 for i in $(seq 1 25); do kill -0 $VIEW_PID 2>/dev/null || break; sleep 1; done
 kill -0 $VIEW_PID 2>/dev/null; check "update: a new version stamp ends the server (Docker restarts it)" "1" "$?"

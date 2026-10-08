@@ -69,6 +69,10 @@ class LogHub:
     # --- streams --------------------------------------------------------
 
     def start_stream(self, stream):
+        with self.lock:                  # pages start and stop at once
+            self._start(stream)
+
+    def _start(self, stream):
         if stream in self.workers and self.workers[stream].is_alive():
             return
         ev = threading.Event()
@@ -79,19 +83,24 @@ class LogHub:
         t.start()
 
     def stop_stream(self, stream):
+        with self.lock:
+            self._stop(stream)
+        self.set_state(stream, "off")
+
+    def _stop(self, stream):
         ev = self.stop.pop(stream, None)
         if ev:
             ev.set()
         self.workers.pop(stream, None)
-        self.set_state(stream, "off")
 
     def set_snoop(self, task, entry):
         """New snoop options are the daemon's, per subscription: restart
         the snoop stream if it runs."""
-        self.snoop_task, self.snoop_entry = task or "", bool(entry)
-        if "snoop" in self.workers:
-            self.stop_stream("snoop")
-            self.start_stream("snoop")
+        with self.lock:
+            self.snoop_task, self.snoop_entry = task or "", bool(entry)
+            if "snoop" in self.workers:
+                self._stop("snoop")
+                self._start("snoop")
 
     def _subscribe(self, c, stream):
         w = self.w

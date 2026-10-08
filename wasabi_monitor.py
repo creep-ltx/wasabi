@@ -74,23 +74,38 @@ class Monitor:
         return cfg
 
     def _save_cfg(self, cfg):
-        tmp = self.cfg_path + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(cfg, fh, indent=2)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.cfg_path)
+        from wasabi_api import write_private
+        write_private(self.cfg_path, json.dumps(cfg, indent=2))
 
     def settings(self):
         with self.lock:
             return dict(self.cfg)
 
     def set_settings(self, new):
+        """Checked on a copy first: a temp_c of "abc" stored before
+        float() failed used to break every later check (audit 4)."""
+        from wasabi_api import ApiError
         with self.lock:
-            for k in ("enabled", "ntfy_url", "phone_url", "topic", "temp_c"):
-                if k in new:
-                    self.cfg[k] = new[k]
-            self.cfg["temp_c"] = float(self.cfg["temp_c"])
-            self.cfg["enabled"] = bool(self.cfg["enabled"])
+            cfg = dict(self.cfg)
+            try:
+                if "temp_c" in new:
+                    cfg["temp_c"] = float(new["temp_c"])
+                if "enabled" in new:
+                    cfg["enabled"] = bool(new["enabled"])
+                for k in ("ntfy_url", "phone_url"):
+                    if k in new:
+                        v = str(new[k]).strip()
+                        if not v.startswith(("http://", "https://")):
+                            raise ValueError(k)
+                        cfg[k] = v
+                if "topic" in new:
+                    t = str(new["topic"]).strip()
+                    if not t or "/" in t:
+                        raise ValueError("topic")
+                    cfg["topic"] = t
+            except (ValueError, TypeError):
+                raise ApiError("those alert settings do not make sense")
+            self.cfg = cfg
             self._save_cfg(self.cfg)
             return dict(self.cfg)
 
@@ -233,7 +248,7 @@ class Monitor:
         try:
             urllib.request.urlopen(req, timeout=10).read()
             return True
-        except OSError as exc:
+        except Exception as exc:         # a bad URL must not abort a check
             print("[monitor] ntfy: %s" % exc)
             return False
 
@@ -255,14 +270,14 @@ class Monitor:
                               "WHERE ts >= ? ORDER BY ts", (since,)).fetchall()
         finally:
             db.close()
-        step = max(1, len(rows) // 300)
+        step = max(1, -(-len(rows) // 300))       # at most 300 points
         out = []
         for i in range(0, len(rows), step):
             chunk = rows[i:i + step]
             ups = [r for r in chunk if r[1]]
-            if not ups:
-                out.append([chunk[-1][0], 0, None, None])
-                continue
+            if len(ups) < len(chunk):   # any time down shows as down:
+                out.append([chunk[-1][0], 0, None, None])    # an outage
+                continue                # must not be averaged away
             temps = [r[2] for r in ups if r[2] is not None]
             mips = [r[3] for r in ups if r[3] is not None]
             out.append([chunk[-1][0], 1,

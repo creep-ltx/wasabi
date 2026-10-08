@@ -61,20 +61,35 @@ class Backup:
                 "folder": "/Backups/Amiga"}
 
     def set_settings(self, new):
-        for k in ("enabled", "time", "keep", "folders"):
-            if k in new:
-                self.cfg[k] = new[k]
-        if isinstance(self.cfg["folders"], str):
-            self.cfg["folders"] = self.cfg["folders"].split(",")
-        self.cfg["folders"] = [f.strip() if f.strip().endswith((":", "/"))
-                               else f.strip() + ":" if ":" not in f
-                               else f.strip()
-                               for f in self.cfg["folders"] if f.strip()] \
-            or list(DEFAULTS["folders"])
-        self.cfg["keep"] = max(1, min(365, int(self.cfg["keep"])))
-        h, m = str(self.cfg["time"]).split(":")
-        self.cfg["time"] = "%02d:%02d" % (int(h) % 24, int(m) % 60)
-        self.cfg["enabled"] = bool(self.cfg["enabled"])
+        """Check every value on a copy, then take it: a value stored
+        before it was checked (keep "x", folders 5, time "3") used to
+        break every later night, silently (audit 4)."""
+        from wasabi_api import ApiError
+        cfg = dict(self.cfg)
+        try:
+            if "folders" in new:
+                f = new["folders"]
+                if isinstance(f, str):
+                    f = f.split(",")
+                if not isinstance(f, list) or not all(isinstance(x, str)
+                                                      for x in f):
+                    raise ValueError("folders")
+                f = [x.strip() for x in f if x.strip()]
+                cfg["folders"] = [x if ":" in x else x + ":" for x in f] \
+                    or list(DEFAULTS["folders"])
+            if "keep" in new:
+                cfg["keep"] = max(1, min(365, int(new["keep"])))
+            if "time" in new:
+                h, m = str(new["time"]).strip().split(":")
+                if not (0 <= int(h) < 24 and 0 <= int(m) < 60):
+                    raise ValueError("time")
+                cfg["time"] = "%02d:%02d" % (int(h), int(m))
+            if "enabled" in new:
+                cfg["enabled"] = bool(new["enabled"])
+        except (ValueError, TypeError):
+            raise ApiError("those settings do not make sense: give the time "
+                           "as HH:MM, nights as a number, folders as names")
+        self.cfg = cfg
         self._write(self.cfg_path, self.cfg)
         return self.info()
 
@@ -92,13 +107,16 @@ class Backup:
     def _loop(self):
         while True:
             time.sleep(30)
-            if not self.cfg["enabled"] or self.running:
-                continue
-            now = datetime.datetime.now()
-            today = now.strftime("%Y-%m-%d")
-            if now.strftime("%H:%M") >= self.cfg["time"] and \
-                    self.state.get("day") != today:
-                self.run(scheduled=True)
+            try:
+                if not self.cfg["enabled"] or self.running:
+                    continue
+                now = datetime.datetime.now()
+                today = now.strftime("%Y-%m-%d")
+                if now.strftime("%H:%M") >= self.cfg["time"] and \
+                        self.state.get("day") != today:
+                    self.run(scheduled=True)
+            except Exception as exc:     # the scheduler must never die
+                print("[backup] %s" % exc)
 
     def run(self, scheduled=False):
         """One backup. Only the scheduled run marks the night as done: a
@@ -116,7 +134,10 @@ class Backup:
         files = linked = 0
         nbytes = 0
         try:
-            shutil.rmtree(work, ignore_errors=True)
+            for d in os.listdir(self.base) if os.path.isdir(self.base) else []:
+                if d.endswith(".partial"):     # a night cut short earlier
+                    shutil.rmtree(os.path.join(self.base, d),
+                                  ignore_errors=True)
             c = self.w.Conn(self.machine.host, self.machine.port,
                             self.machine.key)
             try:
@@ -135,8 +156,8 @@ class Backup:
                     "new": files - linked, "bytes": nbytes,
                     "skipped": self.skipped[:20],
                     "seconds": round(time.time() - t0, 1)}
-        except (OSError, self.w.WasabiError) as exc:
-            shutil.rmtree(work, ignore_errors=True)
+        except Exception as exc:         # any failure is a failed night,
+            shutil.rmtree(work, ignore_errors=True)   # with its alert
             last = {"ok": False, "at": t0, "day": today, "error": str(exc)}
             if self.monitor:
                 self.monitor.alert("backup", "The Amiga's backup failed",
@@ -145,8 +166,10 @@ class Backup:
                                    priority="high", tags="floppy_disk")
         day = today if scheduled else self.state.get("day")
         self.state = {"day": day, "last": last}
-        self._write(self.state_path, self.state)
-        self.running = False
+        try:
+            self._write(self.state_path, self.state)
+        finally:
+            self.running = False
 
     def _copy_tree(self, c, amiga_dir, dest, prev_dir, depth=0):
         """Copy one drawer down; link files unchanged since last night.
@@ -196,15 +219,15 @@ class Backup:
             # One unreadable file (locked, or gone since the listing) is
             # skipped and named - it must not cost the whole night.
             try:
-                with open(out + ".part", "wb") as fh:
+                with open(out + ".wasabi-part", "wb") as fh:
                     c.send(self.w.GET, self.w.pack_str(src))
                     self.w.drain_to_end(c, fh.write)
             except self.w.WasabiError as exc:
-                os.remove(out + ".part")
+                os.remove(out + ".wasabi-part")
                 self.skipped.append("%s (%s)" % (src, exc))
                 manifest.pop(name, None)
                 continue
-            os.replace(out + ".part", out)
+            os.replace(out + ".wasabi-part", out)
             files += 1
             nbytes += int(size)
         self._write(os.path.join(dest, ".wasabi-manifest.json"), manifest)

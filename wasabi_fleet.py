@@ -76,11 +76,8 @@ class Fleet:
                 d["key"] = m.key
             rows.append(d)
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(rows, fh, indent=2)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.path)
+        from wasabi_api import write_private
+        write_private(self.path, json.dumps(rows, indent=2))
 
     def get(self, mid):
         with self.lock:

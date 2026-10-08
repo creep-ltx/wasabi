@@ -68,10 +68,20 @@ class WebSocket:
         self.lock = threading.Lock()     # the worker and the reader share it
         self.closed = False
 
-    def _read(self, n):
+    MAX_FRAME = 1024 * 1024             # the page sends small JSON only
+
+    def _read(self, n, idle_ok=False):
         buf = b""
         while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
+            try:
+                chunk = self.sock.recv(n - len(buf))
+            except socket.timeout:
+                if idle_ok and not buf:
+                    self._send(9, b"")  # ping: is the page still there?
+                    if self.closed:
+                        raise ConnectionError("page gone")
+                    continue
+                raise ConnectionError("page stalled")
             if not chunk:
                 raise ConnectionError("page closed")
             buf += chunk
@@ -80,12 +90,14 @@ class WebSocket:
     def recv(self):
         """The next text message (str) or None when the page closes."""
         while True:
-            b0, b1 = self._read(2)
+            b0, b1 = self._read(2, idle_ok=True)
             op, masked, n = b0 & 0x0F, b1 & 0x80, b1 & 0x7F
             if n == 126:
                 (n,) = struct.unpack(">H", self._read(2))
             elif n == 127:
                 (n,) = struct.unpack(">Q", self._read(8))
+            if n > self.MAX_FRAME:
+                raise ConnectionError("frame too big")
             mask = self._read(4) if masked else b"\0\0\0\0"
             data = bytearray(self._read(n))
             for i in range(n):
@@ -94,6 +106,8 @@ class WebSocket:
                 return None
             if op == 9:
                 self._send(10, bytes(data))
+                continue
+            if op == 10:                # the page's answer to our ping
                 continue
             if op == 1:
                 return data.decode("utf-8", "replace")
@@ -112,8 +126,8 @@ class WebSocket:
                 return
             try:
                 self.sock.sendall(head + payload)
-            except OSError:
-                self.closed = True
+            except OSError:             # timeouts included: a page that
+                self.closed = True      # stopped reading is dropped
 
     def send_text(self, obj):
         self._send(1, json.dumps(obj).encode())
@@ -219,7 +233,13 @@ class Session:
             if m.get("t") == "move" and i + 1 < len(msgs) and \
                     msgs[i + 1].get("t") == "move":
                 continue
-            self._input(conn, m)
+            try:
+                self._input(conn, m)
+            except (KeyError, ValueError, TypeError, struct.error):
+                # one malformed message is skipped: it used to end the
+                # worker, freezing the picture and leaving any held
+                # Right Amiga down on the Amiga (audit 4)
+                continue
         return busy
 
     def _input(self, conn, m):
@@ -392,10 +412,49 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
         def log_message(self, fmt, *a):      # quiet: this is an app window
             pass
 
+        def length(self, limit):
+            """The request's declared body size, or None (after answering
+            400/413) when it is missing-but-needed, not a number, below 0
+            or over `limit`. A negative size made rfile.read() read until
+            the peer hung up, and a huge one was allocated up front - both
+            before any login (audit 4)."""
+            raw = self.headers.get("Content-Length", "0") or "0"
+            try:
+                n = int(raw)
+            except ValueError:
+                n = -1
+            if n < 0:
+                self.json(400, {"error": "bad Content-Length"})
+                return None
+            if n > limit:
+                self.json(413, {"error": "that is too big"})
+                return None
+            return n
+
+        def body_json(self):
+            """A small JSON object body, or None after answering 400."""
+            n = self.length(64 * 1024)
+            if n is None:
+                return None
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except ValueError:
+                body = None
+            if not isinstance(body, dict):
+                self.json(400, {"error": "bad JSON"})
+                return None
+            return body
+
         def session(self):
-            c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
-            m = c.get(Auth.COOKIE)
-            return m.value if m else ""
+            """The login cookie, read by hand: SimpleCookie gives up at
+            the first cookie it cannot parse, and another app on the
+            same host (DSM, Portainer - browsers share cookies across
+            ports) setting one made logging in impossible (audit 4)."""
+            for part in self.headers.get("Cookie", "").split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == Auth.COOKIE:
+                    return v.strip()
+            return ""
 
         def logged_in(self):
             return auth is None or auth.check(self.session())
@@ -418,11 +477,9 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
                     "setup": bool(auth and auth.needs_setup()),
                     "logged_in": self.logged_in(),
                     "version": fleet.first.api.version})
-            n = int(self.headers.get("Content-Length", "0") or 0)
-            try:
-                body = json.loads(self.rfile.read(n) or b"{}")
-            except ValueError:
-                body = {}
+            body = self.body_json()
+            if body is None:
+                return
             if auth is None:
                 return self.json(404, {"error": "no login on this server"})
             try:
@@ -454,11 +511,9 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
             url = urllib.parse.urlsplit(self.path)
             body = {}
             if method == "POST":
-                n = int(self.headers.get("Content-Length", "0") or 0)
-                try:
-                    body = json.loads(self.rfile.read(n) or b"{}")
-                except ValueError:
-                    return self.json(400, {"error": "bad JSON"})
+                body = self.body_json()
+                if body is None:
+                    return
             query = urllib.parse.parse_qs(url.query)
             if url.path in ("/api/machines", "/api/machines/discover"):
                 try:
@@ -469,6 +524,9 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
                     return self.json(200, fleet.listing())
                 except ApiError as exc:
                     return self.json(exc.code, {"error": str(exc)})
+                except (ValueError, TypeError, AttributeError,
+                        OverflowError) as exc:
+                    return self.json(400, {"error": "bad request (%s)" % exc})
             api = self.machine().api
             try:
                 out = api.dispatch(method, url.path, query, body)
@@ -483,17 +541,21 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
             drop, the phone's file picker): ?side=amiga|local&dir=&name="""
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             g = lambda k: q.get(k, [""])[0]           # noqa: E731
-            n = int(self.headers.get("Content-Length", "0") or 0)
             api = self.machine().api
-            if n > api.UPLOAD_MAX:
-                return self.json(413, {"error": "that file is too big to "
-                                       "send this way (512 MB at most)"})
+            n = self.length(api.UPLOAD_MAX)
+            if n is None:
+                return
             data = self.rfile.read(n)
             try:
                 out = api.upload(g("side"), g("dir"), g("name"), data,
                                  g("force") == "1")
             except ApiError as exc:
                 return self.json(exc.code, {"error": str(exc)})
+            except (ValueError, TypeError, AttributeError, OverflowError,
+                    KeyError) as exc:
+                # a wrong-typed value from the page: an answer, not a
+                # dropped connection (audit 4)
+                return self.json(400, {"error": "bad request (%s)" % exc})
             except OSError as exc:
                 return self.json(500, {"error": str(exc)})
             self.json(200, out)
@@ -526,7 +588,7 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
             if path.startswith("/api/auth/"):
                 return self.auth_call("GET", path)
             guarded = path.startswith("/ws") or path.startswith("/shots/") or \
-                (path.startswith("/api/") and path != "/api/settings")
+                path.startswith("/api/")
             if guarded and not self.logged_in():
                 return self.json(401, {"error": "please log in"})
             if path in ("/ws", "/ws/logs", "/ws/run", "/ws/hello"):
@@ -576,13 +638,9 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
                 return self.json(401, {"error": "please log in"})
             if self.path != "/api/settings":
                 return self.reply(404, "text/plain", b"not found")
-            n = int(self.headers.get("Content-Length", "0"))
-            try:
-                data = json.loads(self.rfile.read(n))
-                if not isinstance(data, dict):
-                    raise ValueError
-            except ValueError:
-                return self.reply(400, "text/plain", b"bad settings")
+            data = self.body_json()
+            if data is None:
+                return
             p = settings_path()
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p + ".tmp", "w") as fh:
@@ -610,7 +668,17 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
             self.end_headers()
             self.wfile.flush()
             sock = self.connection
-            sock.settimeout(None)
+            # A phone that sleeps or changes network leaves a connection
+            # open on our side only: keepalive finds it, and a send that
+            # cannot complete in 30 s gives up instead of stalling every
+            # page's stream (audit 4). recv() wakes every 30 s to ping.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            for opt, val in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10),
+                             ("TCP_KEEPCNT", 3)):
+                if hasattr(socket, opt):
+                    sock.setsockopt(socket.IPPROTO_TCP,
+                                    getattr(socket, opt), val)
+            sock.settimeout(30)
             return WebSocket(sock)
 
         def messages(self, ws):
@@ -681,16 +749,24 @@ def make_handler(w, fleet, server_state, port, listen, auth=None):
                         if not cmd:
                             continue
                         running["cmd"] = cmd
-                        mt = msg.get("max")
+                        try:
+                            mt = float(msg.get("max") or 0) or None
+                        except (TypeError, ValueError):
+                            mt = None
+                        # a page that goes away does not leave a command
+                        # running unbounded on the Amiga
                         threading.Thread(target=run, daemon=True, args=(
-                            cmd, float(mt) if mt else None)).start()
+                            cmd, mt or 600.0)).start()
                     elif msg.get("t") == "stop" and "cmd" in running:
                         # Ctrl-C it, the way run --max-time does
-                        c = w.Conn(target[0], target[1], key)
                         try:
-                            w.stop_command(c, running["cmd"])
-                        finally:
-                            c.close()
+                            c = w.Conn(target[0], target[1], key)
+                            try:
+                                w.stop_command(c, running["cmd"])
+                            finally:
+                                c.close()
+                        except (OSError, w.WasabiError):
+                            pass
             finally:
                 ws.closed = True
                 self.close_connection = True

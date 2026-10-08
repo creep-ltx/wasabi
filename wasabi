@@ -320,11 +320,17 @@ class Conn:
                                      getattr(socket, opt), val)
         self.buf = b""
         self.key = key                  # kept so a stream can reconnect
+        try:
+            self._hello(key, timeout)
+        except BaseException:
+            self.sock.close()           # a refused HELLO must not leak
+            raise                       # the socket (audit 4)
+
+    def _hello(self, key, timeout):
         self.send(HELLO, struct.pack(">H", VERSION) + pack_str(key))
         try:
             tag, payload = self.recv()
         except socket.timeout:
-            self.sock.close()
             raise AmigaSilent(
                 "the Amiga took the connection but its daemon did not "
                 "answer for %d s - frozen, or stuck on something"
