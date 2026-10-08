@@ -98,9 +98,11 @@ class Backup:
             today = now.strftime("%Y-%m-%d")
             if now.strftime("%H:%M") >= self.cfg["time"] and \
                     self.state.get("day") != today:
-                self.run()
+                self.run(scheduled=True)
 
-    def run(self):
+    def run(self, scheduled=False):
+        """One backup. Only the scheduled run marks the night as done: a
+        'Back up now' at 01:44 must not cancel that night's 03:30 run."""
         with self.lock:
             if self.running:
                 return
@@ -141,7 +143,8 @@ class Backup:
                                    "Tonight's copy of %s did not finish: %s"
                                    % (", ".join(self.cfg["folders"]), exc),
                                    priority="high", tags="floppy_disk")
-        self.state = {"day": today, "last": last}
+        day = today if scheduled else self.state.get("day")
+        self.state = {"day": day, "last": last}
         self._write(self.state_path, self.state)
         self.running = False
 
