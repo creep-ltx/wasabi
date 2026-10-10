@@ -22,6 +22,8 @@ the subnet only when nobody answered the broadcast; the emulator on
 - **Also: `wasabi grab --json` is refused.** --json is a global option, so
   only `wasabi --json grab` works, though the skill writes it after the
   command. Accept it in both places, for every command.
+- Keep `wasabi discover`'s output as it is (lines starting with the IP):
+  AmiClaude reads it.
 - Client-only, no daemon change. Small.
 
 ## 2. More slots
@@ -81,6 +83,8 @@ Version: wasabid 0.4b1.
 - Measure first: live view frames per second and put speed, plain vs TLS,
   on the A1200. If the view slows noticeably, allow plain for loopback
   and the view only.
+- AmiClaude already has its own TLS link on the A1200 (2026-10-10): learn
+  from its code and its speed before building ours.
 - Main-loop care: SSL_pending() must be checked as well as WaitSelect,
   or buffered data sits unread.
 
