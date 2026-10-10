@@ -215,3 +215,5 @@ and broke every later run, silently".
     anyway. Or sweep whenever the last-known real host is missing from
     the answers.
   - Also in Knowledge/amiga/toolchain-and-testing.md.
+  - **FIXED 2026-10-10 (96a4328):** answers from this PC no longer stop
+    the sweep; 5/5 finds with FS-UAE running (1/3 before). *Verified.*
