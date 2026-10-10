@@ -83,8 +83,20 @@ Version: wasabid 0.4b1.
 - Measure first: live view frames per second and put speed, plain vs TLS,
   on the A1200. If the view slows noticeably, allow plain for loopback
   and the view only.
-- AmiClaude already has its own TLS link on the A1200 (2026-10-10): learn
-  from its code and its speed before building ours.
+- **AmiClaude already runs TLS on the A1200 (measured by its session,
+  2026-10-10):** handshake about 50 ms; 1 MB to the Amiga in 0.16 s, back
+  in 0.12-0.13 s (6-8 MB/s); +3 KB binary. So speed is not the worry it
+  was. Its code: AmiClaude/amiga/tls.c (~200 lines, AmiSSL 5) and
+  tls_context()/tls_pipe() in helper/amiclaude.py. It uses pinned
+  self-signed EC P-256 certificates (each end trusts only the other's;
+  PARTIAL_CHAIN + NO_CHECK_TIME because the Amiga's clock is not
+  trusted), TLS 1.3 only, Amiga as server.
+- **Changed recommendation:** reuse that proven approach (pinned
+  certificates) rather than a new PSK one; PSK stays the fallback if
+  handing out certificate files to the NAS/phone turns out awkward.
+- Traps it found: drive the handshake non-blocking from the select loop
+  (SSL_do_handshake on each readable); one thread owns each SSL object;
+  in Python wrap_socket takes over the socket's fd.
 - Main-loop care: SSL_pending() must be checked as well as WaitSelect,
   or buffered data sits unread.
 
