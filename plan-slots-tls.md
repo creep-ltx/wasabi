@@ -66,7 +66,21 @@ d. **Small ones from the CTerm session (2026-10-10):**
 
 Version: wasabid 0.4b1.
 
-## 3. TLS (optional, off by default at first)
+## 3. TLS - REQUIRED (the user's decision, 2026-10-10)
+
+No plain fallback: the user chose TLS as a requirement over "try TLS,
+else plain". So:
+- wasabid without AmiSSL refuses to start and says why (no silent plain).
+- Every Amiga running wasabid needs AmiSSL 5: the A1200 has it; the
+  FS-UAE setups do not (none found on their drives) - install it there.
+- One change-over for everything at once: A1200 daemon, the `wasabi`
+  command (all sessions share it), the desktop app, the NAS/phone app.
+  Message the sessions first; pair the certificates once.
+- Discovery stays plain (it only says "I am here"; no key in it).
+- The sections below were written for an optional TLS; where they say
+  "optional", "plain stays" or "require tls setting", read "required".
+
+### Earlier notes (optional TLS)
 
 - **TLS 1.3 with a pre-shared key = the existing Wasabi key.** No
   certificates to make, renew or copy; both ends already hold the key.
