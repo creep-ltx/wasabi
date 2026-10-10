@@ -51,10 +51,10 @@
 #include "patches.h"                 /* everything that hijacks a vector */
 #include "health.h"                  /* the machine's vital signs */
 
-#define VERSION_STR "wasabid 0.3b6"
+#define VERSION_STR "wasabid 0.4b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.3b6 (8.10.2026)";
+    "$VER: wasabid 0.4b1 (10.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -76,7 +76,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health,live,clip,detach"
+                 "key,windows,health,live,clip,detach,slots"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -128,6 +128,9 @@ typedef char welcome_fits_its_buffer[
 #define T_HEALTH  0x4d
 #define T_LIVE    0x4e
 #define T_CLIP    0x4f
+#define T_SLOTS   0x50   /* list the run slots */
+#define T_FREE    0x51   /* stop a slot's command, or let go of it */
+#define T_SLOT    0x52   /* daemon -> client: your RUN is in slot N */
 
 struct Library *SocketBase;
 /*
@@ -149,14 +152,23 @@ static struct Library *g_cgfx;
  */
 static struct Library *g_keymap;
 
-/* --- the one running command -------------------------------------- */
+/* --- the running commands ----------------------------------------- */
 
 /*
- * Only one RUN may be in flight at a time. That is a deliberate limit,
- * not an oversight: it makes the handshake with the runner process
- * unambiguous (one global, no queue) and a developer driving one Amiga
- * has no use for two concurrent builds. A second RUN gets a clear error.
+ * Up to MAX_RUNS commands run at once, one runner process each, because
+ * several sessions share one Amiga and one hung test program used to
+ * hold the only slot until a reboot. Each job is its own struct, so the
+ * handshake with its runner stays one-to-one.
+ *
+ * A job the runner will never finish - its command was RemTask'd, or
+ * ignored Ctrl-C - can be let go of ('free'): it is "abandoned", counts
+ * against no slot, and its struct stays reserved until the runner ends,
+ * because the runner still writes into it. MAX_JOBS bounds how many such
+ * leftovers can pile up before only a reboot helps.
  */
+#define MAX_RUNS 4
+#define MAX_JOBS 8
+
 struct RunJob {
     char             cmd[512];
     char             outname[64];
@@ -164,21 +176,45 @@ struct RunJob {
     volatile LONG    ioerr;
     volatile BOOL    done;
     volatile BOOL    taken;
-    struct Task     *owner;
+    struct Task * volatile owner;    /* NULLed under Forbid when we leave */
     ULONG            sigmask;
+    volatile BPTR    out;            /* the runner's SYS_Output: how its
+                                      * command's shell is found */
+    BOOL             active;         /* a runner is alive; struct in use */
+    BOOL             abandoned;      /* let go of; holds no slot */
+    int              client;         /* who gets the output, or -1 */
+    BPTR             read;           /* our read end of the temp file */
+    LONG             sent;           /* bytes already forwarded */
+    ULONG            started;        /* now_secs() at start */
 };
 
-static struct RunJob  g_job;
+static struct RunJob  g_jobs[MAX_JOBS];
 static struct RunJob *g_handoff;     /* parent -> runner, one at a time */
-static int            g_run_client = -1;
-static BOOL           g_job_active;  /* a runner is alive. Distinct from
-                                      * g_run_client: the client can hang up
-                                      * mid-run, and the slot is only free
-                                      * again once the runner reports done -
-                                      * otherwise a new RUN would recycle
-                                      * g_job under the old runner's feet. */
-static BPTR           g_run_read;    /* our read end of the temp file */
-static LONG           g_run_sent;    /* bytes already forwarded */
+
+static ULONG now_secs(void);
+static void force_stop_run(struct RunJob *job);
+static BOOL job_wait(struct RunJob *job, LONG ticks);
+static void drop(int cl);
+
+/* Commands holding a slot (running, not abandoned). */
+static LONG runs_busy(void)
+{
+    LONG i, n = 0;
+    for (i = 0; i < MAX_JOBS; i++)
+        if (g_jobs[i].active && !g_jobs[i].abandoned)
+            n++;
+    return n;
+}
+
+/* Any runner alive at all, abandoned or not: our code is in use. */
+static BOOL runners_alive(void)
+{
+    LONG i;
+    for (i = 0; i < MAX_JOBS; i++)
+        if (g_jobs[i].active)
+            return TRUE;
+    return FALSE;
+}
 
 #define HB_SECS 5                    /* empty-LOG heartbeat cadence */
 
@@ -625,6 +661,7 @@ static void runner_entry(void)
 
     out = Open(job->outname, MODE_READWRITE);
     in  = Open("NIL:", MODE_OLDFILE);
+    job->out = out;
     if (out && in) {
         job->rc = SystemTags(job->cmd,
                              SYS_Input,  (ULONG)in,
@@ -639,31 +676,67 @@ static void runner_entry(void)
     if (out) Close(out);
     if (in)  Close(in);
 
+    /*
+     * Finish inside Forbid and never Permit: the process ends here, so
+     * once the daemon can see done, not one more instruction of ours
+     * runs in this process - the daemon may unload the segment at once.
+     * owner is NULL when the daemon has already left (it kept the
+     * segment loaded for us; see leave_runners_behind).
+     */
+    Forbid();
+    job->out = 0;
     job->done = TRUE;
     if (job->owner)
         Signal(job->owner, job->sigmask);
 }
 
-static BOOL start_run(int cl, const char *cmd)
+static BOOL send_err_full(int fd, ULONG code, const char *msg);
+
+/* Start cmd in a free slot. Returns the job, or NULL with *why set. */
+static struct RunJob *start_run(int cl, const char *cmd, const char **why)
 {
     static LONG serial;
     struct Process *proc;
+    struct RunJob *job = NULL;
+    LONG i;
 
-    memset(&g_job, 0, sizeof(g_job));
-    strncpy(g_job.cmd, cmd, sizeof(g_job.cmd) - 1);
-    sprintf(g_job.outname, "T:wasabi-run-%ld", (long)++serial);
-    g_job.owner   = FindTask(NULL);
-    g_job.sigmask = SIGBREAKF_CTRL_F;
+    for (i = 0; i < MAX_JOBS; i++)
+        if (g_jobs[i].active && g_jobs[i].client == cl &&
+            !g_jobs[i].abandoned) {
+            *why = "this connection already has a command running";
+            return NULL;
+        }
+    if (runs_busy() >= MAX_RUNS) {
+        *why = "all run slots are busy - 'wasabi slots' shows them, "
+               "'wasabi free N' stops one";
+        return NULL;
+    }
+    for (i = 0; i < MAX_JOBS && !job; i++)
+        if (!g_jobs[i].active)
+            job = &g_jobs[i];
+    if (!job) {
+        *why = "too many stuck commands are still holding memory - "
+               "only a reboot clears them";
+        return NULL;
+    }
+    *why = "could not start the command";
+
+    memset(job, 0, sizeof(*job));
+    job->client = -1;
+    strncpy(job->cmd, cmd, sizeof(job->cmd) - 1);
+    sprintf(job->outname, "T:wasabi-run-%ld", (long)++serial);
+    job->owner   = FindTask(NULL);
+    job->sigmask = SIGBREAKF_CTRL_F;
 
     /* Create the file up front so our own tail can open it immediately. */
     {
-        BPTR seed = Open(g_job.outname, MODE_NEWFILE);
+        BPTR seed = Open(job->outname, MODE_NEWFILE);
         if (!seed)
-            return FALSE;
+            return NULL;
         Close(seed);
     }
 
-    g_handoff = &g_job;
+    g_handoff = job;
     proc = CreateNewProcTags(NP_Entry,     (ULONG)runner_entry,
                              NP_Name,      (ULONG)"wasabi-runner",
                              NP_StackSize, 16384,
@@ -671,19 +744,20 @@ static BOOL start_run(int cl, const char *cmd)
                              TAG_DONE);
     if (!proc) {
         g_handoff = NULL;
-        DeleteFile(g_job.outname);
-        return FALSE;
+        DeleteFile(job->outname);
+        return NULL;
     }
-    /* Wait for the runner to pick the job up before reusing the global. */
-    while (!g_job.taken)
+    /* Wait for the runner to pick the job up before reusing the handoff. */
+    while (!job->taken)
         Delay(1);
     g_handoff = NULL;
 
-    g_run_read = Open(g_job.outname, MODE_OLDFILE);
-    g_run_sent = 0;
-    g_run_client = cl;
-    g_job_active = TRUE;
-    return TRUE;
+    job->read    = Open(job->outname, MODE_OLDFILE);
+    job->sent    = 0;
+    job->client  = cl;
+    job->started = now_secs();
+    job->active  = TRUE;
+    return job;
 }
 
 /*
@@ -707,35 +781,36 @@ static BOOL start_run(int cl, const char *cmd)
  * current data - resumed where the old one left off. The fresh handle
  * is anchored to real data, so one reopen heals the stream for good.
  *
- * Accounting lives here, not in the callers: g_run_sent is the resume
+ * Accounting lives here, not in the callers: job->sent is the resume
  * point after a reopen, and a caller that forgot to add to it (the
  * final sweep once did not) would make a reopen resend those bytes.
  */
-static LONG tail_read(UBYTE *buf, LONG len)
+static LONG tail_read(struct RunJob *job, UBYTE *buf, LONG len)
 {
     /* Longword aligned as ExamineFH demands; static because this runs
      * on the daemon's 8 KB shell stack like everything around it. */
     static struct FileInfoBlock fib __attribute__((aligned(4)));
-    LONG n = Read(g_run_read, buf, len);
+    LONG n = Read(job->read, buf, len);
 
-    if (n == 0 && ExamineFH(g_run_read, &fib) && fib.fib_Size > g_run_sent) {
-        BPTR fresh = Open(g_job.outname, MODE_OLDFILE);
+    if (n == 0 && ExamineFH(job->read, &fib) && fib.fib_Size > job->sent) {
+        BPTR fresh = Open(job->outname, MODE_OLDFILE);
         if (fresh) {
-            Close(g_run_read);
-            g_run_read = fresh;
-            Seek(fresh, g_run_sent, OFFSET_BEGINNING);
+            Close(job->read);
+            job->read = fresh;
+            Seek(fresh, job->sent, OFFSET_BEGINNING);
             n = Read(fresh, buf, len);
         }
     }
     if (n > 0)
-        g_run_sent += n;
+        job->sent += n;
     return n;
 }
 
 /* Forward whatever the child has flushed. Returns FALSE if the client died.
- * Also runs headless (g_run_client == -1) after the client hung up, so the
- * runner's temp file still gets cleaned up and the slot freed on done. */
-static BOOL pump_run(void)
+ * Also runs headless (client == -1) after the client hung up or the job
+ * was abandoned, so the runner's temp file still gets cleaned up and the
+ * struct freed on done. */
+static BOOL pump_run(struct RunJob *job)
 {
     /* Static for the same reason as send_log's and the stream pumps':
      * this runs below serve() on the force-quit path, and 4 KB of
@@ -743,42 +818,192 @@ static BOOL pump_run(void)
      * One task, never re-entered - the main loop cannot be pumping
      * while serve() is. */
     static UBYTE buf[RUNBUF];
-    int fd = (g_run_client >= 0) ? g_clients[g_run_client].fd : -1;
+    int fd = (job->client >= 0) ? g_clients[job->client].fd : -1;
     LONG n;
 
-    if (g_run_read && fd >= 0) {
-        while ((n = tail_read(buf, sizeof(buf))) > 0) {
+    if (job->read && fd >= 0) {
+        while ((n = tail_read(job, buf, sizeof(buf))) > 0) {
             if (!send_frame(fd, T_STDOUT, buf, n))
                 return FALSE;
         }
     }
-    if (g_job.done) {
+    if (job->done) {
         UBYTE ex[8];
         /* One last sweep: the child may have flushed as it exited. */
-        if (g_run_read) {
+        if (job->read) {
             if (fd >= 0) {
-                while ((n = tail_read(buf, sizeof(buf))) > 0)
+                while ((n = tail_read(job, buf, sizeof(buf))) > 0)
                     if (!send_frame(fd, T_STDOUT, buf, n))
                         return FALSE;
             }
-            Close(g_run_read);
-            g_run_read = 0;
+            Close(job->read);
+            job->read = 0;
         }
-        DeleteFile(g_job.outname);
-        g_job_active = FALSE;            /* the runner is gone; RUN is free */
+        DeleteFile(job->outname);
+        job->active = FALSE;             /* the runner is gone; slot free */
         if (fd >= 0) {
-            put_be32(ex, (ULONG)g_job.rc);
-            put_be32(ex + 4, (ULONG)g_job.ioerr);
-            /* Send EXIT while g_run_client is still valid: clearing it
+            put_be32(ex, (ULONG)job->rc);
+            put_be32(ex + 4, (ULONG)job->ioerr);
+            /* Send EXIT while job->client is still valid: clearing it
              * first meant a failed send made the main loop drop(-1) -
              * an out-of-bounds write into whatever sits before the
              * client table. */
             if (!send_frame(fd, T_EXIT, ex, 8))
                 return FALSE;
         }
-        g_run_client = -1;
+        job->client = -1;
     }
     return TRUE;
+}
+
+/*
+ * The Shell process running a job's command. SystemTags() runs it in a
+ * Background CLI of its own, whose output stream is the handle the
+ * runner passed as SYS_Output - which is how it is told apart from every
+ * other Shell, including another slot running the same command. Call
+ * under Forbid(); NULL while the Shell has not started yet, or when the
+ * command's process is gone.
+ */
+static struct Process *job_shell(struct RunJob *job)
+{
+    LONG i, max;
+    if (!job->out)
+        return NULL;
+    max = MaxCli();
+    for (i = 1; i <= max; i++) {
+        struct Process *p = FindCliProc(i);
+        if (p && p->pr_COS == job->out)
+            return p;
+    }
+    return NULL;
+}
+
+/* Ctrl-C a job's command. TRUE if its Shell was found and signalled. */
+static BOOL job_break(struct RunJob *job)
+{
+    struct Process *p;
+    Forbid();
+    p = job_shell(job);
+    if (p)
+        Signal((struct Task *)p, SIGBREAKF_CTRL_C);
+    Permit();
+    return p != NULL;
+}
+
+/*
+ * Let go of a job whose runner will not end: its client hears that the
+ * slot was freed (as an ERR, which every client already handles mid-RUN)
+ * and the slot counts as free. The runner may still end one day; then
+ * pump_run frees the struct quietly.
+ */
+static void job_abandon(struct RunJob *job, const char *why)
+{
+    if (job->client >= 0)
+        send_err_full(g_clients[job->client].fd, 0, why);
+    if (job->read) { Close(job->read); job->read = 0; }
+    job->client = -1;
+    job->abandoned = TRUE;
+}
+
+/*
+ * On the way out with runners that will not end: they execute this
+ * segment's code and write into g_jobs, which lives in it too. So tell
+ * them nobody is listening (owner NULL - under Forbid, because the
+ * runner's last act reads it there), and take the segment away from the
+ * Shell that would unload it after main returns - the same trick that
+ * detaching startup code plays. It costs the size of wasabid in memory,
+ * until a reboot; a Guru minutes later would cost much more.
+ */
+static void leave_runners_behind(void)
+{
+    struct CommandLineInterface *cli;
+    LONG i, n = 0;
+
+    Forbid();
+    for (i = 0; i < MAX_JOBS; i++)
+        if (g_jobs[i].active && !g_jobs[i].done) {
+            g_jobs[i].owner = NULL;
+            n++;
+        }
+    Permit();
+    if (!n)
+        return;
+    cli = Cli();
+    if (cli && cli->cli_Module) {
+        cli->cli_Module = 0;
+        Printf("wasabid: %ld stuck command(s) left running; this copy of "
+               "wasabid stays in memory for them until a reboot\n", n);
+        return;
+    }
+    /* Not started from a Shell, so nothing to take the segment from:
+     * all that is safe is to wait. */
+    Printf("wasabid: %ld stuck command(s) still running - waiting for "
+           "them before exiting\n", n);
+    for (i = 0; i < MAX_JOBS; i++)
+        while (g_jobs[i].active && !g_jobs[i].done)
+            Delay(50);
+}
+
+/*
+ * SLOTS: one line per job, "<slot> <state> <secs> <client> <cmd>\n",
+ * state running|stuck (abandoned), client 1 when someone is reading the
+ * output. Same DATA..END shape as ps.
+ */
+static BOOL cmd_slots(int fd)
+{
+    char line[600];
+    ULONG now = now_secs();
+    LONG i;
+    for (i = 0; i < MAX_JOBS; i++) {
+        struct RunJob *job = &g_jobs[i];
+        LONG ln;
+        if (!job->active)
+            continue;
+        ln = sprintf(line, "%ld %s %lu %d %s\n", (long)i + 1,
+                     job->abandoned ? "stuck" : "running",
+                     (unsigned long)(now - job->started),
+                     job->client >= 0 ? 1 : 0, job->cmd);
+        if (!send_frame(fd, T_DATA, line, ln))
+            return FALSE;
+    }
+    return send_frame(fd, T_END, NULL, 0);
+}
+
+/*
+ * FREE <u32 slot> <u32 flags>: Ctrl-C the slot's command and wait up to
+ * three seconds. If it ended, its client gets the EXIT as usual. If not,
+ * and FREE_BREAK_ONLY is clear, let go of it: the slot is free again and
+ * the command is left running. Answers DATA "stopped" / "freed" / "asked"
+ * then END - or ERR.
+ */
+#define FREE_BREAK_ONLY 1
+
+static BOOL cmd_free(int fd, ULONG slot, ULONG flags)
+{
+    struct RunJob *job;
+    const char *what;
+    if (slot < 1 || slot > MAX_JOBS || !g_jobs[slot - 1].active)
+        return send_perr(fd, "no command in that slot - 'wasabi slots' "
+                             "lists them");
+    job = &g_jobs[slot - 1];
+    if (job->abandoned)
+        return send_perr(fd, "that slot was already freed; its command "
+                             "is stuck and only a reboot removes it");
+    force_stop_run(job);
+    if (flags & FREE_BREAK_ONLY)
+        what = "asked";
+    else if (job_wait(job, 150)) {
+        what = "stopped";
+        if (!pump_run(job) && job->client >= 0)
+            drop(job->client);
+    } else {
+        what = "freed";
+        job_abandon(job, "the command was let go of with 'wasabi free' - "
+                         "it may still be running on the Amiga");
+    }
+    if (!send_frame(fd, T_DATA, (UBYTE *)what, (LONG)strlen(what)))
+        return FALSE;
+    return send_frame(fd, T_END, NULL, 0);
 }
 
 /* --- the debug stream ---------------------------------------------- */
@@ -1077,6 +1302,7 @@ static BOOL str_ieq(const char *a, const char *b)
 static BOOL cmd_kill(int fd, ULONG flags, const char *target)
 {
     struct Task *hit = NULL;
+    struct RunJob *orphan = NULL;
     APTR addr = NULL;
     LONG matches = 0, n, i;
     BOOL alive = FALSE;
@@ -1117,13 +1343,24 @@ static BOOL cmd_kill(int fd, ULONG flags, const char *target)
              t->tc_Node.ln_Succ; t = (struct Task *)t->tc_Node.ln_Succ)
             if (t == hit) alive = TRUE;
         if (alive) {
-            if (flags & 1)
+            if (flags & 1) {
+                /* RemTask'ing a slot's Shell leaves its runner waiting
+                 * forever inside SystemTags: let go of that slot too. */
+                LONG j;
+                for (j = 0; j < MAX_JOBS; j++)
+                    if (g_jobs[j].active && g_jobs[j].out &&
+                        hit->tc_Node.ln_Type == NT_PROCESS &&
+                        ((struct Process *)hit)->pr_COS == g_jobs[j].out)
+                        orphan = &g_jobs[j];
                 RemTask(hit);
-            else
+            } else
                 Signal(hit, SIGBREAKF_CTRL_C);
         }
         Enable();
     }
+    if (orphan && !orphan->abandoned)
+        job_abandon(orphan, "the command's process was removed with "
+                            "'wasabi kill --force'");
     if (!alive)
         return send_perr(fd, "that task is already gone");
     return send_frame(fd, T_OK, NULL, 0);
@@ -2994,15 +3231,21 @@ static BOOL cmd_install(int fd, const char *sidecar)
  * one: runner_entry is OUR code, and the shell unloads this segment the
  * moment the daemon exits - the Guru arrives minutes later, somewhere
  * that looks nothing like the cause. So quit and restart refuse while a
- * runner is alive, exactly as a second RUN is refused. Reboot is exempt:
- * the machine is about to die anyway, and the runner with it.
+ * command holds a slot, unless forced. Reboot is exempt: the machine is
+ * about to die anyway, and the runner with it.
+ *
+ * Forced, the commands get Ctrl-C and ten seconds; any that still run
+ * are abandoned, and the exit path keeps this segment loaded for them
+ * (leave_runners_behind) instead of refusing - a stuck command must
+ * never again be something only a reboot can clear.
  */
 static BOOL run_blocks_exit(int fd)
 {
-    if (!g_job_active)
+    if (!runs_busy())
         return FALSE;
     send_perr(fd, "a command is still running - wait for it to finish, "
-                  "stop it with 'wasabi kill', or pass --force");
+                  "stop it with 'wasabi free N' ('wasabi slots' lists "
+                  "them), or pass --force");
     return TRUE;
 }
 
@@ -3018,27 +3261,27 @@ static const char *base_of(const char *s)
 }
 
 /*
- * The --force half: Ctrl-C the process the runner's command is running
- * in. SystemTagList() hands back no child, and signalling the waiting
- * runner reaches nothing - so the child is found the way an operator
- * at the keyboard would find it, by the command name its CLI is
- * executing, matched against the first word of the RUN we started.
- * Best effort by construction; a second CLI coincidentally running the
- * same command also hears the Ctrl-C, which is what Break-by-name has
- * always risked on this machine.
+ * Ctrl-C a job's command: its own Shell when it can be found (exact,
+ * see job_shell), else by the command name its CLI is executing,
+ * matched against the first word of the RUN we started - the way an
+ * operator at the keyboard would. The fallback is best effort: another
+ * CLI running the same command also hears the Ctrl-C, which is what
+ * Break-by-name has always risked on this machine.
  */
-static void force_stop_run(void)
+static void force_stop_run(struct RunJob *job)
 {
     char word[64];
     LONG n, i, w = 0;
 
-    if (g_job.cmd[0] == '"') {           /* a quoted command path */
+    if (job_break(job))
+        return;
+    if (job->cmd[0] == '"') {            /* a quoted command path */
         i = 1;
-        while (g_job.cmd[i] && g_job.cmd[i] != '"' && w < 63)
-            word[w++] = g_job.cmd[i++];
+        while (job->cmd[i] && job->cmd[i] != '"' && w < 63)
+            word[w++] = job->cmd[i++];
     } else {
-        while (g_job.cmd[w] && g_job.cmd[w] != ' ' && w < 63) {
-            word[w] = g_job.cmd[w];
+        while (job->cmd[w] && job->cmd[w] != ' ' && w < 63) {
+            word[w] = job->cmd[w];
             w++;
         }
     }
@@ -3068,28 +3311,50 @@ static void force_stop_run(void)
     }
 }
 
-/* Ctrl-C the running command and give it a grace period to die. TRUE
- * when the run slot is free (or already was). */
-static BOOL force_run_down(void)
+/* Wait up to ticks/50 s for a job to finish; TRUE if it did. */
+static BOOL job_wait(struct RunJob *job, LONG ticks)
 {
     LONG i;
-    if (!g_job_active)
-        return TRUE;
-    force_stop_run();
-    for (i = 0; i < 100 && !g_job.done; i++)
-        Delay(5);                        /* up to ten seconds of grace */
-    if (!g_job.done)
-        return FALSE;
-    pump_run();                          /* flush + EXIT to the run client */
-    return !g_job_active;
+    for (i = 0; i < ticks && !job->done; i += 5)
+        Delay(5);
+    return job->done;
+}
+
+/* Ctrl-C every running command, give them ten seconds together, and
+ * abandon whatever is still going. Afterwards no command holds a slot. */
+static void force_run_down(void)
+{
+    LONG i, t;
+    BOOL waiting;
+    for (i = 0; i < MAX_JOBS; i++)
+        if (g_jobs[i].active && !g_jobs[i].abandoned)
+            force_stop_run(&g_jobs[i]);
+    for (t = 0; t < 500; t += 5) {       /* ten seconds of grace */
+        waiting = FALSE;
+        for (i = 0; i < MAX_JOBS; i++)
+            if (g_jobs[i].active && !g_jobs[i].abandoned &&
+                !g_jobs[i].done)
+                waiting = TRUE;
+        if (!waiting)
+            break;
+        Delay(5);
+    }
+    for (i = 0; i < MAX_JOBS; i++) {
+        struct RunJob *job = &g_jobs[i];
+        if (!job->active || job->abandoned)
+            continue;
+        if (job->done)
+            pump_run(job);               /* flush + EXIT to its client */
+        else
+            job_abandon(job, "the command ignored Ctrl-C; wasabid is "
+                             "exiting and left it running");
+    }
 }
 
 static BOOL exit_refused(int fd, ULONG flags)
 {
-    if ((flags & 1) && !force_run_down())
-        return send_perr(fd, "the running command ignored Ctrl-C and is "
-                             "still going - 'wasabi kill --force' can "
-                             "remove it, with the usual caveats"), TRUE;
+    if (flags & 1)
+        force_run_down();
     return run_blocks_exit(fd);
 }
 
@@ -3245,15 +3510,34 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
             return send_perr(fd, "bad RUN header");
         if (get_be32(p) & 2)             /* detach: start it and answer */
             return cmd_run_detached(fd, cmd);
-        if (g_job_active)
-            return send_perr(fd, "another command is already running");
-        if (!start_run(cl, cmd))
-            return send_err(fd, "could not start the command");
+        {
+            const char *why;
+            struct RunJob *job = start_run(cl, cmd, &why);
+            UBYTE id[4];
+            if (!job)
+                return send_perr(fd, why);
+            /* RUN_SLOT: the client asked to hear which slot, so that
+             * its --max-time can stop exactly this command. Older
+             * clients never set it and see the stream they always did. */
+            if (get_be32(p) & 4) {
+                put_be32(id, (ULONG)(job - g_jobs) + 1);
+                if (!send_frame(fd, T_SLOT, id, 4))
+                    return FALSE;
+            }
+        }
         return TRUE;                     /* output follows from pump_run */
     }
 
     case T_PS:
         return cmd_ps(fd, len >= 4 ? get_be32(p) : 0);
+
+    case T_SLOTS:
+        return cmd_slots(fd);
+
+    case T_FREE:
+        if (len < 4)
+            return send_perr(fd, "bad FREE header");
+        return cmd_free(fd, get_be32(p), len >= 8 ? get_be32(p + 4) : 0);
 
     case T_KILL: {
         char target[64];
@@ -3384,9 +3668,13 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
 
 static void drop(int cl)
 {
-    if (g_run_client == cl) {            /* the run outlives its client */
-        if (g_run_read) { Close(g_run_read); g_run_read = 0; }
-        g_run_client = -1;               /* g_job_active stays set: the
+    LONG j;
+    for (j = 0; j < MAX_JOBS; j++) {     /* a run outlives its client */
+        struct RunJob *job = &g_jobs[j];
+        if (!job->active || job->client != cl)
+            continue;
+        if (job->read) { Close(job->read); job->read = 0; }
+        job->client = -1;                /* the job stays active: the
                                           * runner is still alive, and
                                           * pump_run() cleans up and frees
                                           * the slot when it finishes */
@@ -3684,7 +3972,7 @@ int main(int argc, char **argv)
          * newline, so a growing file has no readable-fd to select on -
          * only a short timer catches it. */
         {
-            BOOL busy = (g_job_active || g_dbg_client >= 0 ||
+            BOOL busy = (runners_alive() || g_dbg_client >= 0 ||
                          g_snoop_client >= 0);
             tv.tv_secs  = busy ? 0 : 2;
             tv.tv_micro = busy ? 50000 : 0;
@@ -3695,9 +3983,9 @@ int main(int argc, char **argv)
         if (sigs & SIGBREAKF_CTRL_C)
             break;
 
-        if (g_job_active)
-            if (!pump_run())
-                drop(g_run_client);      /* only reachable with a client:
+        for (i = 0; i < MAX_JOBS; i++)
+            if (g_jobs[i].active && !pump_run(&g_jobs[i]))
+                drop(g_jobs[i].client);  /* only reachable with a client:
                                           * headless pump never says FALSE */
 
         /*
@@ -3808,17 +4096,22 @@ out:
      * would unload it under a live process. So wait, and say why:
      * nothing but the command finishing can hurry this.
      */
-    if (g_job_active && !g_job.done) {
-        Printf("wasabid: a command is still running - waiting for it "
-               "before exiting\n");
-        while (!g_job.done)
-            Delay(10);
+    for (i = 0; i < MAX_JOBS; i++) {
+        struct RunJob *job = &g_jobs[i];
+        if (job->active && !job->abandoned && !job->done) {
+            Printf("wasabid: a command is still running - waiting for it "
+                   "before exiting ('wasabi free' or a forced quit lets "
+                   "go of it)\n");
+            while (!job->done && !job->abandoned)
+                Delay(10);
+        }
+        if (job->active && job->done) {  /* the cleanup pump_run would do */
+            if (job->read) { Close(job->read); job->read = 0; }
+            DeleteFile(job->outname);
+            job->active = FALSE;
+        }
     }
-    if (g_job_active) {                  /* the cleanup pump_run would do */
-        if (g_run_read) { Close(g_run_read); g_run_read = 0; }
-        DeleteFile(g_job.outname);
-        g_job_active = FALSE;
-    }
+    leave_runners_behind();
     if (!g_trial)
         refusals_save(TRUE);
     say_goodbye(g_restart ? "restarting" : "stopping");

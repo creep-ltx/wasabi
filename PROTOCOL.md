@@ -114,6 +114,9 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x4D | HEALTH   | C→S | (empty) |
 | 0x4E | LIVE     | C→S | `u32 flags` |
 | 0x4F | CLIP     | C→S | `u32 op` (0 read, 1 write), then the text for a write |
+| 0x50 | SLOTS    | C→S | (empty) |
+| 0x51 | FREE     | C→S | `u32 slot`, `[u32 flags]` |
+| 0x52 | SLOT     | S→C | `u32 slot` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -211,6 +214,16 @@ Server replies with `DATA` frames then `END`, or a single `ERR`.
 |-----|---------|
 | 0   | merge stderr into stdout |
 | 1   | do not wait — detach and reply `EXIT 0` at once |
+| 2   | tell me the slot — a `SLOT` frame comes first (caps `slots`) |
+
+**Run slots** (caps `slots`, wasabid 0.4b1): up to four commands run at
+once, one runner process each, from different connections - one per
+connection. A fifth gets `ERR` "all run slots are busy". Before 0.4
+there was one slot, and a hung program held it until a reboot. With bit
+2 set the daemon first sends `SLOT u32 n` (1-8), which the client uses
+for `--max-time`: `FREE n` with the Ctrl-C-only flag reaches exactly
+this command, where `KILL` by name could not tell two slots running the
+same command apart.
 
 **Bit 1, detach** (caps `detach`, wasabid 0.3b5): the command goes to a
 new Shell with `SYS_Asynch`, its input `NIL:` and its output a new file
@@ -243,6 +256,28 @@ failures look sleep-related. The daemon detects the stale handle with
 `ExamineFH()` (which does report the true size) and reopens, resuming
 at the bytes already forwarded. `tests/latewrite.c` is the probe;
 `tests/slowwrite.c` proves the opposite property, live tailing.
+
+### SLOTS — what each run slot is running
+
+`DATA` lines then `END`, one per command: `<slot> <state> <secs>
+<attached> <command>`. `state` is `running`, or `stuck` for a command
+let go of with `FREE` that has not ended (it holds no slot, only its
+struct and memory); `attached` is 1 while a client reads its output.
+
+### FREE — stop a slot's command, or let go of the slot
+
+`u32 slot`, `[u32 flags]`. The daemon Ctrl-Cs the command's own Shell:
+`SystemTags()` runs it in a Background CLI whose `pr_COS` is the handle
+the runner passed as `SYS_Output`, so it is found exactly (by command
+name only if that Shell is not there). Flag bit 0: only Ctrl-C, answer
+`asked`. Otherwise it waits up to three seconds: `stopped` if the command
+ended (its client gets `EXIT` as usual), else `freed` - the slot is let
+go of, the command's client gets `ERR`, and the runner is left waiting.
+Answer: one `DATA` word, then `END`; `ERR` for an empty slot.
+
+`KILL --force` on a slot's Shell (`RemTask`) also lets go of that slot:
+the runner would otherwise wait forever for a child that no longer
+exists.
 
 ### LS — directory listing
 
@@ -435,21 +470,23 @@ bind the same port — it relaunches itself via `GetProgramName()` (the
 path it was invoked by) on the same port. The client treats a close after
 `OK` as success and reconnects.
 
-Both `RESTART` and `QUIT` answer `ERR` while a command is running: the
-runner executes the daemon's own code segment, which the shell unloads
-the moment the daemon exits — a Guru minutes later, nowhere near the
-cause. Wait for the command or `KILL` it first. `REBOOT` is exempt;
-the machine dies anyway, and the runner with it.
+Both `RESTART` and `QUIT` answer `ERR` while a command holds a slot:
+the runner executes the daemon's own code segment, which the shell
+unloads the moment the daemon exits — a Guru minutes later, nowhere near
+the cause. Wait for the command, `FREE` it, or force. `REBOOT` is
+exempt; the machine dies anyway, and the runner with it.
 
 Both take an optional `u32 flags`; bit 0 (`--force`) asks the daemon to
 Ctrl-C the running command's process first and wait up to ten seconds
-for it to die — `SystemTagList()` hands back no child, so the process
-is found by the command name its CLI is executing, the way an operator
-would find it. A command that ignores the signal still gets `ERR`: the
-force is polite on purpose, because `RemTask()` on the child would
-leave the runner waiting forever on a death packet that never comes. A
-daemon from before this paragraph ignores the payload — and has no
-guard to override.
+for it to die (its Shell is found as `FREE` finds it). Since 0.4b1 a
+command that ignores the signal no longer blocks the exit: it is let go
+of, and the daemon keeps its own code in memory for the runners still
+waiting - it clears its Shell's `cli_Module`, so the Shell does not
+unload the segment, and NULLs each runner's `owner` under `Forbid()` so
+nobody signals a task that is gone. That costs the daemon's size in RAM
+until a reboot. Before 0.4 such a command made `--force` answer `ERR`,
+and only a reboot cleared it. A daemon from before the flags ignores
+the payload — and has no guard to override.
 
 ### QUIT — stop, and stay stopped
 

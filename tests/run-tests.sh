@@ -151,6 +151,45 @@ check "run keeps stderr separate" "to-stderr" "$out"
 out=$($W run "$(python3 -c 'print("echo " + "x" * 600)')" 2>&1 | grep -c "511")
 check "run refuses a command wasabid would truncate" "1" "$out"
 
+# --- run slots (wasabid 0.4): several commands at once ---
+$W run "sleep 2; echo first" > "$ROOT/slot1.out" 2>&1 &
+S1=$!
+sleep 0.5
+out=$($W run "echo second" 2>&1)
+check "a second command runs while the first is still going" "second" "$out"
+out=$($W slots 2>&1 | grep -c "sleep 2; echo first")
+check "slots shows the running command" "1" "$out"
+wait $S1
+check "and the first one still finishes" "first" "$(cat "$ROOT/slot1.out")"
+
+FOUR=
+for i in 1 2 3 4; do $W run "sleep 3" >/dev/null 2>&1 & FOUR="$FOUR $!"; done
+sleep 0.7
+out=$($W run "echo fifth" 2>&1 | grep -c "all run slots are busy")
+check "a fifth command is refused while four run" "1" "$out"
+wait $FOUR
+
+$W run "sleep 20" > "$ROOT/slotf.out" 2>&1 &
+S1=$!
+sleep 0.5
+N=$($W --json slots | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["slot"])')
+out=$($W free "$N" 2>&1 | grep -c "stopped")
+check "free stops a slot's command with Ctrl-C" "1" "$out"
+for i in $(seq 1 20); do kill -0 $S1 2>/dev/null || break; sleep 0.25; done
+kill -0 $S1 2>/dev/null; check "and its run ends" "1" "$?"
+
+$W run "sleep 6 # stubborn" > "$ROOT/slots.out" 2>&1 &
+S1=$!
+sleep 0.5
+N=$($W --json slots | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["slot"])')
+out=$($W free "$N" 2>&1 | grep -c "free again")
+check "free lets go of a command that ignores Ctrl-C" "1" "$out"
+for i in $(seq 1 20); do kill -0 $S1 2>/dev/null || break; sleep 0.25; done
+out=$(grep -c "let go of" "$ROOT/slots.out")
+check "and its run is told so" "1" "$out"
+out=$($W free 7 2>&1 | grep -c "no command in that slot")
+check "free on an empty slot says so" "1" "$out"
+
 # --- mkdir / del ---
 $W mkdir L:newdrawer >/dev/null 2>&1
 check "mkdir creates a drawer" "0" "$?"

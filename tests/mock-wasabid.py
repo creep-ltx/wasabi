@@ -38,6 +38,12 @@ AMIGA_EPOCH = 252460800
 HELLO, WELCOME, ERR, OK, PING, PONG = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 PUT, GET, DATA, END, LS, DEL, MKDIR = 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
 RUN, STDOUT, STDERR, EXIT = 0x20, 0x21, 0x22, 0x23
+SLOTS, FREE, SLOT = 0x50, 0x51, 0x52
+MAX_RUNS = 4
+# Run slots, as wasabid 0.4 keeps them: slot -> [proc, command, start,
+# state]. Shared by every connection, like the daemon's.
+JOBS = {}
+JOBS_LOCK = threading.Lock()
 DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
@@ -54,7 +60,8 @@ BANNER = None
 # test play an older daemon; --caps '' plays one from before the list.
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
-        "hb,guru,snoopentry,psfree,key,windows,health,live,clip,detach")
+        "hb,guru,snoopentry,psfree,key,windows,health,live,clip,detach,"
+        "slots")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -242,6 +249,10 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_get(payload)
         elif tag == RUN:
             self.do_run(payload)
+        elif tag == SLOTS:
+            self.do_slots()
+        elif tag == FREE:
+            self.do_free(payload)
         elif tag == DEL:
             self.do_simple(payload, os.remove)
         elif tag == MKDIR:
@@ -423,14 +434,39 @@ class Handler(socketserver.BaseRequestHandler):
                      "--banner", ver],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return self.send(EXIT, struct.pack(">II", 0, 0))
+        slot = None
+        if not detach and "slots" in CAPS.split(","):
+            with JOBS_LOCK:
+                if sum(1 for j in JOBS.values() if j[3] == "running") \
+                        >= MAX_RUNS:
+                    return self.err("all run slots are busy - 'wasabi "
+                                    "slots' shows them, 'wasabi free N' "
+                                    "stops one")
+                slot = next(i for i in range(1, 9) if i not in JOBS)
+                JOBS[slot] = [None, command, time.time(), "running", self]
         try:
             proc = subprocess.Popen(
                 command, shell=True, cwd=ROOT, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT if merge else subprocess.PIPE)
+                stderr=subprocess.STDOUT if merge else subprocess.PIPE,
+                start_new_session=True)
         except OSError as exc:
+            if slot:
+                JOBS.pop(slot, None)
             return self.err(str(exc), 121)
         if detach:
             return self.send(EXIT, struct.pack(">II", 0, 0))
+        if slot:
+            JOBS[slot][0] = proc
+            if flags & 4:
+                self.send(SLOT, struct.pack(">I", slot))
+        try:
+            self._pump_run(proc, merge, slot)
+        finally:
+            if slot:
+                with JOBS_LOCK:
+                    JOBS.pop(slot, None)
+
+    def _pump_run(self, proc, merge, slot):
 
         def pump(stream, tag):
             for line in iter(stream.readline, b""):
@@ -445,7 +481,40 @@ class Handler(socketserver.BaseRequestHandler):
         for t in threads:
             t.join()
         rc = proc.wait()
+        if slot and JOBS.get(slot, [None] * 4)[3] == "stuck":
+            return                      # let go of: its client heard so
         self.send(EXIT, struct.pack(">II", rc if rc >= 0 else 20, 0))
+
+    def do_slots(self):
+        now = time.time()
+        with JOBS_LOCK:
+            lines = ["%d %s %d 1 %s\n" % (k, v[3], now - v[2], v[1])
+                     for k, v in sorted(JOBS.items())]
+        self.send_data("".join(lines).encode("latin-1"))
+
+    def do_free(self, payload):
+        slot, flags = struct.unpack_from(">II", payload + bytes(4), 0)
+        job = JOBS.get(slot)
+        if not job or not job[0]:
+            return self.err("no command in that slot - 'wasabi slots' "
+                            "lists them")
+        import signal
+        # A command whose name contains 'stubborn' plays one that
+        # ignores Ctrl-C, as a hung Amiga program does.
+        # SIGTERM stands in for Ctrl-C: a mock started in the background
+        # by a script inherits SIGINT ignored, and so would its commands.
+        if "stubborn" not in job[1]:
+            os.killpg(job[0].pid, signal.SIGTERM)
+        if flags & 1:
+            return self.send_data(b"asked")
+        try:
+            job[0].wait(3)
+            return self.send_data(b"stopped")
+        except subprocess.TimeoutExpired:
+            job[3] = "stuck"
+            job[4].err("the command was let go of with 'wasabi free' - "
+                       "it may still be running on the Amiga")
+            return self.send_data(b"freed")
 
     def do_speed(self, payload):
         """Storage-free throughput: count-and-discard, or generate."""

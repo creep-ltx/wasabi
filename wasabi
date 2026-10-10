@@ -34,6 +34,9 @@ DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN, MOUSE = 0x46, 0x47, 0x48, 0x49, 0x4A
 KEY, WINDOWS, HEALTH, LIVE, CLIP = 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
+SLOTS, FREE, SLOT = 0x50, 0x51, 0x52
+FREE_BREAK_ONLY = 1
+RUN_SLOT = 4            # RUN flag: tell me which slot (daemon 0.4+)
 
 # Amiga DateStamp epoch.
 AMIGA_EPOCH = 252460800  # 1978-01-01 00:00:00 UTC as a Unix timestamp
@@ -641,15 +644,21 @@ def still_answering(conn):
         side.close()
 
 
-def stop_command(conn, command):
-    """Ctrl-C the running command by name, on a side connection - the
-    main one is busy carrying its output."""
+def stop_command(conn, command, slot=None):
+    """Ctrl-C the running command, on a side connection - the main one
+    is busy carrying its output. By its slot when the daemon said which
+    (exactly this command, even if another slot runs the same one), else
+    by name."""
     try:
         side = Conn(conn.host, conn.port, conn.key, timeout=SILENCE)
         try:
-            side.send(KILL, struct.pack(">I", 0) +
-                      pack_str(command_word(command, path=True)))
-            side.expect_ok()
+            if slot:
+                side.send(FREE, struct.pack(">II", slot, FREE_BREAK_ONLY))
+                drain_to_end(side, lambda b: None)
+            else:
+                side.send(KILL, struct.pack(">I", 0) +
+                          pack_str(command_word(command, path=True)))
+                side.expect_ok()
         finally:
             side.close()
         return True
@@ -667,6 +676,8 @@ def do_run(conn, command, merge=False, detach=False, sink=None,
             "that command is %d bytes and wasabid holds 511 - put it in a "
             "script, upload it, and run that instead" % nbytes)
     flags = (1 if merge else 0) | (2 if detach else 0)
+    if not detach and "slots" in conn.caps:
+        flags |= RUN_SLOT
     conn.send(RUN, struct.pack(">I", flags) + pack_str(command))
     # A command may legitimately think for a long time before it says
     # anything - a compile, or just loading a 760 KB binary off disk -
@@ -685,6 +696,7 @@ def do_run(conn, command, merge=False, detach=False, sink=None,
 
 def _run_loop(conn, sink, command, deadline, max_time):
     stopping = None                     # when the Ctrl-C went out
+    slot = None                         # which run slot, if the daemon says
     while True:
         wait = RUN_CHECK
         if deadline is not None:
@@ -698,7 +710,7 @@ def _run_loop(conn, sink, command, deadline, max_time):
                 if stopping is None:
                     # Time is up: Ctrl-C it, then give it a grace period
                     # to wind down and report its exit like any other.
-                    sent = stop_command(conn, command)
+                    sent = stop_command(conn, command, slot)
                     stopping = now
                     deadline = now + 10.0
                     if not sent:
@@ -708,6 +720,12 @@ def _run_loop(conn, sink, command, deadline, max_time):
                             "on the Amiga" % (command_word(command),
                                               max_time))
                     continue
+                if slot:
+                    raise TimeLimit(
+                        "%s is still running after %g s and ignored "
+                        "Ctrl-C - it keeps running in slot %d. 'wasabi "
+                        "free %d' lets go of the slot"
+                        % (command_word(command), max_time, slot, slot))
                 raise TimeLimit(
                     "%s is still running after %g s and ignored Ctrl-C - "
                     "it keeps running on the Amiga, and the next 'run' "
@@ -719,6 +737,9 @@ def _run_loop(conn, sink, command, deadline, max_time):
                     "the Amiga stopped answering while %s was running "
                     "(nothing for %d s, and a ping got no reply)"
                     % (command_word(command), RUN_CHECK + SILENCE))
+            continue
+        if tag == SLOT and len(payload) == 4:
+            (slot,) = struct.unpack(">I", payload)
             continue
         if tag == STDOUT:
             if sink is not None:
@@ -2312,6 +2333,56 @@ def cmd_ps(conn, args):
             for r in tight[:3]), file=sys.stderr)
 
 
+def slot_rows(conn):
+    """The run slots in use: (slot, state, seconds, attached, command)."""
+    conn.send(SLOTS)
+    text = []
+    drain_to_end(conn, text.append)
+    rows = []
+    for line in b"".join(text).decode("latin-1").splitlines():
+        parts = line.split(" ", 4)
+        if len(parts) == 5:
+            rows.append((int(parts[0]), parts[1], int(parts[2]),
+                         parts[3] == "1", parts[4]))
+    return rows
+
+
+def cmd_slots(conn, args):
+    """What each run slot is running, for how long, and whether anyone
+    is still reading its output. 'stuck' is a command let go of with
+    'free' that has not ended: it holds no slot, only memory."""
+    rows = slot_rows(conn)
+    if args.json:
+        emit_json([{"slot": r[0], "state": r[1], "seconds": r[2],
+                    "attached": r[3], "command": r[4]} for r in rows])
+        return
+    if not rows:
+        print("all run slots are free", file=sys.stderr)
+        return
+    print("%-4s %-8s %7s  %-8s %s" % ("SLOT", "STATE", "TIME", "OUTPUT",
+                                       "COMMAND"))
+    for slot, state, secs, attached, cmd in rows:
+        print("%-4d %-8s %6ds  %-8s %s" % (
+            slot, state, secs, "read" if attached else "-", cmd))
+
+
+def cmd_free(conn, args):
+    """Stop a slot's command with Ctrl-C; if it will not stop within
+    three seconds, let go of the slot anyway (the command is left
+    running on the Amiga, but the slot can be used again)."""
+    flags = FREE_BREAK_ONLY if args.ctrl_c_only else 0
+    conn.send(FREE, struct.pack(">II", args.slot, flags))
+    text = []
+    drain_to_end(conn, text.append)
+    what = b"".join(text).decode("latin-1").strip()
+    print({"stopped": "slot %d: the command stopped" % args.slot,
+           "freed": "slot %d is free again; the command ignored Ctrl-C "
+                    "and is left running (only a reboot removes it)"
+                    % args.slot,
+           "asked": "slot %d: sent Ctrl-C" % args.slot}.get(
+               what, "slot %d: %s" % (args.slot, what)), file=sys.stderr)
+
+
 def cmd_kill(conn, args):
     """Ctrl-C (or with --force, RemTask) a task by name or 0x address.
 
@@ -2704,7 +2775,7 @@ def load_config():
 
 
 JSON_COMMANDS = ("ls", "ps", "screen", "windows", "ping", "run", "wait",
-                 "grab", "health")
+                 "grab", "health", "slots")
 
 
 def main(argv=None):
@@ -3030,6 +3101,16 @@ def main(argv=None):
                    help="RemTask() it - no cleanup, last resort")
     s.set_defaults(fn=cmd_kill)
 
+    sub.add_parser("slots", help="what each run slot is running"
+                   ).set_defaults(fn=cmd_slots)
+
+    s = sub.add_parser("free", help="stop a run slot's command, or let "
+                       "go of the slot if it will not stop")
+    s.add_argument("slot", type=int, help="the slot number from 'slots'")
+    s.add_argument("--ctrl-c-only", action="store_true",
+                   help="only send Ctrl-C; never let go of the slot")
+    s.set_defaults(fn=cmd_free)
+
     s = sub.add_parser("reboot", help="reboot the Amiga")
     s.add_argument("--cold", action="store_true",
                    help="accepted for the wire's sake; every reboot is "
@@ -3087,7 +3168,7 @@ def main(argv=None):
              "grab": "grab", "screen": "screen",
              "mouse": "mouse", "key": "key",
              "windows": "windows", "health": "health",
-             "clip": "clip"}.get(args.cmd)
+             "clip": "clip", "slots": "slots", "free": "slots"}.get(args.cmd)
     if args.cmd == "wait":
         needs = {"window": "windows", "change": "grab",
                  "still": "grab"}.get(args.what)
