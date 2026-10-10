@@ -15,6 +15,7 @@ import json
 import os
 import random
 import re
+import select
 import signal
 import zlib
 import socket
@@ -628,6 +629,14 @@ def command_word(command, path=False):
     return word if path else re.split(r"[:/]", word)[-1]
 
 
+def readable(sock):
+    """Something (data or a close) is waiting on this socket now."""
+    try:
+        return bool(select.select([sock], [], [], 0)[0])
+    except (OSError, ValueError):
+        return False
+
+
 def still_answering(conn):
     """Ping the daemon on a side connection. TRUE if it answers."""
     try:
@@ -732,7 +741,10 @@ def _run_loop(conn, sink, command, deadline, max_time):
                     "waits until it ends. 'wasabi kill --force %s' "
                     "removes it" % (command_word(command), max_time,
                                     command_word(command)))
-            if not still_answering(conn):
+            # The ping can wait out a daemon that was busy (a forced
+            # restart grants ten seconds of grace) while the answer we
+            # were waiting for arrived here meanwhile: read that first.
+            if not still_answering(conn) and not readable(conn.sock):
                 raise AmigaSilent(
                     "the Amiga stopped answering while %s was running "
                     "(nothing for %d s, and a ping got no reply)"
@@ -2377,8 +2389,8 @@ def cmd_free(conn, args):
     what = b"".join(text).decode("latin-1").strip()
     print({"stopped": "slot %d: the command stopped" % args.slot,
            "freed": "slot %d is free again; the command ignored Ctrl-C "
-                    "and is left running (only a reboot removes it)"
-                    % args.slot,
+                    "and is left running until it ends ('wasabi slots' "
+                    "shows it as stuck)" % args.slot,
            "asked": "slot %d: sent Ctrl-C" % args.slot}.get(
                what, "slot %d: %s" % (args.slot, what)), file=sys.stderr)
 

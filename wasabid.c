@@ -51,10 +51,10 @@
 #include "patches.h"                 /* everything that hijacks a vector */
 #include "health.h"                  /* the machine's vital signs */
 
-#define VERSION_STR "wasabid 0.4b1"
+#define VERSION_STR "wasabid 0.4b2"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.4b1 (10.10.2026)";
+    "$VER: wasabid 0.4b2 (10.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -911,8 +911,9 @@ static void job_abandon(struct RunJob *job, const char *why)
  * them nobody is listening (owner NULL - under Forbid, because the
  * runner's last act reads it there), and take the segment away from the
  * Shell that would unload it after main returns - the same trick that
- * detaching startup code plays. It costs the size of wasabid in memory,
- * until a reboot; a Guru minutes later would cost much more.
+ * detaching startup code plays. It costs this copy of wasabid in memory
+ * until a reboot - about 310 KB, most of it the live view's buffers
+ * (measured on the A1200, 0.4b1); a Guru minutes later costs more.
  */
 static void leave_runners_behind(void)
 {
@@ -988,7 +989,8 @@ static BOOL cmd_free(int fd, ULONG slot, ULONG flags)
     job = &g_jobs[slot - 1];
     if (job->abandoned)
         return send_perr(fd, "that slot was already freed; its command "
-                             "is stuck and only a reboot removes it");
+                             "still runs and ends on its own or at a "
+                             "reboot");
     force_stop_run(job);
     if (flags & FREE_BREAK_ONLY)
         what = "asked";
