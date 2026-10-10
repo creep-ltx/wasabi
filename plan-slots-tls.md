@@ -14,6 +14,14 @@ the subnet only when nobody answered the broadcast; the emulator on
 - Never pick a loopback machine as "the first Amiga found" when a real one
   is known; AmiClaude can then drop its own 127.x workaround.
 - Test: a mock that answers on loopback only must still trigger the sweep.
+- **Also (CFile session, 2026-10-10): the A1200 changed address after a
+  restart (.109 -> .107)** and `wasabi ping` said "no wasabid answered"
+  until a manual `wasabi discover`. When the cached address fails, the
+  fresh probe must do the full sweep and retry once or twice (the Amiga
+  may still be starting its network), then cache the new address.
+- **Also: `wasabi grab --json` is refused.** --json is a global option, so
+  only `wasabi --json grab` works, though the skill writes it after the
+  command. Accept it in both places, for every command.
 - Client-only, no daemon change. Small.
 
 ## 2. More slots
@@ -26,6 +34,11 @@ a. **Several RUN slots (4).** Turn the single job (g_job_active,
    g_run_client, the temp file) into an array; pump_run walks it. Each
    runner has its own process and T: file already, so this is mostly
    bookkeeping. 4 x 128 KB stack. Medium.
+   **Freeing a stuck slot without a reboot** (CFile session: a hung test
+   program held the only slot until a reboot): `wasabi slots` lists what
+   each slot runs and for how long; `wasabi free N` sends the program
+   Ctrl-C, and if it does not end, the daemon lets go of the slot anyway
+   (the hung program stays in memory, but the slot is usable again).
 b. **Many listeners on debug and snoop.** Drain the ring once, send to
    every subscriber; drop only the one that stalls. Small.
 c. **Long jobs stop blocking the others.** PUT/GET/GRAB are done in one
