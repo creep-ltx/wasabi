@@ -51,10 +51,10 @@
 #include "patches.h"                 /* everything that hijacks a vector */
 #include "health.h"                  /* the machine's vital signs */
 
-#define VERSION_STR "wasabid 0.4b2"
+#define VERSION_STR "wasabid 0.4b3"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.4b2 (10.10.2026)";
+    "$VER: wasabid 0.4b3 (10.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -2279,6 +2279,24 @@ static BOOL screen_send_deep(int fd, struct Screen *sc, ULONG w, ULONG h)
     return ok;
 }
 
+/*
+ * The one-row scratch bitmap ReadPixelArray8 converts through. It must
+ * have the SCREEN's depth and be cleared: it was 8 planes and not
+ * cleared, so on a 4-plane screen the blit filled planes 0-3 and the
+ * conversion read planes 4-7 as well - leftover memory, the same at
+ * every column of that one row - and every row of a planar grab or live
+ * view got the same wrong pens: white/grey vertical stripes at fixed x
+ * (FS-UAE's 16-colour Workbench, 2026-10-04 and -10). RTG screens take
+ * the CyberGraphX road and never came here.
+ */
+static struct BitMap *scratch_row(struct Screen *sc, LONG aligned)
+{
+    ULONG depth = GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH);
+    if (depth < 1 || depth > 8)
+        depth = 8;
+    return AllocBitMap(aligned, 1, depth, BMF_CLEAR, NULL);
+}
+
 static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
                                LONG depth)
 {
@@ -2301,7 +2319,7 @@ static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
      * not have a Layer or it would clip against the real window. */
     temprp = sc->RastPort;
     temprp.Layer = NULL;
-    temprp.BitMap = AllocBitMap(aligned, 1, 8, 0, NULL);
+    temprp.BitMap = scratch_row(sc, aligned);
     if (!temprp.BitMap)
         return send_perr(fd, "out of memory for the scratch bitmap");
 
@@ -2793,7 +2811,7 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
     if (src && fmt == LIVE_PEN8) {
         temprp = sc->RastPort;
         temprp.Layer = NULL;
-        temprp.BitMap = AllocBitMap(aligned, 1, 8, 0, NULL);
+        temprp.BitMap = scratch_row(sc, aligned);
     }
     if (!src || (fmt == LIVE_PEN8 && !temprp.BitMap)) {
         ok = FALSE;
