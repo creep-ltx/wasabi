@@ -951,7 +951,7 @@ static void leave_runners_behind(void)
  */
 static BOOL cmd_slots(int fd)
 {
-    char line[600];
+    static char line[600];               /* static: the 8 KB shell stack */
     ULONG now = now_secs();
     LONG i;
     for (i = 0; i < MAX_JOBS; i++) {
