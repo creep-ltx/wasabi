@@ -359,6 +359,32 @@ class Api:
             return {"ok": True}
         return self.call(do)
 
+    def slots(self):
+        def get(c):
+            if c.caps and "slots" not in c.caps:
+                return {"supported": False, "slots": [], "banner": c.banner}
+            return {"supported": True, "banner": c.banner, "slots": [{
+                "slot": r[0], "state": r[1], "seconds": r[2],
+                "attached": r[3], "command": r[4]}
+                for r in self.w.slot_rows(c)]}
+        return self.call(get)
+
+    def free(self, slot, ctrl_c_only=False):
+        try:
+            slot = int(slot)
+        except (TypeError, ValueError):
+            raise ApiError("name the slot by its number")
+        if not 1 <= slot <= 8:
+            raise ApiError("slots are numbered 1 to 8")
+
+        def do(c):
+            c.send(self.w.FREE, struct.pack(
+                ">II", slot, self.w.FREE_BREAK_ONLY if ctrl_c_only else 0))
+            text = []
+            self.w.drain_to_end(c, text.append)
+            return {"result": b"".join(text).decode("latin-1").strip()}
+        return self.call(do)
+
     def screens(self):
         def get(c):
             screens, _ = self.w.list_windows(c)
@@ -539,6 +565,9 @@ class Api:
             ("GET", "/api/shots"): lambda: self.shots(),
             ("GET", "/api/me"): lambda: self.me(),
             ("GET", "/api/ps"): lambda: self.ps(),
+            ("GET", "/api/slots"): lambda: self.slots(),
+            ("POST", "/api/free"): lambda: self.free(
+                body["slot"], body.get("ctrl_c_only", False)),
             ("GET", "/api/clip"): lambda: self.clip(),
             ("GET", "/api/amiga/read"): lambda: self.amiga_read(q("path")),
             ("GET", "/api/amiga/backup"): lambda: self.amiga_backup(

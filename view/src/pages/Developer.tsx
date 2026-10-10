@@ -214,6 +214,132 @@ function LogsTab() {
   );
 }
 
+/* --- Slots ------------------------------------------------------------ */
+
+type Slot = { slot: number; state: string; seconds: number; attached: boolean; command: string };
+
+function runTime(s: number) {
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60} s`;
+  return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
+}
+
+/* The daemon's run slots: up to four commands at once, from any session
+   or app. A command that ignores Ctrl-C can be let go of, so it no
+   longer blocks a slot (it keeps running until it ends). */
+function SlotsTab() {
+  const [slots, setSlots] = useState<Slot[]>([]);
+  const [supported, setSupported] = useState(true);
+  const [banner, setBanner] = useState('');
+  const [error, setError] = useState('');
+  const [tick, setTick] = useState(0);
+  const [busy, setBusy] = useState(0);
+  const [note, setNote] = useState('');
+
+  useEffect(() => {
+    let stop = false;
+    api<{ supported: boolean; banner: string; slots: Slot[] }>('api/slots')
+      .then((r) => {
+        if (stop) return;
+        setSlots(r.slots); setSupported(r.supported); setBanner(r.banner); setError('');
+      })
+      .catch((e: Error) => { if (!stop) setError(e.message); });
+    return () => { stop = true; };
+  }, [tick]);
+  useEffect(() => {
+    const t = window.setInterval(() => setTick((n) => n + 1), 3000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  const free = (s: Slot) => {
+    setBusy(s.slot);
+    setNote(`Stopping slot ${s.slot}…`);
+    api<{ result: string }>('api/free', { slot: s.slot })
+      .then((r) => setNote(r.result === 'stopped'
+        ? `Slot ${s.slot}: the command stopped.`
+        : r.result === 'freed'
+          ? `Slot ${s.slot} is free again. The command ignored Ctrl-C and keeps running until it ends.`
+          : `Slot ${s.slot}: ${r.result}`))
+      .catch((e: Error) => setNote(e.message))
+      .finally(() => { setBusy(0); setTick((n) => n + 1); });
+  };
+
+  const running = slots.filter((s) => s.state === 'running').length;
+  return (
+    <Flex direction="column" gap="3">
+      <Flex gap="3" align="center">
+        <Text size="2">{running} of 4 slots in use</Text>
+        <Text size="1" color="gray">refreshes every 3 s</Text>
+        <Box flexGrow="1" />
+        {note && <Text size="1" color="gray">{note}</Text>}
+      </Flex>
+      {error && (
+        <Callout.Root color="red" size="1">
+          <Callout.Icon><CrossCircledIcon /></Callout.Icon>
+          <Callout.Text>{error}</Callout.Text>
+        </Callout.Root>
+      )}
+      {!supported && (
+        <Callout.Root color="amber" size="1">
+          <Callout.Icon><CrossCircledIcon /></Callout.Icon>
+          <Callout.Text>
+            This Amiga runs {banner}, which has a single run slot and cannot list it. Update its
+            wasabid to 0.4 or later.
+          </Callout.Text>
+        </Callout.Root>
+      )}
+      {supported && !error && slots.length === 0 && (
+        <Text size="2" color="gray">All slots are free - nothing is running through Wasabi.</Text>
+      )}
+      {slots.length > 0 && (
+        <Card size="1">
+          <Table.Root size="1">
+            <Table.Header>
+              <Table.Row>
+                <Table.ColumnHeaderCell>Command</Table.ColumnHeaderCell>
+                <Table.ColumnHeaderCell>State</Table.ColumnHeaderCell>
+                <Table.ColumnHeaderCell />
+              </Table.Row>
+            </Table.Header>
+            <Table.Body>
+              {slots.map((s) => (
+                <Table.Row key={s.slot}>
+                  <Table.Cell>
+                    <Code size="2" variant="ghost">{s.command}</Code>
+                    <Text as="div" size="1" color="gray">
+                      slot {s.slot} · running for {runTime(s.seconds)}
+                      {!s.attached && s.state === 'running' && ' · nobody is reading its output'}
+                    </Text>
+                  </Table.Cell>
+                  <Table.Cell>
+                    {s.state === 'running'
+                      ? <Badge color="green">running</Badge>
+                      : (
+                        <Tooltip content="Let go of: it ignored Ctrl-C and holds no slot, only memory, until it ends">
+                          <Badge color="amber">stuck</Badge>
+                        </Tooltip>
+                      )}
+                  </Table.Cell>
+                  <Table.Cell justify="end" className="wv-nowrap">
+                    {s.state === 'running' && (
+                      <Tooltip content="Ctrl-C; if it will not stop in 3 s, free the slot and leave it running">
+                        <Button size="1" variant="soft" color="red" disabled={busy !== 0}
+                          onClick={() => free(s)}>
+                          {busy === s.slot ? <Spinner size="1" /> : <StopIcon />} Stop
+                        </Button>
+                      </Tooltip>
+                    )}
+                  </Table.Cell>
+                </Table.Row>
+              ))}
+            </Table.Body>
+          </Table.Root>
+        </Card>
+      )}
+    </Flex>
+  );
+}
+
 /* --- Tasks ------------------------------------------------------------ */
 
 type Task = {
@@ -488,12 +614,13 @@ export function DeveloperPage() {
     <Box className="wv-page-body">
       <Heading size="6" mb="1">Developer</Heading>
       <Text as="p" size="2" color="gray" mb="4">
-        The Amiga's debug output and DOS calls as they happen, its tasks, a command line, its screens.
+        The Amiga's debug output and DOS calls as they happen, its tasks, what Wasabi is running, a command line, its screens.
       </Text>
       <Tabs.Root defaultValue="logs">
         <Tabs.List>
           <Tabs.Trigger value="logs">Logs</Tabs.Trigger>
           <Tabs.Trigger value="tasks">Tasks</Tabs.Trigger>
+          <Tabs.Trigger value="slots">Slots</Tabs.Trigger>
           <Tabs.Trigger value="run">Run</Tabs.Trigger>
           <Tabs.Trigger value="screens">Screens</Tabs.Trigger>
         </Tabs.List>
@@ -502,6 +629,7 @@ export function DeveloperPage() {
               streams and lose what came in meanwhile. */}
           <Tabs.Content value="logs" forceMount className="wv-keep-tab"><LogsTab /></Tabs.Content>
           <Tabs.Content value="tasks"><TasksTab /></Tabs.Content>
+          <Tabs.Content value="slots"><SlotsTab /></Tabs.Content>
           <Tabs.Content value="run"><RunTab /></Tabs.Content>
           <Tabs.Content value="screens"><ScreensTab /></Tabs.Content>
         </Box>
