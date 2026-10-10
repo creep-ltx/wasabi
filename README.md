@@ -104,6 +104,25 @@ second and always work. The sends are non-blocking, because a blocking
 `sendto()` to an address with no ARP entry stalls until resolution gives
 up — 254 of those in a row turned a 1-second probe into 8.
 
+An emulator on the same PC does not count as "found": FS-UAE always
+answers on `127.0.0.1`, and the A1200 often misses the broadcast, so
+`discover` sweeps whenever only this PC answered (before 2026-10-10 it
+stopped at the emulator and missed the A1200 two times in three). An
+emulator also answers a broadcast from the PC's own LAN address; that is
+folded into `127.0.0.1`, where it really listens.
+
+**More than one emulator.** Give each wasabid its own port - a bare
+number on its command line, `wasabid 1235` - and point the client at it
+with `--port 1235` or `WASABI_PORT=1235`. `discover` probes loopback on
+the default port and the three after it, so it lists each emulator.
+
+**Which machine.** With no `--host`, the client uses the address it used
+last. If that stops answering (the A1200 got a new address from DHCP
+after a restart), it searches again - up to three times, since a machine
+just back may not have its network up yet - and picks, in order: the
+machine with the same name as last time; else the one real machine over
+emulators on this PC; else it lists them and asks for `--host`.
+
 ## Installing
 
 **Amiga.** Build the daemon first — `make` with Bebbo's cross-compiler
@@ -1202,8 +1221,8 @@ its CPU. Against an older daemon without `LIVE` it falls back to whole
 grabs. `wasabi grab` is unchanged and still exact. The **mouse wheel**
 works the NewMouse way: each notch is raw key `$7A` (up) / `$7B` (down),
 which MultiView, Workbench drawers and MUI lists scroll to (proven in
-MultiView on the A1200; `wasabi key press wheeldown` does the same from
-the command line). The Amiga's own
+MultiView on the A1200; `wasabi mouse wheel down 3` - or `wasabi key
+press wheeldown` - does the same from the command line). The Amiga's own
 pointer is a sprite and is not in the picture - the PC's pointer stands
 in for it. Ordinary keys go as whole presses (down and
 up together) and the PC's own key repeat repeats them; only the

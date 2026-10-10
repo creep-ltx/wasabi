@@ -23,6 +23,7 @@ cleanup() {
     [ -n "${MOCK_PID:-}" ] && kill "$MOCK_PID" 2>/dev/null
     [ -n "${MOCK2_PID:-}" ] && kill "$MOCK2_PID" 2>/dev/null
     [ -n "${MOCK4_PID:-}" ] && kill "$MOCK4_PID" 2>/dev/null
+    [ -n "${MOCKE_PID:-}" ] && kill "$MOCKE_PID" 2>/dev/null
     [ -n "${VIEW_PID:-}" ] && kill "$VIEW_PID" 2>/dev/null
     rm -rf "$ROOT"
 }
@@ -53,6 +54,53 @@ echo "wasabi client vs mock-wasabid"
 rm -f "$CACHE"
 out=$(./wasabi --port "$PORT" discover 2>&1 | grep -c "127.0.0.1")
 check "discover finds the daemon" "1" "$out"
+
+# Two emulators on this PC, one port each: both are found.
+./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+1)) --key "$KEY" \
+    >"$ROOT/mocke.log" 2>&1 &
+MOCKE_PID=$!
+sleep 1
+out=$(./wasabi --port "$PORT" discover 2>&1 | grep -c "127.0.0.1")
+check "discover lists each emulator on its own port" "2" "$out"
+kill "$MOCKE_PID" 2>/dev/null; MOCKE_PID=
+
+# The cached address stopped answering (the Amiga got a new one after a
+# restart): the next command finds it again by itself and remembers it.
+mkdir -p "$(dirname "$CACHE")"
+echo "127.0.0.1 1 $(uname -n)" > "$CACHE"
+out=$(./wasabi --port "$PORT" --key "$KEY" ping 2>&1 | grep -c "mock-wasabid")
+check "a moved Amiga is found again without discover" "1" "$out"
+check "and its new address is remembered" "127.0.0.1 $PORT $(uname -n)" "$(cat "$CACHE")"
+
+# Answers only from loopback must not stop the subnet sweep, and the real
+# machine wins over an emulator unless the emulator was the one last used.
+out=$(python3 - <<'PY'
+import importlib.machinery, importlib.util
+l = importlib.machinery.SourceFileLoader("w", "wasabi")
+s = importlib.util.spec_from_loader("w", l)
+w = importlib.util.module_from_spec(s); l.exec_module(w)
+sent = []
+class Sock:
+    def __init__(self, *a): pass
+    def setsockopt(self, *a): pass
+    def setblocking(self, *a): pass
+    def close(self): pass
+    def sendto(self, data, addr): sent.append(addr[0])
+def collect(sock, found, deadline):
+    if "10.9.9.2" in sent:
+        found[("10.9.9.2", 1234)] = ("a1200", "")
+    found[("127.0.0.1", 1234)] = ("amiga", "")
+w.socket.socket = Sock
+w._collect = collect
+w.local_ipv4s = lambda: [("10.9.9.1", "255.255.255.252")]
+found = w.discover()
+emu, real = ("127.0.0.1", 1234), ("10.9.9.2", 1234)
+print(real in found, w.pick_machine(found) == real,
+      w.pick_machine(found, "amiga") == emu)
+PY
+)
+check "an emulator answering does not stop the search for the A1200" \
+      "True True True" "$out"
 
 # --- handshake ---
 out=$($W ping 2>&1 | grep -c "mock-wasabid")
@@ -464,6 +512,14 @@ $W key press ramiga+w >/dev/null 2>&1
 out=$(tail -1 "$ROOT/keys.log" 2>/dev/null)
 check "key press sends modifier down, key, key up, modifier up" \
       "0000006700800011008000910080""00e70000" "$out"
+$W mouse wheel down 2 >/dev/null 2>&1
+out=$(tail -1 "$ROOT/keys.log" 2>/dev/null)
+check "mouse wheel down 2 sends the NewMouse key twice" \
+      "0000007b000000fb0000007b000000fb0000" "$out"
+out=$($W mouse wheel sideways 2>&1 | grep -c "up or down")
+check "mouse wheel refuses a direction it cannot turn" "1" "$out"
+out=$($W mouse move ten 20 2>&1 | grep -c "must be a number")
+check "mouse move still refuses a coordinate that is not a number" "1" "$out"
 $W key type 'å' --enter >/dev/null 2>&1
 out=$(tail -1 "$ROOT/keys.log" 2>/dev/null)
 check "key type sends Latin-1 text, Return as CR" "0001e50d" "$out"
@@ -688,6 +744,8 @@ out=$($W grab --window amigashell 2>&1 | grep -c "off the screen")
 check "a window outside the picture is refused, not cut to nothing" "1" "$out"
 out=$($W --json grab "$ROOT/j.png" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["path"], d["width"])')
 check "grab --json gives the path and size" "$ROOT/j.png 8" "$out"
+out=$($W grab "$ROOT/j2.png" --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["path"], d["width"])')
+check "--json also works after the command" "$ROOT/j2.png 8" "$out"
 
 # JSON
 out=$($W --json ping | python3 -c 'import json,sys; print("key" in json.load(sys.stdin)["caps"])')

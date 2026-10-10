@@ -2,7 +2,7 @@
 
 Not started. Order is the recommended one; each step is shippable alone.
 
-## 1. Fix: `discover` misses the A1200 while FS-UAE runs
+## 1. Fix: `discover` misses the A1200 while FS-UAE runs - DONE 2026-10-10
 
 Reported in audit4.md ("Found later, not yet fixed"). `discover()` sweeps
 the subnet only when nobody answered the broadcast; the emulator on
@@ -61,8 +61,8 @@ d. **Small ones from the CTerm session (2026-10-10):**
      `wasabid 1235` (a bare number is the port) and `WASABI_PORT=1235`
      or `--port 1235` on the client. To do: say so in the README, and
      make discover probe loopback on a few ports and list each emulator.
-   - The mouse wheel works today as `wasabi key press wheelup|wheeldown`
-     (README). Add `wasabi mouse wheel up|down [n]` as the obvious name.
+   - DONE 2026-10-10 (client): discover lists each emulator on ports
+     1234-1237, README says how; `wasabi mouse wheel up|down [n]`.
 
 Version: wasabid 0.4b1.
 

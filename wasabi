@@ -1941,6 +1941,10 @@ def cmd_mouse(conn, args):
     same space `grab` delivers - grab, look, click.
     """
     NOPOS = -32768
+    if args.action == "wheel":
+        return mouse_wheel(conn, args)
+    if isinstance(args.x, str) or isinstance(args.y, str):
+        raise WasabiError("up and down are for 'mouse wheel'")
     if args.action == "move":
         if args.x is None or args.y is None:
             raise WasabiError("mouse move needs X and Y")
@@ -1956,6 +1960,37 @@ def cmd_mouse(conn, args):
     y = NOPOS if args.y is None else args.y
     button = 1 if args.right else (2 if args.middle else 0)
     conn.send(MOUSE, struct.pack(">HHHhh", action, button, count, x, y))
+    conn.expect_ok()
+
+
+def mouse_arg(v):
+    """A mouse coordinate or count, or a wheel direction."""
+    if v in ("up", "down"):
+        return v
+    try:
+        return int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "must be a number (or up or down for the wheel), not %r" % v)
+
+
+def mouse_wheel(conn, args):
+    """Turn the wheel: `mouse wheel up|down [N]`. The Amiga has no wheel
+    of its own; this sends the NewMouse raw keys (0x7A/0x7B) a wheel
+    driver would, the same as `key press wheelup`."""
+    if args.x not in ("up", "down") or isinstance(args.y, str):
+        raise WasabiError("mouse wheel needs up or down, e.g. "
+                          "'wasabi mouse wheel down 3'")
+    n = 1 if args.y is None else args.y
+    if not 1 <= n <= 100:
+        raise WasabiError("mouse wheel: the count must be 1 to 100")
+    if conn.caps and "key" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) has no keyboard, so no wheel - update it "
+            "with 'wasabi update wasabid'" % conn.banner)
+    events = key_combo_events("wheel" + args.x) * n
+    conn.send(KEY, struct.pack(">H", 0) +
+              b"".join(struct.pack(">HH", c, q) for c, q in events))
     conn.expect_ok()
 
 
@@ -2489,30 +2524,46 @@ def _collect(sock, found, deadline):
                                    parts[2] if len(parts) > 2 else "")
 
 
+LOOPBACK_PORTS = 4     # emulators on this PC: port, port+1, ...
+DISCOVER_TRIES = 3     # a just-restarted Amiga may not answer at once
+
+
+def is_loopback(ip):
+    return ip.startswith("127.")
+
+
 def discover(timeout=0.5, port=1234, sweep=True):
     """Find every wasabid on this network.
 
-    Broadcast first. If nothing answers, sweep the local subnet with
-    unicast probes: a Wi-Fi client talking to a wired Amiga frequently
-    cannot get a broadcast across the bridge, and 254 small UDP packets
-    cost nothing next to failing to find the machine at all.
+    Broadcast first. If no real machine answers, sweep the local subnet
+    with unicast probes: a Wi-Fi client talking to a wired Amiga
+    frequently cannot get a broadcast across the bridge, and 254 small
+    UDP packets cost nothing next to failing to find the machine at all.
+
+    "No real machine" counts loopback answers as nothing: an emulator on
+    this PC always answers, and the A1200 often misses the broadcast, so
+    stopping at the first answer would never look for the real Amiga.
+    Loopback is probed on a few ports, one per emulator (wasabid's bare
+    port argument), so two FS-UAEs are two answers.
     """
     found = {}
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
-        targets = ["255.255.255.255", "127.0.0.1"]
+        targets = [("255.255.255.255", port)]
+        targets += [("127.0.0.1", port + i) for i in range(LOOPBACK_PORTS)]
         locals_ = local_ipv4s()
         for ip, nm in locals_:
             bcast = _to_int(ip) | (~_to_int(nm) & 0xFFFFFFFF)
-            targets.append(_to_str(bcast))
+            targets.append((_to_str(bcast), port))
         for t in targets:
             try:
-                sock.sendto(DISCOVERY_PROBE, (t, port))
+                sock.sendto(DISCOVERY_PROBE, t)
             except OSError:
                 pass
         _collect(sock, found, time.time() + timeout)
-        if found or not sweep:
+        _fold_own(found, locals_)
+        if not sweep or any(not is_loopback(ip) for ip, _p in found):
             return found
 
         for ip, nm in locals_:
@@ -2531,27 +2582,60 @@ def discover(timeout=0.5, port=1234, sweep=True):
                     pass
             sock.setblocking(True)
             _collect(sock, found, time.time() + max(timeout, 1.0))
+        _fold_own(found, locals_)
     finally:
         sock.close()
     return found
 
 
+def _fold_own(found, locals_):
+    """An emulator on this PC answers a broadcast from the PC's own LAN
+    (or Tailscale) address, which looks like a real machine on the
+    network, yet it only listens on loopback. Count it as loopback."""
+    own = {ip for ip, _nm in locals_}
+    for key in [k for k in found if k[0] in own]:
+        val = found.pop(key)
+        found.setdefault(("127.0.0.1", key[1]), val)
+
+
 def cached_host():
+    """(host, port, name) from the last run; name is "" in caches
+    written before the name was kept."""
     try:
         with open(CACHE) as fh:
-            host, port = fh.read().split()
-            return host, int(port)
-    except (OSError, ValueError):
+            parts = fh.read().split()
+        return parts[0], int(parts[1]), (parts[2] if len(parts) > 2 else "")
+    except (OSError, ValueError, IndexError):
         return None
 
 
-def cache_host(host, port):
+def cache_host(host, port, name=""):
     try:
         os.makedirs(os.path.dirname(CACHE), exist_ok=True)
         with open(CACHE, "w") as fh:
-            fh.write("%s %d\n" % (host, port))
+            fh.write("%s %d %s\n" % (host, port, name))
     except OSError:
         pass
+
+
+def pick_machine(found, want_name=""):
+    """Which of several answers to talk to, or None to make the user pick.
+
+    The machine last used, by name, wins - that is how an Amiga that got
+    a new address after a restart is followed. Then a real machine wins
+    over emulators on this PC, if there is only one: an emulator is
+    reached on purpose, with --host 127.0.0.1.
+    """
+    if len(found) == 1:
+        return next(iter(found))
+    if want_name:
+        named = [k for k, (n, _b) in found.items() if n == want_name]
+        if len(named) == 1:
+            return named[0]
+    real = [k for k in found if not is_loopback(k[0])]
+    if len(real) == 1:
+        return real[0]
+    return None
 
 
 def resolve_target(args):
@@ -2559,25 +2643,39 @@ def resolve_target(args):
     if args.host:
         return args.host, args.port
     hit = cached_host()
+    want = ""
     if hit:
+        host, port, want = hit
         try:
-            socket.create_connection(hit, timeout=1.0).close()
-            return hit
+            socket.create_connection((host, port), timeout=1.0).close()
+            return host, port
         except OSError:
             pass  # moved or off - fall through to a fresh probe
-    found = discover(port=args.port)
+    # A machine that has just restarted may still be bringing its network
+    # up, so one empty probe is not the last word.
+    found = {}
+    for attempt in range(DISCOVER_TRIES):
+        found = discover(port=args.port, timeout=0.5 + attempt * 0.5)
+        if found:
+            break
     if not found:
         raise WasabiError(
             "no wasabid answered on this network.\n"
             "  Is it running? Try: wasabi --host <ip> ping")
-    if len(found) > 1:
+    key = pick_machine(found, want)
+    if key is None:
         lines = ["several Amigas answered - pick one with --host:"]
         for (ip, port), (name, banner) in sorted(found.items()):
             lines.append("  %-15s :%-5d %s  %s" % (ip, port, name, banner))
         raise WasabiError("\n".join(lines))
-    (ip, port), (_name, _banner) = next(iter(found.items()))
-    cache_host(ip, port)
-    return ip, port
+    others = [k for k in found if k != key]
+    if others:
+        print("wasabi: using %s:%d (%s); also answering: %s - pick with "
+              "--host" % (key[0], key[1], found[key][0],
+                          ", ".join("%s:%d" % k for k in sorted(others))),
+              file=sys.stderr)
+    cache_host(key[0], key[1], found[key][0])
+    return key
 
 
 def cmd_discover(args):
@@ -2605,6 +2703,10 @@ def load_config():
     return cfg
 
 
+JSON_COMMANDS = ("ls", "ps", "screen", "windows", "ping", "run", "wait",
+                 "grab", "health")
+
+
 def main(argv=None):
     global SILENCE
     cfg = load_config()
@@ -2627,6 +2729,20 @@ def main(argv=None):
                    help="print results as JSON (ls, ps, screen, windows, "
                         "ping, run, wait, grab, health)")
     sub = p.add_subparsers(dest="cmd", required=True)
+    # --json is also accepted after the command (`wasabi grab --json`),
+    # which is where people write it. SUPPRESS keeps the subparser from
+    # resetting a --json given before the command back to False.
+    json_too = argparse.ArgumentParser(add_help=False)
+    json_too.add_argument("--json", action="store_true",
+                          default=argparse.SUPPRESS,
+                          help="print results as JSON")
+    _add = sub.add_parser
+
+    def add_parser(name, **kw):
+        if name in JSON_COMMANDS:
+            kw.setdefault("parents", []).append(json_too)
+        return _add(name, **kw)
+    sub.add_parser = add_parser
 
     sub.add_parser("discover", help="find Amigas on this network"
                    ).set_defaults(fn=cmd_discover, no_conn=True)
@@ -2793,13 +2909,17 @@ def main(argv=None):
                         "like diff(1), so it scripts as a regression check")
     s.set_defaults(fn=cmd_grab)
 
-    s = sub.add_parser("mouse", help="move the pointer, click, drag menus")
+    s = sub.add_parser("mouse", help="move the pointer, click, drag "
+                       "menus, turn the wheel")
     s.add_argument("action",
-                   choices=["move", "click", "doubleclick", "down", "up"])
-    s.add_argument("x", nargs="?", type=int, default=None,
+                   choices=["move", "click", "doubleclick", "down", "up",
+                            "wheel"])
+    s.add_argument("x", nargs="?", type=mouse_arg, default=None,
                    help="absolute X in grab's pixel space; click without "
-                        "coordinates clicks where the pointer is")
-    s.add_argument("y", nargs="?", type=int, default=None)
+                        "coordinates clicks where the pointer is. "
+                        "wheel: up or down")
+    s.add_argument("y", nargs="?", type=mouse_arg, default=None,
+                   help="wheel: how many notches (default 1)")
     s.add_argument("--right", action="store_true",
                    help="right (menu) button instead of the left")
     s.add_argument("--middle", action="store_true")
@@ -2971,6 +3091,8 @@ def main(argv=None):
     if args.cmd == "wait":
         needs = {"window": "windows", "change": "grab",
                  "still": "grab"}.get(args.what)
+    if args.cmd == "mouse" and args.action == "wheel":
+        needs = "key"                    # the wheel is raw keys
 
     try:
         host, port = resolve_target(args)
