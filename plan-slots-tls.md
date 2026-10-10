@@ -58,3 +58,10 @@ Version: wasabid 0.4b1.
   and the view only.
 - Main-loop care: SSL_pending() must be checked as well as WaitSelect,
   or buffered data sits unread.
+
+## Working on it: the A1200 is shared
+
+Several sessions test on the A1200 through Wasabi at the same time. Before
+putting a new wasabid on it, restarting it or rebooting: message the other
+sessions, say what and when, and wait for a pause. Every step must keep
+today's `wasabi` clients working (plain stays on until all have moved).
