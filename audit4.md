@@ -197,3 +197,21 @@ server waiting for a phone — must treat its own stored settings and its
 peers as untrusted, because nobody is watching when they go wrong. The
 three worst findings on the PC side were all "a bad value got in once
 and broke every later run, silently".
+
+## Found later, not yet fixed (2026-10-10, from the AmiClaude session)
+
+- **`discover` misses the A1200 while an emulator runs.** With FS-UAE
+  running wasabid on this PC, `wasabi discover` often lists only
+  `127.0.0.1 :1234 amiga`. Five tries in a row found no A1200; other
+  times it found only the A1200. *Verified.*
+  - Why: `discover()` probes 127.0.0.1 alongside the broadcast, and
+    sweeps the subnet with unicast only when *nobody* answered. The
+    A1200 often misses the broadcast, so once the emulator answers, the
+    real machine is never searched for.
+  - Effect: anything taking "the first Amiga found" lands on the
+    emulator. AmiClaude did, and now skips 127.x itself. The CTerm
+    session had to give the A1200's IP by hand.
+  - Possible fix: when broadcast found only loopback answers, sweep
+    anyway. Or sweep whenever the last-known real host is missing from
+    the answers.
+  - Also in Knowledge/amiga/toolchain-and-testing.md.
