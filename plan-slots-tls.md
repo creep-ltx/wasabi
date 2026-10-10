@@ -26,7 +26,7 @@ the subnet only when nobody answered the broadcast; the emulator on
   AmiClaude reads it.
 - Client-only, no daemon change. Small.
 
-## 2. More slots
+## 2. More slots - a, plus freeing stuck slots, DONE 2026-10-10 (wasabid 0.4b2, on the A1200)
 
 Today wasabid takes 8 connections, but has one RUN slot ("another command
 is already running"), one debug subscriber and one snoop subscriber, and
