@@ -39,6 +39,10 @@ a. **Several RUN slots (4).** Turn the single job (g_job_active,
    each slot runs and for how long; `wasabi free N` sends the program
    Ctrl-C, and if it does not end, the daemon lets go of the slot anyway
    (the hung program stays in memory, but the slot is usable again).
+   Same for the CTerm session's case: `wasabi kill --force` removed the
+   command's process, but the runner was left waiting for it forever and
+   the slot stayed taken (even `restart --force` could not free it). A
+   forced kill of a run's process must release its slot too.
 b. **Many listeners on debug and snoop.** Drain the ring once, send to
    every subscriber; drop only the one that stalls. Small.
 c. **Long jobs stop blocking the others.** PUT/GET/GRAB are done in one
@@ -49,6 +53,14 @@ c. **Long jobs stop blocking the others.** PUT/GET/GRAB are done in one
 Not chosen: one Amiga process per connection (ReleaseSocket /
 ObtainSocket). Possible, but the patches, live view and clipboard are
 shared state, and threads on AmigaOS make every one of them a race.
+
+d. **Small ones from the CTerm session (2026-10-10):**
+   - Two FS-UAE emulators both on 127.0.0.1:1234. Already possible today:
+     `wasabid 1235` (a bare number is the port) and `WASABI_PORT=1235`
+     or `--port 1235` on the client. To do: say so in the README, and
+     make discover probe loopback on a few ports and list each emulator.
+   - The mouse wheel works today as `wasabi key press wheelup|wheeldown`
+     (README). Add `wasabi mouse wheel up|down [n]` as the obvious name.
 
 Version: wasabid 0.4b1.
 
