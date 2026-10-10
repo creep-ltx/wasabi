@@ -11,3 +11,4 @@ tests/pcprobe
 .claude/
 view/node_modules/
 .deployed
+tests/ignorebreak
