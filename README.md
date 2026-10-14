@@ -73,6 +73,7 @@ pulling in its libraries — captured live off the A1200.
 | `view` | **working on the real A1200** (tested in a headless Firefox: picture, clicks, typing, Right Amiga shortcuts, right-button menus, settings) — the live screen in a window, driven with the PC's mouse and keyboard; only changes are sent, key-to-screen 52 ms over Wi-Fi |
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `slots` / `free` | **working on the real A1200 (0.4b2)** — four commands at once (one per connection); `wasabi slots` lists them, `wasabi free N` Ctrl-Cs one and lets go of the slot if it will not stop; `run --max-time` stops exactly its own slot |
+| TLS on every network connection (`keys`) | **0.6b1, tested in FS-UAE; A1200 below** — Ed25519 certificates from your own CA, no plain fallback; loopback (emulators) may stay plain |
 | `ui` (gadgets and menus by name) / `arexx` | **0.5b1, tested in FS-UAE (OS 3.2.3)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. GadTools and plain Intuition windows; ReAction windows show only their outer layout |
 | MCP server (`wasabi_mcp.py`) | **0.1, tested in FS-UAE** — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
@@ -220,6 +221,8 @@ wasabi ui click NAME [--window T] [--kind K] [--nth N] [--double]
 wasabi ui set NAME TEXT [--no-enter]   fill a text field
 wasabi ui menu PATH [--window T]       pick 'Project/Save As' or 'Quit'
 wasabi ui front TITLE        bring a window to the front, activate it
+wasabi keys init|amiga NAME|drive DIR NAME|show
+                             the encryption keys (see Security)
 wasabi arexx PORT COMMAND [--timeout S]
                              send an ARexx command, print RESULT; exit
                              code = its rc. No PORT: list the ports
@@ -351,10 +354,59 @@ the Amiga side and fetch the file: `run "cmd >T:out"` then `get T:out -`.
 
 ## Security
 
-`wasabid` executes arbitrary commands as whatever started it, over a
-plaintext socket, on a machine with no memory protection. The key in
-`ENV:wasabi.key` stops an accidental connection from a misconfigured
-tool; it stops nothing else.
+`wasabid` executes arbitrary commands as whatever started it, on a
+machine with no memory protection. Since 0.6 **every connection that
+crosses a network is TLS 1.3**, and both ends must prove who they are;
+the key in `ENV:wasabi.key` is still checked, inside the encryption.
+
+### Encryption (wasabid 0.6+)
+
+Your own small certificate authority, made once on your PC, signs a
+certificate for each Amiga and one for the PC. Each end accepts only
+certificates your CA signed: someone else's Amiga, or someone else's
+computer, is refused before a single command is read, and nothing on
+the wire can be read or changed.
+
+```
+wasabi keys init                    once: the CA and this computer's
+                                    certificate, in ~/.config/wasabi/keys
+wasabi --plain keys amiga a1200     an Amiga still on an older wasabid:
+wasabi --plain update wasabid       its keys, then the TLS daemon
+wasabi keys amiga NAME              (re)install an Amiga's keys over TLS
+wasabi keys drive DIR NAME          into an emulator drive's folder
+wasabi keys show                    what there is, with fingerprints
+```
+
+The Amiga keeps its half in `ENVARC:wasabi/` (`ca.crt`, `amiga.crt`,
+`amiga.key`) and needs **AmiSSL 5**. Another computer (the NAS, a
+laptop) needs `ca.crt`, `client.crt` and `client.key` from the keys
+folder — not `ca.key`, which stays on the computer that signs new
+Amigas. Keep that folder: `wasabi keys init` refuses to replace it,
+because a new CA would lock out every Amiga that has the old one.
+
+- **No plain fallback.** A client never drops to plain because TLS
+  failed. `--plain` exists only to reach a wasabid older than 0.6 once,
+  to install its keys and update it, and is refused for everything else.
+  Its update is still proven over TLS: the test copy of the new daemon
+  must accept an encrypted connection before it replaces the old one.
+- **Except on this computer itself.** A connection from `127.x` - an
+  FS-UAE emulator, whose sockets are the PC's, or an SSH tunnel - may
+  skip TLS: those bytes never cross a network, and anything able to
+  watch them could read the keys anyway. The daemon tells the two apart
+  by the first byte (a TLS ClientHello starts `0x16`). Emulators
+  therefore need neither AmiSSL nor keys. `WASABI_TLS=always` encrypts
+  there too.
+- **Dates are not checked on the Amiga** (its clock may be wrong); the
+  certificates are valid for 100 years so the PC does not trip either.
+- **If TLS cannot start** (AmiSSL missing, its assign not yet made at
+  boot, no keys), wasabid keeps running, refuses network clients, says
+  why in its discovery answer (`wasabi discover`), and tries again every
+  30 s. Exiting would leave a machine nobody can reach to fix it.
+- **Cost:** Ed25519 certificates, X25519 key exchange and ChaCha20 (no
+  AES instructions on a 68k), chosen because every public-key step is
+  plain 68k arithmetic. Measured on an emulated 68030/50: a handshake
+  takes ~12 s (P-256: 22 s) and data moves at ~29 KB/s (AES-256: 13).
+  The A1200's Emu68 is far faster - see the measurements below.
 
 **It answers only addresses that cannot be routed in from the
 internet** — RFC1918 (`10/8`, `172.16/12`, `192.168/16`) plus loopback

@@ -24,6 +24,7 @@ import os
 import re
 import select
 import socket
+import ssl
 import socketserver
 import struct
 import subprocess
@@ -189,6 +190,16 @@ class Handler(socketserver.BaseRequestHandler):
     # --- session ---
     def handle(self):
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # As wasabid 0.6 does on loopback: a first byte of 0x16 is a TLS
+        # ClientHello, anything else a plain HELLO frame.
+        if TLS_CTX is not None:
+            first = self.request.recv(1, socket.MSG_PEEK)
+            if first == b"\x16":
+                try:
+                    self.request = TLS_CTX.wrap_socket(self.request,
+                                                       server_side=True)
+                except (ssl.SSLError, OSError):
+                    return              # a stranger's certificate
         try:
             tag, payload = self.recv()
             if tag != HELLO:
@@ -211,7 +222,9 @@ class Handler(socketserver.BaseRequestHandler):
             ticks = 0
             while True:
                 if self.subs and not self.buf:
-                    r, _, _ = select.select([self.request], [], [], 0.35)
+                    pend = getattr(self.request, "pending", lambda: 0)()
+                    r = [1] if pend else select.select(
+                        [self.request], [], [], 0.35)[0]
                     if not r:
                         ticks += 1
                         if DROP_AFTER and ticks >= DROP_AFTER \
@@ -826,8 +839,22 @@ def discovery_responder(port, name):
             sock.sendto(reply, addr)
 
 
+TLS_CTX = None
+
+
+def tls_server(d):
+    """wasabid's TLS: TLS 1.3, our certificate, clients signed by the CA."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.load_cert_chain(os.path.join(d, "amiga.crt"),
+                        os.path.join(d, "amiga.key"))
+    ctx.load_verify_locations(os.path.join(d, "ca.crt"))
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    return ctx
+
+
 def main():
-    global ROOT, KEY, PORT, BANNER, CAPS, REFUSED, DROP_AFTER
+    global ROOT, KEY, PORT, BANNER, CAPS, REFUSED, DROP_AFTER, TLS_CTX
     p = argparse.ArgumentParser()
     p.add_argument("--root", default=ROOT)
     p.add_argument("--port", type=int, default=1234)
@@ -841,7 +868,12 @@ def main():
     p.add_argument("--drop-stream-after", type=int, default=0, metavar="N",
                    help="close the first stream connection after N emit "
                         "ticks (once) - for the reconnect tests")
+    p.add_argument("--tls", metavar="DIR",
+                   help="also speak TLS, with DIR's amiga.crt/.key and ca.crt "
+                        "(what 'wasabi keys drive' writes)")
     args = p.parse_args()
+    if args.tls:
+        TLS_CTX = tls_server(args.tls)
     REFUSED = args.refused
     DROP_AFTER = args.drop_stream_after
     ROOT, KEY, PORT, BANNER = args.root, args.key, args.port, args.banner

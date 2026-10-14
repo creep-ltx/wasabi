@@ -41,8 +41,14 @@ check() { # name expected actual
 mkdir -p "$ROOT/C" "$ROOT/L"
 echo "hello from the amiga" > "$ROOT/C/greet.txt"
 
+# The keys, as a user makes them once - inside the test's own config dir -
+# and an "Amiga drive" for the mock to take its half from.
+./wasabi keys init >/dev/null 2>&1
+mkdir -p "$ROOT/drive/Prefs"
+./wasabi keys drive "$ROOT/drive" mock >/dev/null 2>&1
+
 ./tests/mock-wasabid.py --root "$ROOT" --port "$PORT" --key "$KEY" \
-    >"$ROOT/mock.log" 2>&1 &
+    --tls "$ROOT/drive/Prefs/Env-Archive/wasabi" >"$ROOT/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 1
 
@@ -630,6 +636,32 @@ print(r[0]["result"]["serverInfo"]["name"], len(r[1]["result"]["tools"]) > 15,
       r[2]["result"]["content"][0]["text"], r[3]["result"]["isError"])')
 check "the MCP server lists tools, calls them, reports errors" \
       "wasabi True 47.42 True" "$out"
+
+# --- TLS (wasabid 0.6) ---
+out=$(ls "$XDG_CONFIG_HOME/wasabi/keys" | tr '\n' ' ')
+check "keys init makes a CA and this computer's certificate" \
+      "amiga-mock.crt amiga-mock.key ca.crt ca.key client.crt client.key " "$out"
+out=$(stat -c %a "$XDG_CONFIG_HOME/wasabi/keys/ca.key")
+check "the CA's key is private" "600" "$out"
+out=$(./wasabi keys init 2>&1 | grep -c "keys exist already")
+check "keys init never replaces a set (it would lock out every Amiga)" "1" "$out"
+out=$(WASABI_TLS=always $W ping 2>&1 | grep -c "^mock-wasabid")
+check "an encrypted connection works end to end" "1" "$out"
+out=$(WASABI_TLS=always $W get C:greet.txt - 2>/dev/null)
+check "and carries data" "hello from the amiga" "$out"
+OTHER=$(mktemp -d)
+mkdir -p "$OTHER/wasabi"
+out=$(XDG_CONFIG_HOME=$OTHER WASABI_TLS=always $W ping 2>&1 | grep -c "wasabi keys init")
+check "no keys: says how to make them" "1" "$out"
+XDG_CONFIG_HOME=$OTHER ./wasabi keys init >/dev/null 2>&1
+out=$(XDG_CONFIG_HOME=$OTHER WASABI_TLS=always $W ping 2>&1 | grep -c "not one of your Amigas")
+check "an Amiga signed by another CA is refused" "1" "$out"
+cp "$XDG_CONFIG_HOME/wasabi/keys/ca.crt" "$OTHER/wasabi/keys/ca.crt"
+out=$(XDG_CONFIG_HOME=$OTHER WASABI_TLS=always $W ping 2>&1 | grep -c "does not trust this computer")
+check "a computer with someone else's certificate is refused" "1" "$out"
+rm -rf "$OTHER"
+out=$($W --plain ls 2>&1 | grep -c "only for reaching an old wasabid")
+check "--plain is refused for everyday commands" "1" "$out"
 
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")

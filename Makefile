@@ -22,8 +22,20 @@ all: wasabid
 # not the daemon's rules, and the two must not blur together.
 SRCS = wasabid.c patches.c health.c
 
-wasabid: $(SRCS) patches.h health.h
-	$(CC) $(CFLAGS) $(SRCS) -o wasabid
+# TLS on AmiSSL 5: tls.c alone sees its headers (they clash with the
+# daemon's), and links the stubs. The SDK comes from third_party/fetch.sh.
+SSL    = third_party/AmiSSL/Developer
+SSLINC = -I$(SSL)/include
+SSLLIB = -L$(SSL)/lib/AmigaOS3 -lamisslstubs
+
+tls.o: tls.c tls.h $(SSL)
+	$(CC) $(CFLAGS) $(SSLINC) -c tls.c -o tls.o
+
+wasabid: $(SRCS) patches.h health.h tls.h tls.o
+	$(CC) $(CFLAGS) $(SRCS) tls.o $(SSLLIB) -o wasabid
+
+$(SSL):
+	third_party/fetch.sh
 
 # Round-trip the client against the host mock - no Amiga in the loop.
 test:
@@ -33,7 +45,7 @@ deploy: wasabid
 	cp wasabid "$(DEPLOY)/"
 
 clean:
-	rm -f wasabid
+	rm -f wasabid tls.o
 
 # The launcher entry and icon, for this user: `wasabi desktop` from the
 # app menu. Exec gets the full path - a launcher's PATH may lack ~/.local/bin.

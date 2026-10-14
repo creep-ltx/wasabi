@@ -12,6 +12,14 @@ tar -cf - wasabi wasabi_view.py wasabi_api.py wasabi_logs.py wasabi_monitor.py w
 ssh nas "test -f $D/config/wasabi/config" || {
     ssh nas "umask 077; cat > $D/config/wasabi/config" < "${XDG_CONFIG_HOME:-$HOME/.config}/wasabi/config"
 }
+# Its half of the TLS keys (wasabid 0.6+ talks only TLS over a network):
+# the CA's certificate and this computer's client certificate and key -
+# never ca.key, which only the computer that signs new Amigas needs.
+K="${XDG_CONFIG_HOME:-$HOME/.config}/wasabi/keys"
+ssh nas "mkdir -p $D/config/wasabi/keys"
+for f in ca.crt client.crt client.key; do
+    ssh nas "umask 077; cat > $D/config/wasabi/keys/$f" < "$K/$f"
+done
 # The NAS's shares give every new file to everyone (ACLs); the key and
 # the login's password hash must not be. chmod removes those rules - and
 # must for the folders the containers WRITE too: their user (1026) is not

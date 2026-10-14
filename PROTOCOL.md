@@ -48,6 +48,21 @@ Full mDNS is the obvious future upgrade — rondoval's driver stack already
 ships an `mdns` tool, so `amiga.local` may resolve on this network
 without Wasabi's help. Wasabi does not depend on it.
 
+## TLS (wasabid 0.6+)
+
+Every TCP connection from another machine is TLS 1.3 before the first
+frame: the Amiga is the server, shows `ENVARC:wasabi/amiga.crt`, and
+requires a client certificate; both must be signed by the CA in
+`ENVARC:wasabi/ca.crt` (made by `wasabi keys init`). The daemon prefers
+TLS_CHACHA20_POLY1305_SHA256 and X25519; dates are not checked. Frames
+inside are exactly as below, one TLS record per frame where possible.
+
+A connection from `127.x` may skip TLS: the daemon peeks at its first
+byte, `0x16` (a TLS handshake record) meaning TLS, anything else a plain
+`HELLO`. Other peers get TLS or are dropped. A handshake must finish in
+15 s. While TLS cannot start, network clients are closed at once and
+the discovery answer carries `- NOT READY: <reason>` after the version.
+
 ## Framing
 
 Every message in both directions is one frame:

@@ -12,3 +12,5 @@ tests/pcprobe
 view/node_modules/
 .deployed
 tests/ignorebreak
+third_party/AmiSSL*
+tls.o

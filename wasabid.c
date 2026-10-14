@@ -56,11 +56,12 @@
 
 #include "patches.h"                 /* everything that hijacks a vector */
 #include "health.h"                  /* the machine's vital signs */
+#include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.5b1"
+#define VERSION_STR "wasabid 0.6b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.5b1 (14.10.2026)";
+    "$VER: wasabid 0.6b1 (14.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -82,7 +83,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health,live,clip,detach,slots,ui,arexx"
+                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -242,9 +243,18 @@ static ULONG g_hb_last;              /* now_secs() of the last heartbeat */
 struct Client {
     int   fd;
     BOOL  hello;
+    void *tls;                       /* its TLS connection (tls.h) */
+    BOOL  secure;                    /* ready for frames: handshake done,
+                                      * or a plain loopback client */
+    BOOL  local;                     /* from 127.x: may skip TLS */
+    ULONG since;                     /* now_secs() at accept */
 };
 
 static struct Client g_clients[MAX_CLIENTS];
+static const char *g_tls_why = "not started";  /* why TLS is not ready */
+static ULONG g_tls_tried;                      /* now_secs() of the try */
+#define TLS_RETRY_SECS 30
+#define HANDSHAKE_SECS 15
 static char g_key[128];
 static char g_name[32] = "amiga";    /* discovery name: the 'name' startup
                                       * argument, else ENV:HOSTNAME, else
@@ -537,8 +547,60 @@ static BOOL io_wait(int fd, BOOL forwrite)
     return n > 0;                    /* 0 = timed out, <0 = the socket died */
 }
 
+/* The TLS connection behind a client socket. Every client has one once
+ * accepted; the lookup is by fd because the whole daemon passes fds. */
+static void *tls_of(int fd)
+{
+    LONG i;
+    for (i = 0; i < MAX_CLIENTS; i++)
+        if (g_clients[i].fd == fd)
+            return g_clients[i].tls;
+    return NULL;
+}
+
+/*
+ * TLS on a non-blocking socket: try, and when it wants the socket wait
+ * for exactly that, with the same ten-second bound as plain I/O. A TLS
+ * write must be retried with the same bytes, so it loops here rather
+ * than returning half done.
+ */
+static BOOL tls_send_all(int fd, void *t, const UBYTE *buf, LONG len)
+{
+    while (len > 0) {
+        LONG n = tls_write(t, buf, len);
+        if (n > 0) {
+            buf += n;
+            len -= n;
+        } else if (n == 0 || n == -2) {
+            if (!io_wait(fd, n == 0))
+                return FALSE;
+        } else
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL tls_recv_all(int fd, void *t, UBYTE *buf, LONG len)
+{
+    while (len > 0) {
+        LONG n = tls_read(t, buf, len);
+        if (n > 0) {
+            buf += n;
+            len -= n;
+        } else if (n == 0 || n == -2) {
+            if (!io_wait(fd, n == -2))
+                return FALSE;
+        } else
+            return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL send_all(int fd, const UBYTE *buf, LONG len)
 {
+    void *t = tls_of(fd);
+    if (t)
+        return tls_send_all(fd, t, buf, len);
     while (len > 0) {
         LONG n;
         if (!io_wait(fd, TRUE))
@@ -555,6 +617,20 @@ static BOOL send_all(int fd, const UBYTE *buf, LONG len)
 static BOOL send_frame(int fd, UBYTE tag, const void *payload, LONG len)
 {
     UBYTE hdr[5];
+    void *t = tls_of(fd);
+    if (t) {
+        /* One record for header and body: two would double the TLS
+         * overhead on every small frame, and the live view and streams
+         * send a great many. Static: 64 KB is no stack's business. */
+        static UBYTE frame[5 + MAX_PAYLOAD];
+        if (len < 0 || len > MAX_PAYLOAD)
+            return FALSE;
+        frame[0] = tag;
+        put_be32(frame + 1, (ULONG)len);
+        if (len)
+            memcpy(frame + 5, payload, len);
+        return tls_send_all(fd, t, frame, 5 + len);
+    }
     hdr[0] = tag;
     put_be32(hdr + 1, (ULONG)len);
     if (!send_all(fd, hdr, 5))
@@ -564,6 +640,9 @@ static BOOL send_frame(int fd, UBYTE tag, const void *payload, LONG len)
 
 static BOOL recv_all(int fd, UBYTE *buf, LONG len)
 {
+    void *t = tls_of(fd);
+    if (t)
+        return tls_recv_all(fd, t, buf, len);
     while (len > 0) {
         LONG n;
         if (!io_wait(fd, FALSE))
@@ -4217,7 +4296,11 @@ static void answer_probe(int s, int port)
         note_refusal(ntohl(from.sin_addr.s_addr));
         return;
     }
-    n = sprintf(reply, "WASABI!1 %s %d %s\n", g_name, port, VERSION_STR);
+    /* A daemon whose TLS could not start answers no client; say why
+     * here, where `wasabi discover` and `ping` can show it. */
+    n = sprintf(reply, "WASABI!1 %s %d %s%s%.80s\n", g_name, port,
+                VERSION_STR, tls_ready() ? "" : " - NOT READY: ",
+                tls_ready() ? "" : g_tls_why);
     sendto(s, reply, n, 0, (struct sockaddr *)&from, fromlen);
 }
 
@@ -4499,6 +4582,12 @@ static void drop(int cl)
     }
     live_free(cl);
     posted_forget(cl);
+    if (g_clients[cl].tls) {
+        tls_bye(g_clients[cl].tls);
+        tls_free(g_clients[cl].tls);
+        g_clients[cl].tls = NULL;
+    }
+    g_clients[cl].secure = FALSE;
     CloseSocket(g_clients[cl].fd);
     g_clients[cl].fd = -1;
     g_clients[cl].hello = FALSE;
@@ -4552,6 +4641,17 @@ static int selftest(const char *nonce)
         return RETURN_FAIL;
     }
     CloseSocket(s);
+    /* TLS is reported, not required here: an emulator reached over
+     * loopback needs none. Over a network, `wasabi update` proves it
+     * for real - its probe of the trial instance is a TLS connection. */
+    {
+        const char *why = tls_open();
+        tls_close();
+        if (why)
+            Printf("%s selftest: note - TLS not ready (%s); only this "
+                   "machine itself could connect\n", (LONG)VERSION_STR,
+                   (LONG)why);
+    }
     CloseLibrary(SocketBase);
     SocketBase = NULL;
     /*
@@ -4744,6 +4844,20 @@ int main(int argc, char **argv)
     if (!g_trial)
         guru_arm();
 
+    /*
+     * Every connection is TLS; there is no plain fallback. If it cannot
+     * start - AmiSSL missing, its assign not made yet at boot, the keys
+     * not copied over - the daemon still runs: it refuses connections,
+     * tells discovery why, and tries again every half minute. Exiting
+     * instead would leave a machine nobody can reach to fix it.
+     */
+    g_tls_why = tls_open();
+    g_tls_tried = now_secs();
+    if (g_tls_why)
+        Printf("wasabid: TLS is not ready (%s) - no client can connect "
+               "until it is; trying again every %ld s\n",
+               (LONG)g_tls_why, (LONG)TLS_RETRY_SECS);
+
     Printf("%s listening on port %ld%s. Break C to stop.\n",
            (LONG)VERSION_STR, (long)port,
            (LONG)(g_key[0] ? "" : " (NO KEY SET - see ENV:wasabi.key)"));
@@ -4759,6 +4873,7 @@ int main(int argc, char **argv)
         ULONG sigs = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_F | posted_sigmask();
         int nfds = listen_fd;
         LONG n;
+        BOOL pend;
 
         FD_ZERO(&rd);
         FD_SET(listen_fd, &rd);
@@ -4791,7 +4906,34 @@ int main(int argc, char **argv)
             }
         }
 
+        /* Bytes TLS has already decrypted do not make the socket
+         * readable again: look, and do not sleep on them. */
+        pend = FALSE;
+        for (i = 0; i < MAX_CLIENTS; i++)
+            if (g_clients[i].fd >= 0 && g_clients[i].secure &&
+                tls_pending(g_clients[i].tls) > 0)
+                pend = TRUE;
+        if (pend) {
+            tv.tv_secs = 0;
+            tv.tv_micro = 0;
+        }
+
         n = WaitSelect(nfds + 1, &rd, NULL, NULL, &tv, &sigs);
+        if (n < 0)
+            FD_ZERO(&rd);
+
+        {
+            ULONG tnow = now_secs();
+            /* A handshake that stalls holds a client slot: bounded. */
+            for (i = 0; i < MAX_CLIENTS; i++)
+                if (g_clients[i].fd >= 0 && !g_clients[i].secure &&
+                    tnow - g_clients[i].since > HANDSHAKE_SECS)
+                    drop(i);
+            if (!tls_ready() && tnow - g_tls_tried >= TLS_RETRY_SECS) {
+                g_tls_why = tls_open();
+                g_tls_tried = tnow;
+            }
+        }
 
         if (sigs & SIGBREAKF_CTRL_C)
             break;
@@ -4853,7 +4995,7 @@ int main(int argc, char **argv)
         if (!g_trial)
             refusals_save(FALSE);        /* rate-limited to once a minute */
 
-        if (n <= 0)
+        if (n <= 0 && !pend)
             continue;
 
         if (disco_fd >= 0 && FD_ISSET(disco_fd, &rd))
@@ -4884,6 +5026,27 @@ int main(int argc, char **argv)
                                (void *)&on, sizeof(on));
                     g_clients[slot].fd = fd;
                     g_clients[slot].hello = FALSE;
+                    g_clients[slot].secure = FALSE;
+                    g_clients[slot].since = now_secs();
+                    /*
+                     * From this machine itself (127.x - which is also
+                     * how the PC reaches an FS-UAE emulator, whose
+                     * sockets are the PC's), the client may skip TLS:
+                     * those bytes never cross a network, and anything
+                     * that could watch them could read the keys. The
+                     * first byte decides (see the client loop). Every
+                     * other peer gets TLS or nothing.
+                     */
+                    g_clients[slot].local =
+                        (ntohl(peer.sin_addr.s_addr) >> 24) == 127;
+                    g_clients[slot].tls = NULL;
+                    if (!g_clients[slot].local) {
+                        g_clients[slot].tls = tls_start(fd);
+                        if (!g_clients[slot].tls) {  /* TLS not ready */
+                            CloseSocket(fd);
+                            g_clients[slot].fd = -1;
+                        }
+                    }
                 }
             }
         }
@@ -4891,7 +5054,49 @@ int main(int argc, char **argv)
         for (i = 0; i < MAX_CLIENTS; i++) {
             UBYTE tag;
             LONG len;
-            if (g_clients[i].fd < 0 || !FD_ISSET(g_clients[i].fd, &rd))
+            if (g_clients[i].fd < 0)
+                continue;
+            if (!g_clients[i].secure) {
+                int r;
+                if (!FD_ISSET(g_clients[i].fd, &rd))
+                    continue;
+                if (g_clients[i].local && !g_clients[i].tls) {
+                    /* A TLS ClientHello starts 0x16; a HELLO frame 0x01. */
+                    UBYTE first = 0;
+                    if (recv(g_clients[i].fd, &first, 1, MSG_PEEK) != 1) {
+                        drop(i);
+                        continue;
+                    }
+                    if (first != 0x16) {
+                        g_clients[i].secure = TRUE;      /* plain, local */
+                        continue;
+                    }
+                    g_clients[i].tls = tls_start(g_clients[i].fd);
+                    if (!g_clients[i].tls) {
+                        drop(i);
+                        continue;
+                    }
+                }
+                r = tls_step(g_clients[i].tls);
+                if (r == 2) {            /* wants to write: rare, brief */
+                    fd_set w;
+                    struct timeval wt;
+                    FD_ZERO(&w);
+                    FD_SET(g_clients[i].fd, &w);
+                    wt.tv_secs = 1;
+                    wt.tv_micro = 0;
+                    WaitSelect(g_clients[i].fd + 1, NULL, &w, NULL, &wt,
+                               NULL);
+                    r = tls_step(g_clients[i].tls);
+                }
+                if (r == 1)
+                    g_clients[i].secure = TRUE;
+                else if (r < 0)
+                    drop(i);             /* wrong certificate, or not TLS */
+                continue;
+            }
+            if (!FD_ISSET(g_clients[i].fd, &rd) &&
+                tls_pending(g_clients[i].tls) <= 0)
                 continue;
             if (!recv_frame(g_clients[i].fd, &tag, payload, &len)) {
                 drop(i);
@@ -4992,9 +5197,15 @@ out:
         live_free(i);                   /* ~7 MB per live viewer at 1280x960:
                                          * AllocMem is not given back when a
                                          * program ends (audit 4) */
+        if (g_clients[i].tls) {
+            tls_bye(g_clients[i].tls);
+            tls_free(g_clients[i].tls);
+            g_clients[i].tls = NULL;
+        }
         if (g_clients[i].fd >= 0)
             CloseSocket(g_clients[i].fd);
     }
+    tls_close();
     if (disco_fd >= 0) CloseSocket(disco_fd);
     if (listen_fd >= 0) CloseSocket(listen_fd);
     FreeMem(payload, MAX_PAYLOAD);

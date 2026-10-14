@@ -19,7 +19,9 @@ import select
 import signal
 import zlib
 import socket
+import ssl
 import struct
+import subprocess
 import sys
 import time
 
@@ -71,6 +73,11 @@ class AmigaSilent(WasabiError):
 # How long any one reply may take before the Amiga counts as not
 # answering. --silence and WASABI_SILENCE override it.
 SILENCE = 15.0
+
+# Every connection is TLS 1.3 (wasabid 0.6+). --plain exists only to talk
+# to an older daemon once, to update it; see TLS_PLAIN_OK.
+PLAIN = False
+TLS_PLAIN_OK = ("update", "keys", "ping", "info")
 
 # Volumes and assigns where a wrong delete or overwrite costs a boot.
 # `put`, `deploy` and `del` there need --force. More names (the boot
@@ -302,11 +309,15 @@ def dress_errors(text):
 
 
 class Conn:
-    def __init__(self, host, port, key, timeout=None):
+    def __init__(self, host, port, key, timeout=None, tls=None):
         if timeout is None:
             timeout = SILENCE
-        self.host, self.port = host, port
         self.sock = socket.create_connection((host, port), timeout=timeout)
+        if tls is None:
+            # On this computer itself (an emulator) TLS adds nothing: the
+            # bytes never leave the machine. Everywhere else: always.
+            tls = not PLAIN and want_tls(self.sock.getpeername()[0])
+        self.host, self.port, self.tls = host, port, tls
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         # Keepalive, tuned tight: a machine that is reset or freezes
         # mid-connection sends no FIN, and a blocking recv() would wait
@@ -325,8 +336,42 @@ class Conn:
                                      getattr(socket, opt), val)
         self.buf = b""
         self.key = key                  # kept so a stream can reconnect
+        if tls:
+            try:
+                self.sock = tls_context().wrap_socket(self.sock)
+            except ssl.SSLCertVerificationError as e:
+                self.sock.close()
+                raise WasabiError(
+                    "this is not one of your Amigas - its certificate is "
+                    "not signed by your Wasabi CA (%s)" % e.verify_message)
+            except ssl.SSLError as e:
+                self.sock.close()
+                raise WasabiError(
+                    "the encrypted connection failed (%s) - the Amiga may "
+                    "not trust this computer's certificate: 'wasabi keys "
+                    "amiga' installs a matching set" % (e.reason or e))
+            except (ConnectionResetError, BrokenPipeError, EOFError):
+                self.sock.close()
+                raise WasabiError(
+                    "the Amiga closed the connection during the TLS "
+                    "handshake - its wasabid may be older than 0.6 (no "
+                    "encryption: update it with 'wasabi --plain update "
+                    "wasabid'), or not trust this computer")
+            except socket.timeout:
+                self.sock.close()
+                raise AmigaSilent("the Amiga did not finish the TLS "
+                                  "handshake in %d s" % timeout)
         try:
-            self._hello(key, timeout)
+            try:
+                self._hello(key, timeout)
+            except ssl.SSLError as e:
+                # TLS 1.3: the Amiga checks our certificate after we think
+                # the handshake is done, so its "no" arrives here.
+                raise WasabiError(
+                    "the Amiga does not trust this computer's certificate "
+                    "(%s) - copy the keys folder from the computer that "
+                    "made them, or install a new set with 'wasabi keys "
+                    "amiga'" % (e.reason or e))
         except BaseException:
             self.sock.close()           # a refused HELLO must not leak
             raise                       # the socket (audit 4)
@@ -404,6 +449,186 @@ class Conn:
             self.sock.close()
         except OSError:
             pass
+
+
+# --- TLS: the user's own small certificate authority --------------------
+
+def keys_dir():
+    return os.path.join(_xdg("XDG_CONFIG_HOME", "~/.config"), "wasabi",
+                        "keys")
+
+
+_TLS_CTX = None
+
+
+def tls_context():
+    """TLS 1.3 to the Amiga: it must show a certificate signed by this
+    user's Wasabi CA, and we show ours (also signed by it). Made once
+    by `wasabi keys init`."""
+    global _TLS_CTX
+    if _TLS_CTX:
+        return _TLS_CTX
+    d = keys_dir()
+    need = [os.path.join(d, n) for n in ("ca.crt", "client.crt",
+                                         "client.key")]
+    missing = [n for n in need if not os.path.exists(n)]
+    if missing:
+        raise WasabiError(
+            "no Wasabi keys in %s - every connection is encrypted now; "
+            "make them once with 'wasabi keys init' (or copy that folder "
+            "from the computer that has them)" % d)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.check_hostname = False          # the CA's signature is the name
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.load_verify_locations(need[0])
+    ctx.load_cert_chain(need[1], need[2])
+    _TLS_CTX = ctx
+    return ctx
+
+
+def _openssl(*args, stdin=None):
+    try:
+        p = subprocess.run(["openssl"] + list(args), input=stdin,
+                           capture_output=True)
+    except FileNotFoundError:
+        raise WasabiError("making keys needs the 'openssl' command")
+    if p.returncode != 0:
+        raise WasabiError("openssl %s failed: %s"
+                          % (args[0], p.stderr.decode(errors="replace")
+                             .strip()[-300:]))
+    return p.stdout
+
+
+def _private_write(path, data):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+DAYS = "36500"      # the Amiga does not check dates; the PC should not fail
+# Ed25519: on a 68030/50 a handshake took 22 s with P-256 and 12 s with
+# Ed25519 (with X25519 key exchange) - every public-key step is plain
+# 68k arithmetic.
+
+
+def make_leaf(name, cn, usage):
+    """A key and a certificate signed by the CA: name.key, name.crt."""
+    d = keys_dir()
+    key, crt = os.path.join(d, name + ".key"), os.path.join(d, name + ".crt")
+    csr = os.path.join(d, name + ".csr")
+    ext = os.path.join(d, name + ".ext")
+    with open(ext, "w") as f:
+        f.write("basicConstraints=critical,CA:FALSE\n"
+                "keyUsage=critical,digitalSignature\n"
+                "extendedKeyUsage=%s\n"
+                "subjectKeyIdentifier=hash\n"
+                "authorityKeyIdentifier=keyid\n" % usage)
+    try:
+        _openssl("req", "-new", "-newkey", "ed25519", "-nodes",
+                 "-keyout", key,
+                 "-out", csr, "-subj", "/CN=" + cn)
+        os.chmod(key, 0o600)
+        _openssl("x509", "-req", "-in", csr, "-CA",
+                 os.path.join(d, "ca.crt"), "-CAkey",
+                 os.path.join(d, "ca.key"), "-set_serial",
+                 str(random.getrandbits(63)), "-days", DAYS,
+                 "-extfile", ext, "-out", crt)
+    finally:
+        for f in (csr, ext):
+            if os.path.exists(f):
+                os.remove(f)
+    return key, crt
+
+
+def keys_init(quiet=False):
+    d = keys_dir()
+    if os.path.exists(os.path.join(d, "ca.key")):
+        raise WasabiError("keys exist already in %s - keep them; making new "
+                          "ones would lock out every Amiga that has the old "
+                          "set" % d)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
+    host = socket.gethostname()
+    _openssl("req", "-x509", "-new", "-newkey", "ed25519", "-nodes",
+             "-keyout", os.path.join(d, "ca.key"),
+             "-out", os.path.join(d, "ca.crt"), "-days", DAYS,
+             "-subj", "/CN=Wasabi CA (%s)" % host,
+             "-addext", "basicConstraints=critical,CA:TRUE",
+             "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+    os.chmod(os.path.join(d, "ca.key"), 0o600)
+    make_leaf("client", "Wasabi client (%s)" % host, "clientAuth")
+    if not quiet:
+        print("made a Wasabi CA and this computer's certificate in %s" % d)
+        print("next: 'wasabi --plain keys amiga NAME' for each Amiga still "
+              "on an old wasabid, or 'wasabi keys drive DIR NAME' for an "
+              "emulator's drive")
+
+
+def amiga_set(name):
+    """The three files an Amiga needs, making its certificate if new."""
+    d = keys_dir()
+    if not os.path.exists(os.path.join(d, "ca.key")):
+        raise WasabiError("no Wasabi CA yet - 'wasabi keys init' first")
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", name)
+    key = os.path.join(d, "amiga-%s.key" % safe)
+    crt = os.path.join(d, "amiga-%s.crt" % safe)
+    if not (os.path.exists(key) and os.path.exists(crt)):
+        key, crt = make_leaf("amiga-" + safe, "Wasabi Amiga %s" % name,
+                             "serverAuth")
+    read = lambda p: open(p, "rb").read()
+    return {"ca.crt": read(os.path.join(d, "ca.crt")),
+            "amiga.crt": read(crt), "amiga.key": read(key)}
+
+
+def cmd_keys(args):
+    """wasabi keys init | amiga NAME | drive DIR NAME | show"""
+    if args.action == "init":
+        return keys_init()
+    if args.action == "show":
+        d = keys_dir()
+        if not os.path.isdir(d):
+            print("no keys yet - 'wasabi keys init'")
+            return 1
+        for n in sorted(os.listdir(d)):
+            if n.endswith(".crt"):
+                subj = _openssl("x509", "-noout", "-subject", "-fingerprint",
+                                "-sha256", "-in", os.path.join(d, n))
+                print("%-24s %s" % (n, " ".join(subj.decode().split())))
+        return 0
+    if args.action == "drive":
+        if not args.where or not args.name:
+            raise WasabiError("wasabi keys drive DIR NAME - DIR is the "
+                              "emulator drive's folder (it has Prefs/)")
+        dst = os.path.join(args.where, "Prefs", "Env-Archive", "wasabi")
+        if not os.path.isdir(os.path.join(args.where, "Prefs")):
+            raise WasabiError("%s has no Prefs/ - not a system drive"
+                              % args.where)
+        os.makedirs(dst, exist_ok=True)
+        for n, data in amiga_set(args.name).items():
+            (_private_write if n.endswith(".key") else
+             lambda p, b: open(p, "wb").write(b))(os.path.join(dst, n), data)
+        print("keys for %s in %s" % (args.name, dst))
+        return 0
+    raise WasabiError("unknown keys action")
+
+
+def keys_amiga(conn, args):
+    """Install an Amiga's keys over the connection (old daemon: --plain)."""
+    name = args.where or args.name
+    if not name:
+        raise WasabiError("wasabi keys amiga NAME (its discovery name, e.g. "
+                          "a1200)")
+    files = amiga_set(name)
+    conn.send(MKDIR, pack_str("ENVARC:wasabi"))
+    try:
+        conn.expect_ok()
+    except WasabiError:
+        pass                            # it exists
+    for n, data in files.items():
+        put_bytes(conn, data, "ENVARC:wasabi/" + n)
+    print("keys for %s installed in ENVARC:wasabi/ on %s"
+          % (name, conn.host))
 
 
 # --- helpers ----------------------------------------------------------
@@ -633,6 +858,8 @@ def command_word(command, path=False):
 def readable(sock):
     """Something (data or a close) is waiting on this socket now."""
     try:
+        if isinstance(sock, ssl.SSLSocket) and sock.pending():
+            return True                 # decrypted already: select won't say
         return bool(select.select([sock], [], [], 0)[0])
     except (OSError, ValueError):
         return False
@@ -890,7 +1117,11 @@ def cmd_update(conn, args):
                  % (sidecar, testport, myip))
     time.sleep(2.0)
     try:
-        probe = Conn(conn.host, testport, args.key, timeout=5.0)
+        # The new build is proven the way it will be used: over TLS
+        # whenever the network is in between - even while this update
+        # itself goes over --plain to an older daemon.
+        probe = Conn(conn.host, testport, args.key, timeout=5.0,
+                     tls=want_tls(conn.sock.getpeername()[0]))
     except (OSError, WasabiError) as exc:
         abort("it did not come up as a daemon on port %d (%s)"
               % (testport, exc), stop_probe=True)
@@ -2973,6 +3204,13 @@ def is_loopback(ip):
     return ip.startswith("127.")
 
 
+def want_tls(peer_ip):
+    """TLS everywhere but this computer itself; WASABI_TLS=always
+    encrypts there too (the tests use it)."""
+    return os.environ.get("WASABI_TLS") == "always" or \
+        not is_loopback(peer_ip)
+
+
 def discover(timeout=0.5, port=1234, sweep=True):
     """Find every wasabid on this network.
 
@@ -3169,6 +3407,10 @@ def main(argv=None):
     p.add_argument("--json", action="store_true",
                    help="print results as JSON (ls, ps, screen, windows, "
                         "ping, run, wait, grab, health)")
+    p.add_argument("--plain", action="store_true",
+                   help="no encryption - only to reach a wasabid older than "
+                        "0.6 once, to update it (%s)"
+                        % ", ".join(TLS_PLAIN_OK))
     sub = p.add_subparsers(dest="cmd", required=True)
     # --json is also accepted after the command (`wasabi grab --json`),
     # which is where people write it. SUPPRESS keeps the subparser from
@@ -3475,6 +3717,15 @@ def main(argv=None):
                    help="set: do not press Return after the text")
     s.set_defaults(fn=cmd_ui)
 
+    s = sub.add_parser("keys", help="the encryption keys: init (once), "
+                       "amiga NAME (install on an Amiga), drive DIR NAME "
+                       "(an emulator's drive), show")
+    s.add_argument("action", choices=["init", "amiga", "drive", "show"])
+    s.add_argument("where", nargs="?",
+                   help="amiga: the Amiga's name; drive: the drive folder")
+    s.add_argument("name", nargs="?", help="drive: the Amiga's name")
+    s.set_defaults(fn=keys_amiga)
+
     s = sub.add_parser("arexx", help="send a command to a program's ARexx "
                        "port; with no port, list the ports")
     # dest is not "port": that is the global --port, the daemon's.
@@ -3549,6 +3800,15 @@ def main(argv=None):
 
     args = p.parse_args(argv)
     SILENCE = max(1.0, args.silence)
+    global PLAIN
+    if args.plain:
+        if args.cmd not in TLS_PLAIN_OK:
+            print("wasabi: --plain is only for reaching an old wasabid to "
+                  "update it (%s)" % ", ".join(TLS_PLAIN_OK), file=sys.stderr)
+            return 2
+        PLAIN = True
+    if args.cmd == "keys" and args.action != "amiga":
+        args.fn, args.no_conn = cmd_keys, True
     args.protect = {v.strip().rstrip(":").lower()
                     for v in cfg.get("protect", "").split(",") if v.strip()}
 
