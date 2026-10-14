@@ -4,12 +4,13 @@
 
 ## Installing
 
-**Amiga.** Build the daemon first — `make` with Bebbo's cross-compiler
-(see *Building and testing*); the binary itself is not kept in git.
-Then copy `wasabid` to `C:`, set a key, and start it:
+**Amiga.** Download `wasabid` (any 68k) or `wasabid.020` (68020 or
+better) from the [latest release](https://github.com/creep-ltx/wasabi/releases/latest),
+or build it (see *Building and testing*). Copy it to `C:wasabid`, set a
+key, and start it:
 
 ```
-Copy wasabid C:
+Copy wasabid.020 C:wasabid
 SetEnv SAVE wasabi.key hunter2
 Run >NIL: C:wasabid
 ```
@@ -22,16 +23,34 @@ It needs a working `bsdsocket.library` — on a PiStorm32/CM4 that means
 (lwIP over `genet.device`), or Roadshow, or AmiTCP. Anything that
 provides the standard API.
 
-**Linux or macOS.** Drop the client somewhere on `$PATH`:
+**The PC.** Either a ready-made file from the release - nothing else
+to install - or the Python script:
+
+| | |
+|---|---|
+| Linux (x86-64, ARM64 / Raspberry Pi) | `wasabi-linux-x86_64`, `wasabi-linux-arm64` |
+| macOS (Apple Silicon, Intel) | `wasabi-macos-arm64`, `wasabi-macos-x86_64` |
+| Windows | `wasabi-windows-x64.exe` |
+| anything with Python 3 | `wasabi` (the script; with this repository it also runs the desktop app's window and the NAS server from source) |
+
+Rename the file to `wasabi` (`wasabi.exe` on Windows), make it
+executable on Linux and macOS (`chmod +x wasabi`), and put it on your
+path, e.g. `~/.local/bin`. The downloads are not signed: on macOS run
+`xattr -d com.apple.quarantine wasabi` once; on Windows SmartScreen asks
+- choose "More info", then "Run anyway". From a clone instead:
+`ln -s $PWD/wasabi ~/.local/bin/wasabi`.
+
+Then give it the key:
 
 ```
-ln -s $PWD/wasabi ~/.local/bin/wasabi
 mkdir -p ~/.config/wasabi
 printf 'key = hunter2\n' > ~/.config/wasabi/config
 ```
 
-No host is needed in the config — the client finds the Amiga by
-broadcast and caches the answer.
+On Windows the same file is `%USERPROFILE%\.config\wasabi\config`. No
+host is needed in the config - the client finds the Amiga by broadcast
+(and on networks where broadcast does not cross from Wi-Fi to wired, by
+a sweep of the local addresses) and caches the answer.
 
 ## Updating the daemon
 
@@ -156,8 +175,10 @@ it.
 ## Building and testing
 
 ```
-make            # cross-compile wasabid
+make            # cross-compile wasabid (any 68k)
+make both       # and wasabid.020 (68020+)
 make test       # client vs. the host mock - no Amiga needed
+python3 tools/build-binary.py   # the client as one file (pip install pyinstaller)
 ```
 
 `tests/mock-wasabid.py` serves the same protocol out of a host directory.
@@ -169,7 +190,7 @@ The cross-compiler is Bebbo's `m68k-amigaos-gcc`, at
 `$(HOME)/opt/amiga/bin` on this box. Override `CC` if yours lives
 elsewhere. No CyberGraphX or Picasso96 developer headers are needed:
 the few calls the screen grab uses are declared in
-`include/wasabi_cgx.h` (0.9b2; 0.8 needed them, found by Spot). The
+`include/wasabi_cgx.h` (since 0.9; 0.8 needed them, found by Spot). The
 first `make` downloads the AmiSSL 5.27 developer kit
 (`third_party/fetch.sh`, checked by its SHA-256) for `tls.c`; the
 daemon only opens AmiSSL at run time, so it runs without it. It is
@@ -180,8 +201,12 @@ small structs, and did so here.
 git, so nothing needs Node unless you change it. `view/test/` drives
 it in a headless Firefox; `docs-*.mjs` take the README's pictures.
 
-**A release carries both halves, always.** `wasabid` and `wasabi` are
-attached to the same tag, and they are the pair that was tested
-together. Shipping a daemon on its own leaves whoever downloads it to
+**A release carries both halves, always.** `wasabid`, `wasabid.020`
+and `wasabi` are attached to the same tag, and they are the pair that
+was tested together. The one-file clients are added by GitHub Actions
+(`.github/workflows/binaries.yml`) when the release is published: built
+with PyInstaller on Linux (x86-64, ARM64), macOS (ARM, Intel) and
+Windows - it does not cross-build - and each smoke-tested against the
+mock before it is attached. Shipping a daemon on its own leaves whoever downloads it to
 find a client from wherever, which is the version skew the capability
 negotiation exists to survive rather than something to invite.

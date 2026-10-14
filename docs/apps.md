@@ -66,7 +66,10 @@
 `wasabi desktop` and `wasabi view` open in a window of their own - no
 tabs, no address bar, and no browser shortcuts in the way, so Ctrl+W
 reaches the Amiga. Closing the window ends the program. Without them,
-or with `--browser`, they open in the web browser as before. `make
+or with `--browser`, they open in the web browser: Chrome, Chromium or
+Brave as an app window where one is on the path, else Firefox, else
+the system's default browser (how the one-file downloads always open,
+and macOS and Windows usually). `make
 install-desktop` puts **Wasabi** in the app menu, with its icon
 (`desktop/`). Tested with pywebview's Qt backend (off-screen); the GTK
 one, which the command above installs, is the same pywebview call.

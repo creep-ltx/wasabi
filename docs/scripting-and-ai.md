@@ -66,7 +66,8 @@ as `quit` always has; `kill --force` (RemTask) was already explicit. A
 
 ## MCP: Wasabi for other AI tools
 
-`wasabi_mcp.py` is an MCP server (standard library only) that offers the
+`wasabi mcp` (or `wasabi_mcp.py`, the same server) is an MCP server
+(standard library only) that offers the
 Amiga as tools — `amiga_run`, `amiga_read_file`, `amiga_write_file`,
 `amiga_screenshot`, `amiga_ui_list`, `amiga_ui_click`, `amiga_ui_set`,
 `amiga_ui_menu`, `amiga_mouse`, `amiga_drag`, `amiga_pointer`,
@@ -77,8 +78,12 @@ Zed, LM Studio. Every tool runs the `wasabi` command, so discovery, the
 key and the system-place protection are the same as on the command line.
 
 ```
+claude mcp add --scope user wasabi -- wasabi mcp
 claude mcp add --scope user wasabi -- python3 /path/to/wasabi/wasabi_mcp.py
 ```
+
+The first works with any download (Linux, macOS, Windows) or the script
+on your path; the second with a clone.
 
 `--scope user` makes it available in every Claude Code session and
 project; leave it out for the current project only.
@@ -88,9 +93,12 @@ For Claude Desktop and most others, the `mcpServers` block:
 
 ```json
 { "mcpServers": { "wasabi": {
-    "command": "python3",
-    "args": ["/home/you/Projects/wasabi/wasabi_mcp.py"] } } }
+    "command": "/path/to/wasabi",
+    "args": ["mcp"] } } }
 ```
+
+(`wasabi.exe` on Windows; with a clone, `"command": "python3"` and
+`"args": ["/path/to/wasabi/wasabi_mcp.py"]`.)
 
 `python3 wasabi_mcp.py --probe` checks the link without any AI. Claude
 Code sessions on this PC do not need it - they use the `wasabi` skill.

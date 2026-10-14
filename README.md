@@ -96,9 +96,10 @@ $ wasabi ui menu "Project/Quit"
 
 - **For scripts** - `--json` on everything that lists, clear exit codes,
   time limits, `wait` instead of sleeping.
-- **MCP server** - 23 tools for Claude Code, Claude Desktop, Codex,
-  Gemini CLI, Cursor and other MCP clients: run, files, screenshots,
-  mouse, keyboard, gadgets and menus by name, ARexx, waiting.
+- **MCP server** (`wasabi mcp`) - 23 tools for Claude Code, Claude
+  Desktop, Codex, Gemini CLI, Cursor and other MCP clients: run, files,
+  screenshots, mouse, keyboard, gadgets and menus by name, ARexx,
+  waiting.
 
 [More: Scripts and AI](docs/scripting-and-ai.md)
 
@@ -184,7 +185,7 @@ wasabi update wasabid                replace the daemon, checked first
 | **Amiga** | AmigaOS 3.x and a TCP/IP stack with `bsdsocket.library`. AmiSSL 5 only for encryption; MUI only to read MUI windows. |
 | **PC** | Linux, macOS or Windows - the one-file downloads need nothing else; the script needs Python 3. OpenSSL 3 to make encryption keys. |
 | **Phone app** | any Docker host on the Amiga's network ([`tools/docker-compose.yml`](tools/docker-compose.yml)). |
-| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030 and as a stock 68020. 261 client tests on Linux and macOS for every change. |
+| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030 and as a stock 68020. 261 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
 
 ## Documentation
 

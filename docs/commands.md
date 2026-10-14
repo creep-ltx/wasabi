@@ -67,8 +67,10 @@ wasabi ui click NAME [--window T] [--kind K] [--nth N] [--double]
 wasabi ui set NAME TEXT [--no-enter]   fill a text field
 wasabi ui menu PATH [--window T]       pick 'Project/Save As' or 'Quit'
 wasabi ui front TITLE        bring a window to the front, activate it
-wasabi keys init|amiga NAME|drive DIR NAME|show
+wasabi keys init|amiga NAME|drive DIR NAME|show|forget HOST
                              the encryption keys (see Security)
+wasabi mcp                   the MCP server on stdin/stdout, for AI
+                             assistants (see Scripts and AI)
 wasabi arexx PORT COMMAND [--timeout S]
                              send an ARexx command, print RESULT; exit
                              code = its rc. No PORT: list the ports

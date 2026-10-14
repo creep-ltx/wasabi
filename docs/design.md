@@ -23,10 +23,11 @@
 | `slots` / `free` | **working on the real A1200 (0.4b2)** — four commands at once (one per connection); `wasabi slots` lists them, `wasabi free N` Ctrl-Cs one and lets go of the slot if it will not stop; `run --max-time` stops exactly its own slot |
 | TLS (`keys`) | **working on the real A1200 and the NAS; optional since 0.8** — Ed25519 certificates from your own CA; an Amiga with AmiSSL and keys accepts only TLS, one without works plain; a client never silently goes plain to an Amiga it reached encrypted |
 | `ui` (gadgets and menus by name) / `arexx` | **working on the real A1200; ReAction and MUI tested in FS-UAE (OS 3.2.3, MUI 5)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. Intuition, GadTools, ReAction and MUI 4/5 windows (0.7b1) |
-| list rows in `ui` | **0.9b1, tested in FS-UAE** (GadTools, MUI 5, DCTelnet's Address Book) — each row by its text, selected or not, clickable when in view |
-| transfers that do not block | **0.9b1, tested in FS-UAE** — during an 80 MB upload, ping 0.07 s and screenshots as fast as without it |
-| `wasabid.020` | **0.9b1, tested in FS-UAE as a stock A1200** (68EC020, 8 MB) — the same daemon built for 68020+; `make both` |
-| `--native` coordinates, `grab --region`, `mouse where`, more keys | **0.9b3, working on the real A1200** (pointer read back exactly, region grab) and in the client tests (261) |
+| list rows in `ui` | **working on the real A1200** (GadTools and MUI 5); DCTelnet's Address Book in FS-UAE — each row by its text, selected or not, clickable when in view |
+| transfers that do not block | **working on the real A1200** — during a 200 MB upload, ping 0.16 s and a 1280x960 screenshot 0.5 s |
+| `wasabid.020` | **working on the real A1200 (it runs that build) and in FS-UAE as a stock A1200** (68EC020, 8 MB) — the same daemon built for 68020+; `make both` |
+| one-file clients | **0.9, built and smoke-tested by GitHub Actions** on Linux (x86-64, ARM64), macOS (ARM, Intel) and Windows; the Linux one also against the real A1200 |
+| `--native` coordinates, `grab --region`, `mouse where`, more keys | **working on the real A1200** (pointer read back exactly, region grab) and in the client tests (261) |
 | `WASABI` ARexx port | **working on the real A1200 (answers there); every command tested in FS-UAE** — Amiga programs and scripts type, press keys, click, click gadgets by name and pick menus through it |
 | MCP server (`wasabi_mcp.py`) | **working** (tested in FS-UAE; registered for every Claude Code session on the author's PC) — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
@@ -268,7 +269,11 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 
 ## What's next
 
-**0.8 is the third non-beta build.** Since 0.2: the keyboard, windows
+**0.9 is the fourth non-beta build**: ready-made clients for Linux,
+macOS and Windows, list rows, transfers that do not block, a 68020
+build, more keys, region grabs, `--native` coordinates and 23 MCP tools.
+
+**0.8 was the third.** Since 0.2: the keyboard, windows
 and screenshots; the live view, the desktop app and the phone app with
 history, alerts and nightly backups; health; four run slots; gadgets and
 menus by name in Intuition, GadTools, ReAction and MUI windows; ARexx
