@@ -18,6 +18,19 @@ Run >NIL: C:wasabid
 Put those last two lines in `S:User-Startup` to have it up after every
 boot. Stop it with `Break <n> C`.
 
+On OS 2.x, `SetEnv` has no `SAVE` (it would set a variable called
+"SAVE"), so keep the key like this - only `Run >NIL: C:wasabid` goes in
+`S:User-Startup`:
+
+```
+SetEnv wasabi.key hunter2
+Copy ENV:wasabi.key ENVARC:
+```
+
+wasabid runs on AmigaOS 2.04 and later with any 68000 (tested on a
+stock A600 with Workbench 2.05 in FS-UAE) and takes about 350 KB of
+memory; AmiSSL, when encryption is on, about 3.5 MB more.
+
 It needs a working `bsdsocket.library` — on a PiStorm32/CM4 that means
 [rondoval's emu68-driver-stack](https://github.com/rondoval/emu68-driver-stack)
 (lwIP over `genet.device`), or Roadshow, or AmiTCP. Anything that

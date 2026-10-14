@@ -300,7 +300,10 @@ struct SnoopEv {
     LONG  err;                       /* pr_Result2 after the call */
 };
 
-static struct SnoopEv g_snev[SN_EVMAX];
+/* 108 KB, so it is taken when snoop is first used, not at start; kept
+ * until exit, since a caller parked in a stub writes here on its way
+ * out even after the patch is gone. */
+static struct SnoopEv *g_snev;
 static volatile ULONG g_snev_head;   /* producer (patches) advances */
 static volatile ULONG g_snev_tail;   /* consumer (daemon) advances */
 static volatile ULONG g_snev_lost;
@@ -586,6 +589,8 @@ snoop_record2(struct SnoopFn *d, ULONG *regs, LONG res, BOOL entry)
     } else
         ev.s2[0] = '\0';
 
+    if (!g_snev)
+        return;
     Disable();
     next = (g_snev_head + 1) & (SN_EVMAX - 1);
     if (next == g_snev_tail)
@@ -980,6 +985,12 @@ done:
 
 BOOL snoop_start(const char *pat, ULONG flags, char *why, LONG whysz)
 {
+    if (!g_snev)
+        g_snev = AllocMem(sizeof(struct SnoopEv) * SN_EVMAX, MEMF_ANY);
+    if (!g_snev) {
+        copystr(why, whysz, "out of memory for the trace");
+        return FALSE;
+    }
     BOOL entry = (flags & SNOOPF_ENTRY) != 0;
 
     copystr(g_snoop_pat, sizeof(g_snoop_pat), pat);
@@ -1693,6 +1704,15 @@ BOOL patches_stuck(void)
 void patches_closelibs(void)
 {
     snoop_closelibs();
+}
+
+/* At exit, once patches_stuck() is FALSE: nobody can write there. */
+void patches_free(void)
+{
+    if (g_snev) {
+        FreeMem(g_snev, sizeof(struct SnoopEv) * SN_EVMAX);
+        g_snev = NULL;
+    }
 }
 
 void patches_set_daemon_task(struct Task *t)

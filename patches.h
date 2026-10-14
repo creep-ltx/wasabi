@@ -81,6 +81,7 @@ LONG  patches_report(char *out, LONG max, BOOL dbg_watched);  /* for INFO */
  * callers to leave the stubs: closing them earlier can let one be
  * expunged while a straggler is still inside it. */
 void  patches_closelibs(void);
+void  patches_free(void);
 
 /* Who to Signal() when a patch has something urgent (a guru, or an
  * entry-mode line racing a freeze). Set once, from the daemon task. */

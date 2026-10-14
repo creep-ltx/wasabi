@@ -131,8 +131,8 @@ $ wasabi sum --window "Prefs"
 $ wasabi sum --window "Prefs" --since 1a2b3c4d     # exit 1: unchanged
 ```
 
-`wait change` and `wait still` use it when the daemon has it (0.10 and
-later), so they no longer send the whole screen on every look; both take
+`wait change` and `wait still` use it when the daemon has it (0.9 as
+updated on 15 October 2026), so they no longer send the whole screen on every look; both take
 `--region X,Y,W,H` as well as a window title. On a native screen the
 Amiga sums the bitplanes where they lie, which keeps it quick on a
 68000:

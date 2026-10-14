@@ -60,10 +60,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.10b1"
+#define VERSION_STR "wasabid 0.9"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.10b1 (15.10.2026)";
+    "$VER: wasabid 0.9 (15.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -3750,19 +3750,28 @@ static void pump_posted(void)
             struct RexxMsg *rm = (struct RexxMsg *)msg;
             int fd = g_clients[g_posted[i].client].fd;
             /* One DATA frame: rc, rc2, then as much RESULT as fits. */
-            static UBYTE out[8 + 32768];
-            LONG n = 0;
+            UBYTE hdr[8], *out = hdr;
+            LONG n = 0, cap = 0;
+            if (rm->rm_Result1 == 0 && rm->rm_Result2) {
+                cap = LengthArgstring((UBYTE *)rm->rm_Result2);
+                if (cap > 32768)
+                    cap = 32768;
+                if (!(out = AllocMem(8 + cap, MEMF_ANY))) {
+                    out = hdr;
+                    cap = 0;
+                }
+            }
             put_be32(out, (ULONG)rm->rm_Result1);
             put_be32(out + 4, rm->rm_Result1 ? (ULONG)rm->rm_Result2 : 0);
-            if (rm->rm_Result1 == 0 && rm->rm_Result2) {
-                n = LengthArgstring((UBYTE *)rm->rm_Result2);
-                if (n > 32768)
-                    n = 32768;
+            if (cap) {
+                n = cap;
                 memcpy(out + 8, (UBYTE *)rm->rm_Result2, n);
             }
             if (!send_frame(fd, T_DATA, out, 8 + n) ||
                 !send_frame(fd, T_END, NULL, 0))
                 drop(g_posted[i].client);
+            if (out != hdr)
+                FreeMem(out, 8 + cap);
         }
         posted_free(&g_posted[i]);
     }
@@ -4178,12 +4187,12 @@ static void rx_opts(char *p, struct RxOpts *o)
 }
 
 #define RX_MAX_ITEMS 128
-static struct UiItem g_rx_items[RX_MAX_ITEMS];
+static struct UiItem *g_rx_items;    /* 39 KB: taken on first use */
 static LONG g_rx_n;
 
 static BOOL rx_collect(struct UiItem *it, void *ctx)
 {
-    if (g_rx_n < RX_MAX_ITEMS)
+    if (g_rx_items && g_rx_n < RX_MAX_ITEMS)
         g_rx_items[g_rx_n++] = *it;
     return TRUE;
 }
@@ -4202,6 +4211,10 @@ static LONG rx_clickgadget(const char *label, struct RxOpts *o)
     ULONG ib;
 
     rx_norm(label, want, sizeof(want));
+    if (!g_rx_items &&
+        !(g_rx_items = AllocMem(sizeof(struct UiItem) * RX_MAX_ITEMS,
+                                MEMF_ANY)))
+        return rx_fail(20, "out of memory");
     ib = LockIBase(0);
     w = rx_find_window(o->has_window ? o->window : NULL);
     if (!w) {
@@ -4689,6 +4702,17 @@ struct LiveState {
 };
 static struct LiveState *g_live[MAX_CLIENTS];
 
+/* A row of an RTG screen for the live view, 64 KB: taken the first time
+ * a live view needs it, freed at exit. */
+static ULONG *g_rowbuf;
+
+static ULONG *live_rowbuf(void)
+{
+    if (!g_rowbuf)
+        g_rowbuf = AllocMem(LIVE_RECT_MAX, MEMF_ANY);
+    return g_rowbuf;
+}
+
 static void live_free(int cl)
 {
     struct LiveState *ls = g_live[cl];
@@ -5001,9 +5025,10 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
          * in fast RAM: a loop that read the card's memory and fast RAM
          * by turns took 200 ms a frame on the A1200, a bulk copy and a
          * fast-RAM loop a fraction of that (measured). */
-        static ULONG rowbuf[LIVE_RECT_MAX / 4];   /* longword aligned */
-        lock = __LockBitMapTagList_base(g_cgfx, sc->RastPort.BitMap, tags);
-        if (lock && base && w * 4 <= sizeof(rowbuf)) {
+        ULONG *rowbuf = live_rowbuf();      /* longword aligned */
+        lock = rowbuf ? __LockBitMapTagList_base(g_cgfx, sc->RastPort.BitMap,
+                                                 tags) : NULL;
+        if (lock && base && w * 4 <= LIVE_RECT_MAX) {
             ULONG pbytes = (pf == PIXFMT_ARGB32 || pf == PIXFMT_BGRA32 ||
                             pf == PIXFMT_RGBA32) ? 4 :
                            (pf == PIXFMT_RGB16 || pf == PIXFMT_RGB16PC) ? 2 : 0;
@@ -6777,6 +6802,12 @@ out:
      * costs the operator their afternoon and their trust in the log.
      */
     stuck = patches_stuck();
+    if (!stuck)
+        patches_free();
+    if (g_rowbuf)
+        FreeMem(g_rowbuf, LIVE_RECT_MAX);
+    if (g_rx_items)
+        FreeMem(g_rx_items, sizeof(struct UiItem) * RX_MAX_ITEMS);
     if (stuck) {
         char w[200];
         LONG n = sprintf(w, "[wasabi: WARNING - a SetFunction patch could "

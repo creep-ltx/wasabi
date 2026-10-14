@@ -5,7 +5,9 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 **Remote control for a real Amiga** - from a Linux, macOS or Windows PC, a phone,
-an Amiga script, or an AI assistant.
+an Amiga script, or an AI assistant. Any Amiga with AmigaOS 2.04 or later
+and a network: from a 68000 A600 on Workbench 2.05 to a PiStorm A1200 on
+OS 3.2.
 
 Wasabi is two programs: **`wasabid`**, a small daemon on the Amiga, and
 **`wasabi`**, a client on the PC (one Python file, standard library
@@ -148,6 +150,8 @@ app (it opens in your browser), the phone server and the MCP server
    SetEnv SAVE wasabi.key choose-a-key
    Run >NIL: C:wasabid
    ```
+   On OS 2.x, `SetEnv` has no `SAVE`: use `SetEnv wasabi.key choose-a-key`
+   and `Copy ENV:wasabi.key ENVARC:` instead.
 2. **On the PC** - rename the download to `wasabi` (`wasabi.exe` on
    Windows), make it executable on Linux and Mac (`chmod +x`), put it
    on your path, and give it the key.
@@ -184,7 +188,8 @@ wasabi update wasabid                replace the daemon, checked first
 
 | | |
 |---|---|
-| **Amiga** | AmigaOS 2.04 or later and a TCP/IP stack with `bsdsocket.library`. AmiSSL 5 only for encryption; MUI only to read MUI windows; list rows in GadTools windows need OS 3. |
+| **Amiga** | AmigaOS 2.04 or later (2.05 and 3.2 tested), any 68000 or better, and a TCP/IP stack with `bsdsocket.library`. AmiSSL 5 only for encryption; MUI only to read MUI windows; list rows in GadTools windows need OS 3. |
+| **Memory** | about 350 KB for the daemon; AmiSSL adds about 3.5 MB when encryption is on. A screenshot, the live view and the DOS call trace borrow more while they run. |
 | **PC** | Linux, macOS or Windows - the one-file downloads need nothing else; the script needs Python 3. OpenSSL 3 to make encryption keys. |
 | **Phone app** | any Docker host on the Amiga's network ([`tools/docker-compose.yml`](tools/docker-compose.yml)). |
 | **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030, as a stock 68020, and as a stock A600 (68000, Workbench 2.05). 271 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
