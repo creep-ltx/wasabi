@@ -29,6 +29,7 @@ import socket
 import ssl
 import socketserver
 import struct
+import zlib
 import subprocess
 import sys
 import threading
@@ -53,6 +54,7 @@ QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
 KEYIN, WINDOWS, HEALTH, LIVE, CLIP = 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
 MOUSE = 0x4A
 UI, UIACT, AREXX, PORTS = 0x53, 0x54, 0x55, 0x56
+SUM = 0x57
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -66,7 +68,7 @@ BANNER = None
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
         "hb,guru,snoopentry,psfree,key,windows,health,live,clip,detach,"
-        "slots,ui,arexx,mouse")
+        "slots,ui,arexx,mouse,sum")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -299,6 +301,8 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_arexx(payload)
         elif tag == PORTS:
             self.send_data(b"REXX\nWORKBENCH\nAREXX\n")
+        elif tag == SUM:
+            self.do_sum(payload)
         elif tag == HEALTH:
             self.do_health()
         elif tag == LIVE:
@@ -730,6 +734,22 @@ class Handler(socketserver.BaseRequestHandler):
             for x in range(w):
                 px += bytes(((x * 32) % 256, (y * 64) % 256, 128))
         self.send_data(struct.pack(">III", w, h, 3) + bytes(px))
+
+    def do_sum(self, payload):
+        """SUM: logs the region it was asked for (the screen's own
+        pixels) to ui.log; the "screen" it sums is the file mock-screen
+        in ROOT, so a test changes the screen by writing that file."""
+        x, y, w, h = struct.unpack(">hhhh", payload[:8])
+        self.log_ui("sum %d %d %d %d" % (x, y, w, h))
+        if w <= 0 or h <= 0:
+            x, y, w, h = 0, 0, 640, 256
+        try:
+            with open(os.path.join(ROOT, "mock-screen"), "rb") as f:
+                screen = f.read()
+        except OSError:
+            screen = b""
+        total = zlib.crc32(struct.pack(">hhhh", x, y, w, h) + screen)
+        self.send_data(struct.pack(">II", total, w * h))
 
     def do_ps(self, payload):
         # Bit 0 of the flags word asks for the headroom column. An older

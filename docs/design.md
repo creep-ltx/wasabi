@@ -28,6 +28,8 @@
 | `wasabid.020` | **working on the real A1200 (it runs that build) and in FS-UAE as a stock A1200** (68EC020, 8 MB) — the same daemon built for 68020+; `make both` |
 | one-file clients | **0.9, built and smoke-tested by GitHub Actions** on Linux (x86-64, ARM64), macOS (ARM, Intel) and Windows; the Linux one also against the real A1200 |
 | `--native` coordinates, `grab --region`, `mouse where`, more keys | **working on the real A1200** (pointer read back exactly, region grab) and in the client tests (261) |
+| `sum`, `wait change/still` by checksum | **0.10b1: the real A1200's RTG screen** (whole 1280x960 in 0.19 s, stable) **and an emulated A600** (whole 640x256 in 0.8 s from the bitplanes; a grab takes 5.8 s) |
+| AmigaOS 2.04+ | **0.10b1, FS-UAE as a stock A600 with Workbench 2.05** — files, run, windows, grab, sum, keys (å/ä/ö), ui including the About requester's OK; GadTools list rows need OS 3 |
 | `WASABI` ARexx port | **working on the real A1200 (answers there); every command tested in FS-UAE** — Amiga programs and scripts type, press keys, click, click gadgets by name and pick menus through it |
 | MCP server (`wasabi_mcp.py`) | **working** (tested in FS-UAE; registered for every Claude Code session on the author's PC) — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
@@ -268,6 +270,14 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 ```
 
 ## What's next
+
+**0.10 (betas)**: `wasabi sum` and the `amiga_region_changed`,
+`amiga_slots` and `amiga_break` MCP tools; `wait change/still` no
+longer grab the screen; wasabid runs on OS 2.04+ (it called four
+graphics.library 39 functions unguarded - `windows` on Workbench 2.05
+took the daemon down; tested on an emulated stock A600). `ui` also reads
+gadgets inside requesters, where OS 2.x's system requesters keep their
+buttons.
 
 **0.9 is the fourth non-beta build**: ready-made clients for Linux,
 macOS and Windows, list rows, transfers that do not block, a 68020

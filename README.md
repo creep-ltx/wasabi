@@ -41,7 +41,8 @@ and its DOS calls, live, while your code runs on real hardware.
 | **Mouse** | click, double-click, drag, drive menus, the wheel; ask where the pointer is |
 | **Keyboard** | type text through the Amiga's own keymap (å, ä, ö, @ come out right); any key by name - F1-F12, Home, End, Page Up/Down, the keypad - or by raw code |
 | **Windows and screens** | every screen and window as text: title, place, size, owner; bring one to the front |
-| **Wait** | for a window, a task or a file to appear or go, or for the screen to change or settle |
+| **Wait** | for a window, a task or a file to appear or go, or for the screen (a window, a region) to change or settle |
+| **Has it changed?** | a checksum of the screen, a window or a region, worked out on the Amiga - eight bytes instead of a picture |
 | **Coordinates** | the picture's pixels, or with `--native` the screen's own |
 
 [More: The screen and the GUI](docs/screen-and-gui.md)
@@ -96,10 +97,10 @@ $ wasabi ui menu "Project/Quit"
 
 - **For scripts** - `--json` on everything that lists, clear exit codes,
   time limits, `wait` instead of sleeping.
-- **MCP server** (`wasabi mcp`) - 23 tools for Claude Code, Claude
+- **MCP server** (`wasabi mcp`) - 26 tools for Claude Code, Claude
   Desktop, Codex, Gemini CLI, Cursor and other MCP clients: run, files,
-  screenshots, mouse, keyboard, gadgets and menus by name, ARexx,
-  waiting.
+  screenshots, "has this changed?" checksums, mouse, keyboard, gadgets
+  and menus by name, ARexx, waiting, running commands and stopping them.
 
 [More: Scripts and AI](docs/scripting-and-ai.md)
 
@@ -168,6 +169,7 @@ wasabi info / health                 what runs there; the Pi's vital signs
 wasabi put LOCAL REMOTE / get        files both ways
 wasabi run --max-time 30 "CMD"       run, stream its output, its exit code
 wasabi grab [--window T|--region X,Y,W,H]   a screenshot (PNG)
+wasabi sum [--window T] [--since SUM]        has it changed? (no picture)
 wasabi view / desktop                the live screen / the whole app
 wasabi ui list | click NAME | menu PATH | set NAME TEXT
                                      buttons, menus, fields, list rows
@@ -182,10 +184,10 @@ wasabi update wasabid                replace the daemon, checked first
 
 | | |
 |---|---|
-| **Amiga** | AmigaOS 3.x and a TCP/IP stack with `bsdsocket.library`. AmiSSL 5 only for encryption; MUI only to read MUI windows. |
+| **Amiga** | AmigaOS 2.04 or later and a TCP/IP stack with `bsdsocket.library`. AmiSSL 5 only for encryption; MUI only to read MUI windows; list rows in GadTools windows need OS 3. |
 | **PC** | Linux, macOS or Windows - the one-file downloads need nothing else; the script needs Python 3. OpenSSL 3 to make encryption keys. |
 | **Phone app** | any Docker host on the Amiga's network ([`tools/docker-compose.yml`](tools/docker-compose.yml)). |
-| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030 and as a stock 68020. 261 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
+| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030, as a stock 68020, and as a stock A600 (68000, Workbench 2.05). 271 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
 
 ## Documentation
 

@@ -72,7 +72,9 @@ Amiga as tools — `amiga_run`, `amiga_read_file`, `amiga_write_file`,
 `amiga_screenshot`, `amiga_ui_list`, `amiga_ui_click`, `amiga_ui_set`,
 `amiga_ui_menu`, `amiga_mouse`, `amiga_drag`, `amiga_pointer`,
 `amiga_screens`, `amiga_wait`, `amiga_key_type`, `amiga_key_press`,
-`amiga_arexx` and more - 23 in all
+`amiga_arexx`, `amiga_region_changed` (a checksum from the Amiga
+instead of a screenshot), `amiga_slots` and `amiga_break` (list and stop
+running commands) and more - 26 in all
 — to any MCP client: Claude Desktop, Codex CLI, Gemini CLI, Cursor,
 Zed, LM Studio. Every tool runs the `wasabi` command, so discovery, the
 key and the system-place protection are the same as on the command line.

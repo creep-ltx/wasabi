@@ -140,6 +140,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x54 | UIACT    | C→S | `u32 op`, `u32 window`, `u32 arg` |
 | 0x55 | AREXX    | C→S | `u32 timeout`, `str port`, `str command` |
 | 0x56 | PORTS    | C→S | (empty) |
+| 0x57 | SUM      | C→S | `i16 x`, `i16 y`, `i16 w`, `i16 h` (0x0: the whole screen) |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -844,6 +845,19 @@ so a late reply writes into nothing that was freed.
 
 One name per line in `DATA` frames, then `END`. ARexx ports are public
 ports, so this is the list of what `AREXX` can talk to (and more).
+
+### SUM — a checksum of part of the front screen (capability `sum`)
+
+The region is in the screen's own pixels (the client undoes the
+picture's row doubling) and is clipped to the screen; `w` or `h` of 0
+means the whole screen. Answer: one `DATA` with `u32 sum`, `u32 pixels
+summed`, then `END`; `ERR` when the region is off the screen.
+
+The sum is only for comparing with another sum of the same region on the
+same screen: a deep screen is read with `ReadPixelArray` and folded with
+FNV-1a; a native screen sums its palette and then its bitplanes directly
+(rotate-and-xor, bits outside the region masked off), falling back to
+`ReadPixelArray8` pens when the planes are not in chip RAM.
 
 ### LIVE — the front screen for a live view: only what changed
 

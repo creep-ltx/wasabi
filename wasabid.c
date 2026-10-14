@@ -60,10 +60,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.9"
+#define VERSION_STR "wasabid 0.10b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.9 (15.10.2026)";
+    "$VER: wasabid 0.10b1 (15.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -85,7 +85,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport,plainopt,pointer"
+                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport,plainopt,pointer,sum"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -144,6 +144,7 @@ typedef char welcome_fits_its_buffer[
 #define T_UIACT   0x54   /* pick a menu item; bring a window to front */
 #define T_AREXX   0x55   /* send a command to an ARexx port */
 #define T_PORTS   0x56   /* list the public message ports */
+#define T_SUM     0x57   /* a checksum of a screen region */
 
 struct Library *SocketBase;
 /*
@@ -2302,6 +2303,55 @@ static void win_clean(char *s)
             *s = ' ';
 }
 
+/*
+ * OS 2.x has none of graphics.library 39's bitmap and colour calls;
+ * calling one there jumps through a missing vector and takes the
+ * machine down. These stand in for them.
+ */
+static BOOL gfx39(void)
+{
+    return GfxBase->LibNode.lib_Version >= 39;
+}
+
+static LONG bm_depth(struct BitMap *bm)
+{
+    return gfx39() ? (LONG)GetBitMapAttr(bm, BMA_DEPTH) : (LONG)bm->Depth;
+}
+
+/* GetRGB32's table (three 32-bit components a colour), from the 12-bit
+ * colours GetRGB4 gives on OS 2.x. */
+static void get_rgb32(struct ColorMap *cm, ULONG n, ULONG *table)
+{
+    ULONG i;
+    if (gfx39()) {
+        GetRGB32(cm, 0, n, table);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        ULONG c = (ULONG)GetRGB4(cm, (LONG)i);
+        table[i * 3]     = ((c >> 8) & 15) * 0x11111111UL;
+        table[i * 3 + 1] = ((c >> 4) & 15) * 0x11111111UL;
+        table[i * 3 + 2] = (c & 15) * 0x11111111UL;
+    }
+}
+
+static void scratch_free(struct BitMap *bm)
+{
+    LONG i;
+    if (!bm)
+        return;
+    if (gfx39()) {
+        FreeBitMap(bm);
+        return;
+    }
+    for (i = 0; i < bm->Depth; i++)
+        if (bm->Planes[i])
+            FreeRaster(bm->Planes[i], (UWORD)(bm->BytesPerRow * 8), 1);
+    FreeMem(bm, sizeof(*bm));
+}
+
+static struct BitMap *scratch_row(struct Screen *sc, LONG aligned);
+
 static BOOL cmd_windows(int fd)
 {
     struct Screen *sc;
@@ -2327,7 +2377,7 @@ static BOOL cmd_windows(int fd)
                         (unsigned long)sc, (long)sc->LeftEdge,
                         (long)sc->TopEdge, (long)sc->Width,
                         (long)sc->Height,
-                        (long)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH),
+                        (long)bm_depth(sc->RastPort.BitMap),
                         title, (long)sc->MouseX, (long)sc->MouseY);
         for (w = sc->FirstWindow; w; w = w->NextWindow) {
             char flags[3];
@@ -3256,6 +3306,34 @@ static BOOL ui_items(struct Window *w, BOOL deep, UiSink sink, void *ctx)
                 return FALSE;
         }
     }
+    /* Requesters in the window: OS 2.x's EasyRequest keeps its buttons
+     * here, not among the window's gadgets. A requester gadget's place
+     * is relative to the requester, which sits where its layer is. */
+    {
+        struct Requester *r;
+        int rk = 0;
+        for (r = w->FirstRequest; r && rk < 8; r = r->OlderRequest, rk++) {
+            LONG rx = r->LeftEdge, ry = r->TopEdge;
+            if (r->ReqLayer) {
+                rx = r->ReqLayer->bounds.MinX - w->LeftEdge;
+                ry = r->ReqLayer->bounds.MinY - w->TopEdge;
+            }
+            for (g = r->ReqGadget; g && k < 400; g = g->NextGadget, k++) {
+                if (!ui_gadget_item(w, g, &it))
+                    continue;
+                it.x = rx + ((g->Flags & GFLG_RELRIGHT) ?
+                             r->Width + g->LeftEdge - 1 : g->LeftEdge);
+                it.y = ry + ((g->Flags & GFLG_RELBOTTOM) ?
+                             r->Height + g->TopEdge - 1 : g->TopEdge);
+                it.w = (g->Flags & GFLG_RELWIDTH) ? r->Width + g->Width
+                                                  : g->Width;
+                it.h = (g->Flags & GFLG_RELHEIGHT) ? r->Height + g->Height
+                                                   : g->Height;
+                if (it.w > 0 && it.h > 0 && !sink(&it, ctx))
+                    return FALSE;
+            }
+        }
+    }
     (void)deep;
     if (ui_mui_marked(w)) {
         Object *mo = ui_mui_window(w), *root = NULL;
@@ -3350,7 +3428,7 @@ static BOOL cmd_ui(int fd, ULONG flags)
                         (unsigned long)sc, (long)sc->LeftEdge,
                         (long)sc->TopEdge, (long)sc->Width,
                         (long)sc->Height,
-                        (long)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH),
+                        (long)bm_depth(sc->RastPort.BitMap),
                         title, (long)sc->MouseX, (long)sc->MouseY);
         for (w = sc->FirstWindow; w && !full; w = w->NextWindow) {
             char fl[3];
@@ -4483,10 +4561,23 @@ static BOOL screen_send_deep(int fd, struct Screen *sc, ULONG w, ULONG h)
  */
 static struct BitMap *scratch_row(struct Screen *sc, LONG aligned)
 {
-    ULONG depth = GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH);
+    ULONG depth = bm_depth(sc->RastPort.BitMap);
+    struct BitMap *bm;
+    LONG i;
     if (depth < 1 || depth > 8)
         depth = 8;
-    return AllocBitMap(aligned, 1, depth, BMF_CLEAR, NULL);
+    if (gfx39())
+        return AllocBitMap(aligned, 1, depth, BMF_CLEAR, NULL);
+    /* OS 2.x: no AllocBitMap - build one row by hand, in chip RAM. */
+    if (!(bm = AllocMem(sizeof(*bm), MEMF_CLEAR)))
+        return NULL;
+    InitBitMap(bm, (BYTE)depth, (UWORD)aligned, 1);
+    for (i = 0; i < (LONG)depth; i++)
+        if (!(bm->Planes[i] = (PLANEPTR)AllocRaster(aligned, 1))) {
+            scratch_free(bm);
+            return NULL;
+        }
+    return bm;
 }
 
 static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
@@ -4520,12 +4611,12 @@ static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
     if (!pens || !rgb) {
         if (pens) FreeMem(pens, aligned * band);
         if (rgb)  FreeMem(rgb, rowbytes * band);
-        FreeBitMap(temprp.BitMap);
+        scratch_free(temprp.BitMap);
         return send_perr(fd, "out of memory for the grab buffer");
     }
 
     /* GetRGB32 hands back 32-bit components; we want the top byte. */
-    GetRGB32(sc->ViewPort.ColorMap, 0, (ULONG)ncol, pal);
+    get_rgb32(sc->ViewPort.ColorMap, (ULONG)ncol, pal);
 
     for (y = 0; ok && y < (LONG)h; y += band) {
         LONG n = (y + band > (LONG)h) ? ((LONG)h - y) : band;
@@ -4548,7 +4639,7 @@ static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
     }
     FreeMem(pens, aligned * band);
     FreeMem(rgb, rowbytes * band);
-    FreeBitMap(temprp.BitMap);
+    scratch_free(temprp.BitMap);
     return ok;
 }
 
@@ -4814,7 +4905,7 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
         return send_perr(fd, "there are no screens open");
     w = (ULONG)sc->Width;
     h = (ULONG)sc->Height;
-    depth = (LONG)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH);
+    depth = bm_depth(sc->RastPort.BitMap);
     fmt = depth > 8 ? LIVE_RGB565 : LIVE_PEN8;
     bpp = fmt == LIVE_RGB565 ? 2 : 1;
     if (!w || !h || (LONG)w * 4 > LIVE_RECT_MAX)
@@ -4875,7 +4966,7 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
         static ULONG rgb32[256 * 3];
         LONG ncol = 1L << depth, changed = full;
         if (ncol > 256) ncol = 256;
-        GetRGB32(sc->ViewPort.ColorMap, 0, (ULONG)ncol, rgb32);
+        get_rgb32(sc->ViewPort.ColorMap, (ULONG)ncol, rgb32);
         for (i = 0; i < ncol; i++) {
             ULONG c = ((rgb32[i * 3] >> 24) << 16) |
                       ((rgb32[i * 3 + 1] >> 24) << 8) |
@@ -5063,7 +5154,7 @@ done:
     if (src) FreeMem(src, srcsize);
     FreeMem(out, LIVE_RECT_MAX + 16);
     if (temprp.BitMap)
-        FreeBitMap(temprp.BitMap);
+        scratch_free(temprp.BitMap);
     if (!ok) {
         live_free(cl);                   /* half-sent: start over next time */
         /* out of memory: say so in END's place; a failed send has
@@ -5094,7 +5185,7 @@ static BOOL cmd_screenctl(int fd, ULONG flags, const char *want)
 
     ib = LockIBase(0);
     for (sc = IntuitionBase->FirstScreen; sc; sc = sc->NextScreen) {
-        LONG depth = (LONG)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH);
+        LONG depth = bm_depth(sc->RastPort.BitMap);
         const char *title = sc->Title ? (const char *)sc->Title : "";
         if (!front)
             front = sc;
@@ -5121,6 +5212,146 @@ static BOOL cmd_screenctl(int fd, ULONG flags, const char *want)
         return send_perr(fd, "no screen with that title");
 
     return send_frame(fd, T_END, NULL, 0);
+}
+
+/*
+ * SUM: "has this part of the screen changed?" without sending it. The
+ * region (front screen, its own pixels; 0x0 means all of it) is read
+ * the way GRAB reads it - ReadPixelArray for a deep screen, pens and the
+ * palette for a planar one - and folded into a 32-bit FNV-1a sum. Four
+ * bytes cross the wire instead of the picture, which is what a slow
+ * Amiga or a slow link wants from a "has it finished drawing?" poll.
+ * Answer: DATA = u32 sum, u32 pixels summed; END.
+ */
+#define FNV_PRIME 16777619UL
+
+static ULONG fnv(ULONG h, const UBYTE *p, LONG n)
+{
+    while (n-- > 0)
+        h = (h ^ *p++) * FNV_PRIME;
+    return h;
+}
+
+/*
+ * A native screen's bitplanes, summed where they lie: no conversion to
+ * pens, so a whole 640x256 screen takes a fraction of a second on a
+ * 7 MHz 68000 instead of five. Only for bitplanes in chip RAM - an RTG
+ * card's bitmap only looks like one. Bits just outside the region in
+ * its first and last byte are masked off. A cheap rotate-and-xor, as a
+ * 68000 has no 32-bit multiply.
+ */
+static BOOL plane_sum(struct BitMap *bm, LONG depth, LONG x, LONG y,
+                      LONG w, LONG h, ULONG *sum)
+{
+    LONG p, row, b, bx0 = x >> 3, bx1 = (x + w - 1) >> 3;
+    UBYTE m0 = (UBYTE)(0xff >> (x & 7));
+    UBYTE m1 = (UBYTE)(0xff << (7 - ((x + w - 1) & 7)));
+    ULONG hs = *sum;
+
+    for (p = 0; p < depth; p++)
+        if (!bm->Planes[p] || !(TypeOfMem(bm->Planes[p]) & MEMF_CHIP))
+            return FALSE;
+    for (p = 0; p < depth; p++) {
+        for (row = y; row < y + h; row++) {
+            const UBYTE *r = (const UBYTE *)bm->Planes[p]
+                             + row * bm->BytesPerRow;
+            for (b = bx0; b <= bx1; b++) {
+                UBYTE v = r[b];
+                if (b == bx0) v &= m0;
+                if (b == bx1) v &= m1;
+                hs = ((hs << 5) | (hs >> 27)) ^ v;
+            }
+        }
+    }
+    *sum = hs;
+    return TRUE;
+}
+
+static BOOL cmd_sum(int fd, LONG x, LONG y, LONG w, LONG h)
+{
+    struct Screen *sc;
+    ULONG sum = 2166136261UL, ib;
+    LONG depth, band, row;
+    UBYTE out[8];
+    BOOL ok = TRUE;
+
+    ib = LockIBase(0);
+    sc = IntuitionBase->FirstScreen;
+    UnlockIBase(ib);
+    if (!sc)
+        return send_perr(fd, "there are no screens open");
+    if (w <= 0 || h <= 0) {
+        x = y = 0;
+        w = sc->Width;
+        h = sc->Height;
+    }
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > sc->Width) w = sc->Width - x;
+    if (y + h > sc->Height) h = sc->Height - y;
+    if (w <= 0 || h <= 0 || w * 3 > MAX_PAYLOAD)
+        return send_perr(fd, "that region is not on the screen");
+    depth = bm_depth(sc->RastPort.BitMap);
+
+    if (depth > 8) {
+        LONG rowbytes = w * 3;
+        UBYTE *buf;
+        if (!g_cgfx)
+            g_cgfx = OpenLibrary("cybergraphics.library", 40);
+        if (!g_cgfx)
+            return send_perr(fd, "no cybergraphics.library to read a deep "
+                                 "screen with");
+        band = MAX_PAYLOAD / rowbytes;
+        if (band < 1) band = 1;
+        if (!(buf = AllocMem(band * rowbytes, MEMF_ANY)))
+            return send_perr(fd, "out of memory");
+        for (row = 0; row < h; row += band) {
+            LONG n = row + band > h ? h - row : band;
+            __ReadPixelArray_base(g_cgfx, buf, 0, 0, (UWORD)rowbytes,
+                                  &sc->RastPort, (UWORD)x, (UWORD)(y + row),
+                                  (UWORD)w, (UWORD)n, RECTFMT_RGB);
+            sum = fnv(sum, buf, n * rowbytes);
+        }
+        FreeMem(buf, band * rowbytes);
+    } else {
+        /* Pens, plus the palette they mean: a palette change is a
+         * change on screen too. */
+        static ULONG pal[256 * 3];
+        struct RastPort temprp;
+        LONG aligned = SCREEN_ALIGN(w), ncol = 1L << depth, r;
+        UBYTE *pens;
+        if (ncol > 256) ncol = 256;
+        get_rgb32(sc->ViewPort.ColorMap, (ULONG)ncol, pal);
+        sum = fnv(sum, (UBYTE *)pal, ncol * 12);
+        if (plane_sum(sc->RastPort.BitMap, depth, x, y, w, h, &sum))
+            goto done;
+        band = MAX_PAYLOAD / aligned;
+        if (band < 1) band = 1;
+        temprp = sc->RastPort;
+        temprp.Layer = NULL;
+        temprp.BitMap = scratch_row(sc, aligned);
+        if (!temprp.BitMap)
+            return send_perr(fd, "out of memory for the scratch bitmap");
+        if (!(pens = AllocMem(aligned * band, MEMF_ANY))) {
+            scratch_free(temprp.BitMap);
+            return send_perr(fd, "out of memory");
+        }
+        for (row = 0; row < h; row += band) {
+            LONG n = row + band > h ? h - row : band;
+            ReadPixelArray8(&sc->RastPort, (ULONG)x, (ULONG)(y + row),
+                            (ULONG)(x + w - 1), (ULONG)(y + row + n - 1),
+                            pens, &temprp);
+            for (r = 0; r < n; r++)      /* only the region's columns */
+                sum = fnv(sum, pens + r * aligned, w);
+        }
+        FreeMem(pens, aligned * band);
+        scratch_free(temprp.BitMap);
+    }
+done:
+    put_be32(out, sum);
+    put_be32(out + 4, (ULONG)(w * h));
+    ok = send_frame(fd, T_DATA, out, 8);
+    return ok && send_frame(fd, T_END, NULL, 0);
 }
 
 static BOOL cmd_grab(int fd, const char *scrname)
@@ -5157,7 +5388,7 @@ static BOOL cmd_grab(int fd, const char *scrname)
 
     w = (ULONG)sc->Width;
     h = (ULONG)sc->Height;
-    depth = (LONG)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH);
+    depth = bm_depth(sc->RastPort.BitMap);
     if (!w || !h || (LONG)w * 3 > MAX_PAYLOAD) {
         if (haslock) UnlockPubScreen(NULL, sc);
         return send_perr(fd, "that screen is too wide to send a row at a time");
@@ -5811,6 +6042,12 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
 
     case T_PORTS:
         return cmd_ports(fd);
+
+    case T_SUM:
+        if (len < 8)
+            return send_perr(fd, "bad SUM header");
+        return cmd_sum(fd, (WORD)get_be16(p), (WORD)get_be16(p + 2),
+                       (WORD)get_be16(p + 4), (WORD)get_be16(p + 6));
 
     case T_CLIP:
         if (len < 4)

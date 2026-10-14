@@ -119,6 +119,32 @@ entirely client-side and the wire is unchanged. A baseline of a different
 size, or a PNG outside the 8-bit RGB subset this client writes, is
 refused rather than diffed against whatever happens to line up.
 
+### Has it changed? A checksum instead of a picture
+
+`wasabi sum` asks the Amiga for a checksum of the screen, a window or a
+rectangle. Only eight bytes come back, whatever the size, so it is the
+cheap way to ask "has this finished drawing?":
+
+```
+$ wasabi sum --window "Prefs"
+1a2b3c4d
+$ wasabi sum --window "Prefs" --since 1a2b3c4d     # exit 1: unchanged
+```
+
+`wait change` and `wait still` use it when the daemon has it (0.10 and
+later), so they no longer send the whole screen on every look; both take
+`--region X,Y,W,H` as well as a window title. On a native screen the
+Amiga sums the bitplanes where they lie, which keeps it quick on a
+68000:
+
+| | whole screen | a 400x80 window |
+|---|---|---|
+| A600, 7 MHz 68000, 640x256 (FS-UAE) | 0.8 s (a grab: 5.8 s) | 0.3 s |
+| A1200, PiStorm/Emu68, 1280x960 RTG | 0.19 s (a grab: 0.5 s) | - |
+
+A palette change counts as a change. The rectangle is in the picture's
+pixels, like everything else (`--native` for the screen's own).
+
 ### Coordinates
 
 A native 640x256 screen has pixels twice as tall as they are wide, so

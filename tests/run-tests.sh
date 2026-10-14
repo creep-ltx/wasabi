@@ -621,6 +621,39 @@ check "grab --region crops to the rectangle" "4x2" "$out"
 out=$($W key press nosuchkey 2>&1 | grep -c "unknown key")
 check "an unknown key name is refused here" "1" "$out"
 
+# --- sum: a checksum worked out on the Amiga (wasabid 0.10) ---
+rm -f "$ROOT/ui.log" "$ROOT/mock-screen"
+$W sum --region 0,40,320,80 >/dev/null 2>&1
+out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "sum --region: the picture's rows halved for a 640x256 screen" "sum 0 20 320 40" "$out"
+$W --native sum --region 0,40,320,80 >/dev/null 2>&1
+out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "and with --native, as given" "sum 0 40 320 80" "$out"
+$W sum --window amigashell >/dev/null 2>&1
+out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "sum --window: the window's own rectangle" "sum 100 100 640 200" "$out"
+s1=$($W sum 2>/dev/null)
+$W sum --since "$s1" >/dev/null 2>&1
+check "sum --since: exit 1 when nothing changed" "1" "$?"
+echo drawn > "$ROOT/mock-screen"
+out=$($W --json sum --since "$s1" 2>/dev/null | grep -c '"changed": true')
+check "and says changed when the screen did" "1" "$out"
+rm -f "$ROOT/mock-screen" "$ROOT/ui.log"
+# change the screen only once the client has taken its first look
+( for i in $(seq 1 100); do grep -q sum "$ROOT/ui.log" 2>/dev/null && break; sleep 0.1; done
+  echo drawn > "$ROOT/mock-screen" ) &
+DRAW_PID=$!
+$W wait change --timeout 5 >/dev/null 2>&1
+check "wait change sees the checksum change" "0" "$?"
+wait $DRAW_PID
+out=$($W wait still --quiet 0.5 --timeout 5 2>&1 | grep -c "settled")
+check "wait still settles on an unchanging checksum" "1" "$out"
+rm -f "$ROOT/mock-screen" "$ROOT/ui.log"
+$W wait change --region 0,40,320,80 --timeout 0.3 >/dev/null 2>&1
+check "wait change --region times out when nothing changes" "124" "$?"
+out=$(grep -c "sum 0 20 320 40" "$ROOT/ui.log" 2>/dev/null)
+[ "${out:-0}" -ge 2 ] && ok "and it watched only that rectangle" || no "and it watched only that rectangle"
+
 # The mock's screen is 640x256, which grab shows with its rows doubled -
 # so the window list doubles y and height to match the picture.
 out=$($W windows 2>/dev/null | grep -c 'window "AmigaShell"  at 100,200  640x400  task -  \[active\]')
@@ -693,6 +726,16 @@ print(r[0]["result"]["serverInfo"]["name"], len(r[1]["result"]["tools"]) > 15,
       r[2]["result"]["content"][0]["text"], r[3]["result"]["isError"])')
 check "the MCP server lists tools, calls them, reports errors" \
       "wasabi True 47.42 True" "$out"
+out=$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"amiga_region_changed","arguments":{"region":{"x":0,"y":0,"width":64,"height":64}}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"amiga_slots","arguments":{}}}' \
+  | WASABI_HOST=127.0.0.1 WASABI_PORT=$PORT WASABI_KEY=$KEY python3 wasabi_mcp.py \
+  | python3 -c 'import sys, json
+r = [json.loads(l) for l in sys.stdin]
+print(r[1]["result"]["content"][0]["text"].split(" - ")[0], "|",
+      r[2]["result"]["content"][0]["text"].split("\n")[0][:5])')
+check "MCP: amiga_region_changed and amiga_slots answer" "first look | all r" "$out"
 
 # --- TLS (wasabid 0.6) ---
 out=$(ls "$XDG_CONFIG_HOME/wasabi/keys" | tr '\n' ' ')

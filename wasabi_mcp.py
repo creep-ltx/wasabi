@@ -205,6 +205,12 @@ def t_wait(a):
         if not a.get("name"):
             raise ToolError("wait %s needs a name" % what)
         args.append(a["name"])
+    elif a.get("name"):                  # change/still: one window
+        args.append(a["name"])
+    if a.get("region") and what in ("change", "still"):
+        r = a["region"]
+        args += ["--region", "%d,%d,%d,%d" % (r["x"], r["y"], r["width"],
+                                              r["height"])]
     if a.get("gone"):
         args.append("--gone")
     args += ["--timeout", a.get("timeout", 30)]
@@ -254,9 +260,69 @@ def t_kill(a):
     return text(ok(*args))
 
 
+def region_args(a):
+    """--window / --region from a tool's arguments."""
+    args = []
+    if a.get("window"):
+        args += ["--window", a["window"]]
+    if a.get("region"):
+        r = a["region"]
+        args += ["--region", "%d,%d,%d,%d" % (r["x"], r["y"], r["width"],
+                                              r["height"])]
+    return args
+
+
+def t_region_changed(a):
+    args = ["--json", "sum"] + region_args(a)
+    if a.get("since"):
+        args += ["--since", a["since"]]
+    rc, out, err = wasabi(*args)
+    try:
+        r = json.loads(out)
+    except ValueError:
+        raise ToolError((err or out).strip() or "sum failed")
+    if "changed" in r:
+        head = "changed" if r["changed"] else "unchanged"
+    else:
+        head = "first look"
+    return text("%s - checksum %s (%d pixels); pass it as 'since' next time"
+                % (head, r["sum"], r["pixels"]))
+
+
+def t_slots(a):
+    rc, out, err = wasabi("--json", "slots")
+    if rc != 0:
+        raise ToolError((err or out).strip() or "slots failed")
+    rows = json.loads(out or "[]")
+    if not rows:
+        return text("all run slots are free")
+    return text("\n".join(
+        "slot %d: %s for %d s%s - %s" % (r["slot"], r["state"], r["seconds"],
+                                         ", output read" if r["attached"]
+                                         else "", r["command"])
+        for r in rows))
+
+
+def t_break(a):
+    args = ["free", int(a["slot"])]
+    if a.get("ctrl_c_only"):
+        args.append("--ctrl-c-only")
+    rc, out, err = wasabi(*args)
+    if rc != 0:
+        raise ToolError((err or out).strip() or "free failed")
+    return text(err.strip() or out.strip())
+
+
 def t_health(a):
     return text(ok("health"))
 
+
+REGION = {"type": "object", "description": "only this rectangle",
+          "properties": {"x": {"type": "number"},
+                         "y": {"type": "number"},
+                         "width": {"type": "number"},
+                         "height": {"type": "number"}},
+          "required": ["x", "y", "width", "height"]}
 
 S = lambda **p: {"type": "object", "properties": p,
                  "required": [k for k, v in p.items() if v.pop("req", False)]}
@@ -284,12 +350,7 @@ TOOLS = [
      {"type": "object", "properties": {
          "window": {"type": "string",
                     "description": "only this window (part of its title)"},
-         "region": {"type": "object", "description": "only this rectangle",
-                    "properties": {"x": {"type": "number"},
-                                   "y": {"type": "number"},
-                                   "width": {"type": "number"},
-                                   "height": {"type": "number"}},
-                    "required": ["x", "y", "width", "height"]}}}),
+         "region": REGION}}),
     ("amiga_screens", t_screens, "List the open screens, front first.", S()),
     ("amiga_pointer", t_pointer, "Where the mouse pointer is on the front "
      "screen (x y, in screenshot coordinates). No picture is sent.", S()),
@@ -308,9 +369,18 @@ TOOLS = [
      "window or task to appear (or go, with gone), a file, the screen to "
      "change or to settle (still).",
      S(what=STR("window, task, file, change or still"),
-       name=STR("the window title, task name or file path"),
+       name=STR("the window title, task name or file path; for change "
+                "and still, watch only this window"),
+       region=dict(REGION, description="change/still: watch only this "
+                   "rectangle"),
        gone=BOOL("wait for it to go instead"),
        timeout=NUM("seconds (default 30)"))),
+    ("amiga_region_changed", t_region_changed, "Has the screen, a window "
+     "or a rectangle changed? The Amiga works out a checksum and sends only "
+     "that - no picture. Call once to get a checksum, then again with it "
+     "as 'since'.",
+     S(window=STR("only this window (part of its title)"),
+       region=dict(REGION), since=STR("the checksum from an earlier call"))),
     ("amiga_windows", t_windows, "Every screen and window, front first, with "
      "positions.", S()),
     ("amiga_ui_list", t_ui_list, "The gadgets (buttons, text fields, "
@@ -357,6 +427,13 @@ TOOLS = [
        timeout=NUM("seconds to wait (default 30)"))),
     ("amiga_arexx_ports", t_arexx_ports, "List the public message ports, "
      "which include every ARexx port.", S()),
+    ("amiga_slots", t_slots, "What amiga_run commands are running now, "
+     "in which slot and for how long (four slots).", S()),
+    ("amiga_break", t_break, "Stop a running command by its slot from "
+     "amiga_slots: Ctrl-C, and if it will not stop in three seconds, let "
+     "go of the slot.",
+     S(slot=NUM("slot number", True),
+       ctrl_c_only=BOOL("only send Ctrl-C, keep the slot"))),
     ("amiga_ps", t_ps, "List tasks and processes.",
      S(pattern=STR("AmigaDOS wildcard"))),
     ("amiga_kill", t_kill, "Stop a task: Ctrl-C, or with force RemTask.",

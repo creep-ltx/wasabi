@@ -49,8 +49,12 @@ wasabi health [--watch [S]]  the Pi's temperature, voltage and power
                              history, Emu68's CPU meter, free memory
 wasabi windows [--raw]       every screen and window: place, size, task
 wasabi wait window|task|file|change|still|up [NAME] [--gone]
-            [--contains TEXT] [--timeout S]
+            [--contains TEXT] [--region X,Y,W,H] [--timeout S]
                              wait for something instead of sleeping
+wasabi sum [--window TITLE | --region X,Y,W,H] [--since SUM]
+                             a checksum of the screen (or part of it),
+                             worked out on the Amiga; --since exits 1
+                             if nothing changed
 wasabi mouse where           where the pointer is (x y)
 wasabi mouse move|click|doubleclick|down|up [X Y] [--right|--middle]
                              move the pointer, click, drag, drive menus

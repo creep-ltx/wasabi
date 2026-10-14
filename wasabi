@@ -39,6 +39,7 @@ QUIT, INSTALL, GRAB, SCREEN, MOUSE = 0x46, 0x47, 0x48, 0x49, 0x4A
 KEY, WINDOWS, HEALTH, LIVE, CLIP = 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
 SLOTS, FREE, SLOT = 0x50, 0x51, 0x52
 UI, UIACT, AREXX, PORTS = 0x53, 0x54, 0x55, 0x56   # daemon 0.5+
+SUM = 0x57                       # daemon 0.10+
 FREE_BREAK_ONLY = 1
 RUN_SLOT = 4            # RUN flag: tell me which slot (daemon 0.4+)
 
@@ -1995,7 +1996,79 @@ def window_box(conn, title):
             win["top"] + win["height"])
 
 
-def screen_now(conn, box):
+def parse_region(text):
+    """'X,Y,W,H' -> (x0, y0, x1, y1)."""
+    try:
+        rx, ry, rw, rh = (int(v) for v in text.split(","))
+    except ValueError:
+        raise WasabiError("--region X,Y,W,H - four numbers, e.g. "
+                          "--region 0,0,320,40")
+    return (rx, ry, rx + rw, ry + rh)
+
+
+def front_scale(conn, native=False):
+    """The front screen's row doubling, as the picture has it; 1 for a
+    box already in the screen's own pixels (--region with --native).
+    Window boxes are always in the picture's pixels."""
+    if native:
+        return 1
+    screens, _ = list_windows(conn)
+    return screens[0]["row_scale"] if screens else 1
+
+
+def region_sum(conn, box, k=1):
+    """Ask the Amiga for a checksum of a box of the front screen (the
+    whole screen if box is None): (sum, pixels). Only four bytes come
+    back, whatever the size. box is in picture pixels; k is the front
+    screen's row doubling, undone here for the daemon."""
+    if box:
+        x0, y0, x1, y1 = box
+        hdr = struct.pack(">hhhh", x0, y0 // k, x1 - x0,
+                          max(1, (y1 - y0) // k))
+    else:
+        hdr = struct.pack(">hhhh", 0, 0, 0, 0)
+    conn.send(SUM, hdr)
+    out = []
+    drain_to_end(conn, out.append)
+    data = b"".join(out)
+    if len(data) < 8:
+        raise WasabiError("short answer to SUM")
+    return struct.unpack(">II", data[:8])
+
+
+def cmd_sum(conn, args):
+    """A checksum of the screen, a window or a region, computed on the
+    Amiga: compare two to see whether anything there changed without
+    sending a picture. Exits 1 with --since when it is unchanged."""
+    if args.region and args.window is not None:
+        raise WasabiError("--region or --window, not both")
+    box = parse_region(args.region) if args.region else \
+        window_box(conn, args.window) if args.window is not None else None
+    k = front_scale(conn, NATIVE and bool(args.region)) if box else 1
+    total, n = region_sum(conn, box, k)
+    hexsum = "%08x" % total
+    changed = None
+    if args.since is not None:
+        since = args.since.lower()
+        changed = hexsum != (since[2:] if since.startswith("0x") else since)
+    if args.json:
+        out = {"sum": hexsum, "pixels": n}
+        if changed is not None:
+            out["changed"] = changed
+        emit_json(out)
+    else:
+        print(hexsum)
+        print("%d pixels%s" % (n, "" if changed is None else
+                               ", changed" if changed else ", unchanged"),
+              file=sys.stderr)
+    return 1 if changed is False else 0
+
+
+def screen_now(conn, box, k=None):
+    """Something that differs when the screen (or box of it) does: the
+    Amiga's own checksum when it has one, else a crc of a grab."""
+    if "sum" in conn.caps:
+        return region_sum(conn, box, k or 1)
     w, _, h, pixels, _, _ = grab_pixels(conn)
     if box:
         x0, y0 = max(0, box[0]), max(0, box[1])
@@ -2018,9 +2091,16 @@ def cmd_wait(conn, args):
                           % (what, what))
     t0 = time.time()
     deadline = t0 + args.timeout
-    box = window_box(conn, target) if what in ("change", "still") \
-        and target else None
-    first = screen_now(conn, box) if what in ("change", "still") else None
+    box, k = None, None
+    if what in ("change", "still"):
+        if args.region and target:
+            raise WasabiError("a window title or --region, not both")
+        box = parse_region(args.region) if args.region else \
+            window_box(conn, target) if target else None
+        if box and "sum" in conn.caps:
+            k = front_scale(conn, NATIVE and bool(args.region))
+    first = screen_now(conn, box, k) if what in ("change", "still") \
+        else None
     last_change = time.time()
     detail = ""
 
@@ -2055,9 +2135,9 @@ def cmd_wait(conn, args):
                             (ln for ln in text.splitlines()
                              if args.contains.lower() in ln.lower()), "")
         elif what == "change":
-            met = screen_now(conn, box) != first
+            met = screen_now(conn, box, k) != first
         elif what == "still":
-            now_shot = screen_now(conn, box)
+            now_shot = screen_now(conn, box, k)
             if now_shot != first:
                 first, last_change = now_shot, time.time()
             met = time.time() - last_change >= args.quiet
@@ -3940,7 +4020,19 @@ def main(argv=None):
                    help="how often to look (default 0.5)")
     s.add_argument("--quiet", type=float, default=1.0, metavar="SECONDS",
                    help="still: how long nothing may change (default 1)")
+    s.add_argument("--region", metavar="X,Y,W,H",
+                   help="change/still: watch only this rectangle")
     s.set_defaults(fn=cmd_wait)
+
+    s = sub.add_parser("sum", help="a checksum of the screen, a window or "
+                       "a region, worked out on the Amiga")
+    s.add_argument("--window", metavar="TITLE",
+                   help="just the frontmost window whose title contains it")
+    s.add_argument("--region", metavar="X,Y,W,H",
+                   help="just this rectangle, in the picture's pixels")
+    s.add_argument("--since", metavar="SUM",
+                   help="compare with an earlier sum; exit 1 if unchanged")
+    s.set_defaults(fn=cmd_sum)
 
     for name, mode, helptext in (
             ("view", "view", "the Amiga's screen in a window, driven with "
@@ -4142,7 +4234,7 @@ def main(argv=None):
              "mouse": "mouse", "key": "key",
              "windows": "windows", "health": "health",
              "clip": "clip", "slots": "slots", "free": "slots",
-             "ui": "ui", "arexx": "arexx"}.get(args.cmd)
+             "ui": "ui", "arexx": "arexx", "sum": "sum"}.get(args.cmd)
     if args.cmd == "wait":
         needs = {"window": "windows", "change": "grab",
                  "still": "grab"}.get(args.what)
