@@ -15,10 +15,19 @@
 #include <proto/dos.h>
 #include <proto/intuition.h>
 #include <proto/gadtools.h>
+#include <clib/alib_protos.h>
 
 struct Library *GadToolsBase;
 
-enum { G_BUTTON = 1, G_TEXT, G_CHECK, G_CYCLE };
+enum { G_BUTTON = 1, G_TEXT, G_CHECK, G_CYCLE, G_LIST };
+
+static struct List rows;
+static struct Node row_nodes[12];
+static STRPTR row_names[12] = {
+    "Amiga BBS", "Boing Board", "Copper Lane", "Dragon's Den",
+    "Electric Dreams", "Fairlight Line", "Guru Meditation", "Hunk Haven",
+    "Interlace", "Jungle Juice", "Kickstart Café", "Lattice Lounge"
+};
 
 static STRPTR cycle_labels[] = { "Red", "Green", "Blue", NULL };
 
@@ -85,6 +94,29 @@ int main(void)
     ng.ng_Flags = PLACETEXT_IN;
     g = CreateGadget(BUTTON_KIND, g, &ng, GT_Underscore, '_', TAG_END);
 
+    {
+        LONG i;
+        NewList(&rows);
+        for (i = 0; i < 12; i++) {
+            row_nodes[i].ln_Name = row_names[i];
+            AddTail(&rows, &row_nodes[i]);
+        }
+    }
+    ng.ng_LeftEdge = 300 - 140;
+    ng.ng_TopEdge = scr->WBorTop + scr->Font->ta_YSize + 8;
+    ng.ng_Width = 0;
+    ng.ng_Height = 0;
+    ng.ng_TopEdge += 0;
+    ng.ng_LeftEdge = 270;
+    ng.ng_Width = 150;
+    ng.ng_Height = 70;
+    ng.ng_GadgetText = "BBS list";
+    ng.ng_GadgetID = G_LIST;
+    ng.ng_Flags = PLACETEXT_ABOVE;
+    ng.ng_TopEdge += 12;
+    g = CreateGadget(LISTVIEW_KIND, g, &ng, GTLV_Labels, &rows,
+                     GTLV_ShowSelected, NULL, GTLV_Selected, 2, TAG_END);
+
     strip = CreateMenus(menus, TAG_END);
     if (!g || !strip || !LayoutMenus(strip, vi, GTMN_NewLookMenus, TRUE,
                                      TAG_END))
@@ -93,7 +125,7 @@ int main(void)
     win = OpenWindowTags(NULL,
         WA_Title, "gtwin test",
         WA_Left, 120, WA_Top, 40,
-        WA_Width, 300, WA_Height, ng.ng_TopEdge + 26,
+        WA_Width, 440, WA_Height, 180,
         WA_Gadgets, glist,
         WA_DragBar, TRUE, WA_DepthGadget, TRUE, WA_CloseGadget, TRUE,
         WA_Activate, TRUE, WA_NewLookMenus, TRUE,

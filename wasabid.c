@@ -37,6 +37,11 @@
 #include <proto/keymap.h>
 #undef __NOLIBBASE__
 #include <intuition/classes.h>
+#include <libraries/gadtools.h>
+#define __NOLIBBASE__            /* opened on the first list in UI */
+#define GADTOOLS_BASE_NAME g_gadtools
+#include <proto/gadtools.h>
+#undef __NOLIBBASE__
 #include <rexx/storage.h>
 #define __NOLIBBASE__            /* opened on the first AREXX */
 #define REXXSYSLIB_BASE_NAME g_rexxsys
@@ -162,6 +167,7 @@ static struct Library *g_cgfx;
  * will not start.
  */
 static struct Library *g_keymap;
+static struct Library *g_gadtools;
 
 /* --- the running commands ----------------------------------------- */
 
@@ -248,7 +254,18 @@ struct Client {
                                       * or a plain loopback client */
     BOOL  local;                     /* from 127.x: may skip TLS */
     ULONG since;                     /* now_secs() at accept */
+    /* A transfer in progress, done a piece per main-loop turn so that
+     * a big file never makes the other clients wait for all of it. */
+    UBYTE xfer;                      /* XF_NONE, XF_PUT, XF_SINK, XF_GET */
+    BPTR  xfer_fh;
+    ULONG xfer_size, xfer_got, xfer_prot;
+    const char *xfer_why;            /* XF_SINK: the error owed at END */
+    char  xfer_tmp[300], xfer_path[300];
 };
+#define XF_NONE 0
+#define XF_PUT  1                    /* receiving DATA into xfer_tmp */
+#define XF_SINK 2                    /* receiving DATA to throw away */
+#define XF_GET  3                    /* sending xfer_fh, a chunk a turn */
 
 static struct Client g_clients[MAX_CLIENTS];
 static const char *g_tls_why = "not started";  /* why TLS is not ready */
@@ -1632,29 +1649,16 @@ static BOOL cmd_ls(int fd, const char *path)
     return send_frame(fd, T_END, NULL, 0);
 }
 
-static BOOL cmd_get(int fd, const char *path)
+/* GET: open, and let pump_gets() send it a chunk per main-loop turn. */
+static BOOL cmd_get(int cl, int fd, const char *path)
 {
     BPTR fh = Open((STRPTR)path, MODE_OLDFILE);
-    UBYTE *buf;
-    LONG n;
 
     if (!fh)
         return send_err(fd, "cannot open for reading");
-    buf = AllocMem(MAX_PAYLOAD, MEMF_ANY);
-    if (!buf) {
-        Close(fh);
-        return send_perr(fd, "out of memory");
-    }
-    while ((n = Read(fh, buf, MAX_PAYLOAD)) > 0) {
-        if (!send_frame(fd, T_DATA, buf, n)) {
-            FreeMem(buf, MAX_PAYLOAD);
-            Close(fh);
-            return FALSE;
-        }
-    }
-    FreeMem(buf, MAX_PAYLOAD);
-    Close(fh);
-    return send_frame(fd, T_END, NULL, 0);
+    g_clients[cl].xfer = XF_GET;
+    g_clients[cl].xfer_fh = fh;
+    return TRUE;
 }
 
 /*
@@ -1694,73 +1698,127 @@ static BOOL is_self_file(const char *path)
  * access. That path has exactly one route, T_INSTALL, and only through
  * the verification `wasabi update` does first.
  */
-static BOOL cmd_put(int fd, ULONG size, ULONG prot, const char *path)
+/*
+ * PUT: open the temporary file and return; the DATA frames that follow
+ * are taken one per main-loop turn by put_frame(), between everybody
+ * else's requests, and END renames the file into place - so a
+ * half-written upload never stands where the old file was.
+ */
+static BOOL cmd_put(int cl, int fd, ULONG size, ULONG prot, const char *path)
 {
-    char tmp[300];
+    struct Client *c = &g_clients[cl];
     BPTR fh;
-    UBYTE *buf;
-    ULONG got = 0;
-    BOOL ok = TRUE;
 
-    buf = AllocMem(MAX_PAYLOAD, MEMF_ANY);
-    if (!buf)
-        return send_perr(fd, "out of memory");
-
+    (void)fd;
+    c->xfer_size = size;
+    c->xfer_got = 0;
+    c->xfer_prot = prot;
     if (is_self_file(path)) {
-        /* The client is already sending the body; swallow it, or those
-         * DATA frames get read back as commands and desync the session. */
-        for (;;) {
-            UBYTE tag;
-            LONG n;
-            if (!recv_frame(fd, &tag, buf, &n)) {
-                FreeMem(buf, MAX_PAYLOAD);
-                return FALSE;
-            }
-            if (tag == T_END || tag != T_DATA)
-                break;
-        }
-        FreeMem(buf, MAX_PAYLOAD);
-        return send_perr(fd, "that is the running daemon - use 'wasabi update', "
-                            "which verifies the binary before it commits");
+        /* The client is already sending the body; take it and drop it,
+         * or those DATA frames get read back as commands. */
+        c->xfer = XF_SINK;
+        c->xfer_why = "that is the running daemon - use 'wasabi update', "
+                      "which verifies the binary before it commits";
+        return TRUE;
     }
-
-    sprintf(tmp, "%.280s.wasabi-tmp", path);
-    fh = Open(tmp, MODE_NEWFILE);
+    sprintf(c->xfer_tmp, "%.280s.wasabi-tmp", path);
+    copystr(c->xfer_path, sizeof(c->xfer_path), path);
+    fh = Open(c->xfer_tmp, MODE_NEWFILE);
     if (!fh) {
-        FreeMem(buf, MAX_PAYLOAD);
-        return send_err(fd, "cannot create the temporary file");
+        c->xfer = XF_SINK;
+        c->xfer_why = "cannot create the temporary file";
+        return TRUE;
     }
+    c->xfer = XF_PUT;
+    c->xfer_fh = fh;
+    return TRUE;
+}
 
-    for (;;) {
-        UBYTE tag;
-        LONG len;
-        if (!recv_frame(fd, &tag, buf, &len)) { ok = FALSE; break; }
-        if (tag == T_END)
-            break;
-        if (tag != T_DATA) { ok = FALSE; break; }
-        if (Write(fh, buf, len) != len) {
-            FreeMem(buf, MAX_PAYLOAD);
-            Close(fh);
-            DeleteFile(tmp);
-            return send_err(fd, "write failed - disk full?");
+/* A transfer's leftovers when its client goes or the daemon stops. */
+static void xfer_abort(int cl)
+{
+    struct Client *c = &g_clients[cl];
+    if (c->xfer_fh) {
+        Close(c->xfer_fh);
+        c->xfer_fh = 0;
+        if (c->xfer == XF_PUT)
+            DeleteFile(c->xfer_tmp);
+    }
+    c->xfer = XF_NONE;
+}
+
+/* One frame of a PUT in progress. FALSE: drop the client. */
+static BOOL put_frame(int cl, UBYTE tag, UBYTE *p, LONG len)
+{
+    struct Client *c = &g_clients[cl];
+    int fd = c->fd;
+
+    if (tag == T_DATA) {
+        if (c->xfer == XF_PUT && Write(c->xfer_fh, p, len) != len) {
+            Close(c->xfer_fh);
+            c->xfer_fh = 0;
+            DeleteFile(c->xfer_tmp);
+            c->xfer = XF_SINK;           /* take the rest, then say so */
+            c->xfer_why = "write failed - disk full?";
         }
-        got += len;
+        c->xfer_got += (ULONG)len;
+        return TRUE;
     }
-    FreeMem(buf, MAX_PAYLOAD);
-    Close(fh);
-
-    if (!ok || got != size) {
-        DeleteFile(tmp);
-        return ok ? send_err(fd, "size mismatch") : FALSE;
+    if (tag != T_END) {                  /* a command inside a body */
+        xfer_abort(cl);
+        return FALSE;
     }
-    DeleteFile(path);                    /* Rename won't clobber */
-    if (!Rename(tmp, (STRPTR)path)) {
-        DeleteFile(tmp);
+    if (c->xfer == XF_SINK) {
+        c->xfer = XF_NONE;
+        return send_perr(fd, c->xfer_why);
+    }
+    Close(c->xfer_fh);
+    c->xfer_fh = 0;
+    c->xfer = XF_NONE;
+    if (c->xfer_got != c->xfer_size) {
+        DeleteFile(c->xfer_tmp);
+        return send_perr(fd, "size mismatch");
+    }
+    DeleteFile(c->xfer_path);            /* Rename won't clobber */
+    if (!Rename(c->xfer_tmp, (STRPTR)c->xfer_path)) {
+        DeleteFile(c->xfer_tmp);
         return send_err(fd, "rename into place failed");
     }
-    if (prot != 0xFFFFFFFFUL)
-        SetProtection((STRPTR)path, (LONG)prot);
+    if (c->xfer_prot != 0xFFFFFFFFUL)
+        SetProtection((STRPTR)c->xfer_path, (LONG)c->xfer_prot);
     return send_frame(fd, T_OK, NULL, 0);
+}
+
+static BOOL gets_pending(void)
+{
+    LONG i;
+    for (i = 0; i < MAX_CLIENTS; i++)
+        if (g_clients[i].fd >= 0 && g_clients[i].xfer == XF_GET)
+            return TRUE;
+    return FALSE;
+}
+
+/* One chunk of every GET in progress; END and close when it is all out. */
+static void pump_gets(UBYTE *buf)
+{
+    LONG i, n;
+    for (i = 0; i < MAX_CLIENTS; i++) {
+        struct Client *c = &g_clients[i];
+        if (c->fd < 0 || c->xfer != XF_GET)
+            continue;
+        n = Read(c->xfer_fh, buf, MAX_PAYLOAD);
+        if (n > 0) {
+            if (!send_frame(c->fd, T_DATA, buf, n))
+                drop((int)i);
+            continue;
+        }
+        Close(c->xfer_fh);
+        c->xfer_fh = 0;
+        c->xfer = XF_NONE;
+        if (n < 0 ? !send_err(c->fd, "read failed")
+                  : !send_frame(c->fd, T_END, NULL, 0))
+            drop((int)i);
+    }
 }
 
 
@@ -2698,6 +2756,71 @@ static BOOL ui_gadget_item(struct Window *w, struct Gadget *g,
     return TRUE;
 }
 
+/* --- list rows --------------------------------------------------------- */
+
+#define ROWS_MAX 100                 /* rows reported per list */
+
+/* A row as an item: kind "row", its text, a box when it is in view
+ * (0x0 when scrolled away - it cannot be clicked until it is shown),
+ * its index as the value. */
+static BOOL ui_row(UiSink sink, void *ctx, ULONG list, LONG i, BOOL sel,
+                   const char *text, LONG x, LONG y, LONG w, LONG h)
+{
+    struct UiItem it;
+    LONG n = 0;
+    memset(&it, 0, sizeof(it));
+    it.addr = list;
+    it.kind = "row";
+    it.selected = sel;
+    it.x = x; it.y = y; it.w = w; it.h = h;
+    ui_put(it.label, &n, sizeof(it.label), (const UBYTE *)text);
+    sprintf(it.value, "%ld", (long)i);
+    return sink(&it, ctx);
+}
+
+/*
+ * A GadTools listview's rows, through the public GT_GetGadgetAttrs()
+ * (V39): its label list, the top row and the selected one. Rows are
+ * drawn one font height apart inside a 2-pixel border.
+ */
+static BOOL ui_gt_rows(struct Window *w, struct Gadget *g, struct UiItem *box,
+                       UiSink sink, void *ctx)
+{
+    struct List *labels = NULL;
+    ULONG top = 0, sel = ~0UL, ih = 0;
+    struct Node *nd;
+    LONG i, rowh, vis;
+
+    if (!(g->GadgetType & GTYP_GADTOOLS_FLAG))
+        return TRUE;
+    if (!g_gadtools)
+        g_gadtools = OpenLibrary("gadtools.library", 39);
+    if (!g_gadtools)
+        return TRUE;
+    if (GT_GetGadgetAttrs(g, w, NULL, GTLV_Labels, (ULONG)&labels,
+                          GTLV_Top, (ULONG)&top, GTLV_Selected, (ULONG)&sel,
+                          GTLV_ItemHeight, (ULONG)&ih, TAG_DONE) < 1 ||
+        !labels || labels == (struct List *)~0UL || !ui_readable(labels))
+        return TRUE;
+    rowh = ih ? (LONG)ih : (w->RPort ? w->RPort->TxHeight : 8);
+    if (rowh <= 0)
+        rowh = 8;
+    vis = (box->h - 4) / rowh;
+    for (nd = labels->lh_Head, i = 0;
+         ui_readable(nd) && nd->ln_Succ && i < ROWS_MAX;
+         nd = nd->ln_Succ, i++) {
+        BOOL in = i >= (LONG)top && i < (LONG)top + vis;
+        if (!ui_row(sink, ctx, (ULONG)g, i, (ULONG)i == sel,
+                    ui_printable((const UBYTE *)nd->ln_Name) ? nd->ln_Name
+                                                              : "",
+                    in ? box->x + 2 : 0, in ? box->y + 2 +
+                    (i - (LONG)top) * rowh : 0,
+                    in ? box->w - 4 : 0, in ? rowh : 0))
+            return FALSE;
+    }
+    return TRUE;
+}
+
 /* --- ReAction -------------------------------------------------------- */
 
 /*
@@ -2782,6 +2905,21 @@ static BOOL ui_reaction(struct Window *w, const void *lay, int depth,
 #define MUIA_Disabled          0x80423661
 #define MUIA_Cycle_Active      0x80421788
 #define MUIA_Cycle_Entries     0x80420629
+#define MUIA_List_Entries      0x80421654
+#define MUIA_List_First        0x804238d4
+#define MUIA_List_Visible      0x8042191f
+#define MUIA_List_Active       0x8042391c
+#define MUIA_List_DisplayHook  0x8042b4d5
+#define MUIM_List_GetEntry     0x804280ec
+#define MUIM_List_TestPos      0x80425f48
+
+struct MuiTestPos {                  /* struct MUI_List_TestPos_Result */
+    LONG  entry;
+    WORD  column;
+    UWORD flags;
+    WORD  xoffset;
+    WORD  yoffset;                   /* from the middle of the row */
+};
 
 /* MUI's text: escapes (ESC c, ESC b, ESC I[...]) and the shortcut
  * underscore out. */
@@ -2888,7 +3026,127 @@ struct MuiWalk {
     int count;
     char pending[120];               /* the last label, for the next
                                       * unlabelled control */
+    struct UiItem held;              /* an unlabelled control, waiting to
+                                      * see if a label comes after it */
+    BOOL has_held;
 };
+
+static BOOL mw_flush(struct MuiWalk *mw)
+{
+    if (!mw->has_held)
+        return TRUE;
+    mw->has_held = FALSE;
+    return mw->sink(&mw->held, mw->ctx);
+}
+
+/* MUI lays a label out before its control or after it (a checkmark,
+ * then "Editable"): an unlabelled control waits for the next item, and
+ * takes it as its label if that is plain text. */
+static BOOL mw_emit(struct MuiWalk *mw, struct UiItem *it)
+{
+    BOOL holdable = !it->label[0] &&
+        (strcmp(it->kind, "toggle") == 0 || strcmp(it->kind, "string") == 0 ||
+         strcmp(it->kind, "cycle") == 0 || strcmp(it->kind, "slider") == 0);
+    if (strcmp(it->kind, "label") == 0 && mw->has_held) {
+        copystr(mw->held.label, sizeof(mw->held.label), it->label);
+        if (!mw_flush(mw))
+            return FALSE;
+        return mw->sink(it, mw->ctx);
+    }
+    if (!mw_flush(mw))
+        return FALSE;
+    if (holdable) {
+        mw->held = *it;
+        mw->has_held = TRUE;
+        return TRUE;
+    }
+    return mw->sink(it, mw->ctx);
+}
+
+/*
+ * An MUI list's rows: MUIM_List_GetEntry for each, the text the entry
+ * is when it is a string, and otherwise what the list's own display
+ * hook makes of it - the app's code, called as MUI calls it (columns
+ * into an array), here under Forbid like the rest of the walk. Rows
+ * are placed by dividing the list's inner height by the rows it shows.
+ */
+static BOOL ui_mui_rows(Object *o, struct UiItem *list, struct MuiWalk *mw)
+{
+    ULONG entries = 0, active = ~0UL;
+    struct Hook *hook = NULL;
+    static LONG mid[ROWS_MAX];
+    static char text[120];
+    static STRPTR cols[34];
+    LONG i, y, rowh = 0, prev = -1;
+
+    GetAttr(MUIA_List_Entries, o, &entries);
+    GetAttr(MUIA_List_Active, o, &active);
+    GetAttr(MUIA_List_DisplayHook, o, (ULONG *)&hook);
+
+    /* Where each row is drawn: MUI says which row is under a point and
+     * how far that point is from the row's middle (MUIM_List_TestPos). */
+    for (i = 0; i < ROWS_MAX; i++)
+        mid[i] = -1;
+    for (y = list->y; y < list->y + list->h; y += 2) {
+        struct MuiTestPos r;
+        ULONG msg[4];
+        memset(&r, 0, sizeof(r));
+        r.entry = -1;
+        msg[0] = MUIM_List_TestPos;
+        msg[1] = (ULONG)(list->x + list->w / 4);
+        msg[2] = (ULONG)y;
+        msg[3] = (ULONG)&r;
+        DoMethodA(o, (Msg)msg);
+        if (r.entry >= 0 && r.entry < ROWS_MAX && mid[r.entry] < 0) {
+            mid[r.entry] = y - r.yoffset;
+            if (prev >= 0 && r.entry == prev + 1 && !rowh)
+                rowh = mid[r.entry] - mid[prev];
+            prev = r.entry;
+        }
+    }
+    if (rowh <= 0)
+        rowh = 10;
+
+    for (i = 0; i < (LONG)entries && i < ROWS_MAX; i++) {
+        APTR e = NULL;
+        ULONG msg[3];
+        msg[0] = MUIM_List_GetEntry;
+        msg[1] = (ULONG)i;
+        msg[2] = (ULONG)&e;
+        DoMethodA(o, (Msg)msg);
+        text[0] = '\0';
+        /* The list's own display hook first: an entry is often a record
+         * whose first bytes happen to be text (one column of several). */
+        if (e && ui_readable(hook) && ui_readable(hook->h_Entry)) {
+            LONG k, n = 0;
+            memset(cols, 0, sizeof(cols));
+            CallHookA(hook, (Object *)(cols + 1), e);
+            for (k = 1; k < 33 && n < (LONG)sizeof(text) - 4; k++) {
+                char part[80];
+                if (!cols[k] || !ui_readable_text(cols[k]))
+                    continue;
+                ui_mui_text((const UBYTE *)cols[k], part, sizeof(part));
+                if (!part[0])
+                    continue;
+                if (n) {
+                    text[n++] = ' ';
+                    text[n++] = ' ';
+                    text[n] = '\0';
+                }
+                copystr(text + n, sizeof(text) - n, part);
+                n += strlen(text + n);
+            }
+        }
+        if (!text[0] && ui_printable((const UBYTE *)e))
+            ui_mui_text((const UBYTE *)e, text, sizeof(text));
+        if (!ui_row(mw->sink, mw->ctx, (ULONG)o, i, (ULONG)i == active, text,
+                    mid[i] >= 0 ? list->x : 0,
+                    mid[i] >= 0 ? mid[i] - rowh / 2 : 0,
+                    mid[i] >= 0 ? list->w : 0, mid[i] >= 0 ? rowh : 0))
+            return FALSE;
+    }
+    return TRUE;
+}
 
 static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
 {
@@ -2923,6 +3181,11 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
                         sizeof(it.value));
     } else if (ui_class_is(o, "List.mui")) {
         it.kind = "list";
+        if (it.w > 0 && it.h > 0) {
+            if (!mw_emit(mw, &it))
+                return FALSE;
+            return ui_mui_rows(o, &it, mw);
+        }
     } else if (ui_class_is(o, "Numeric.mui")) {
         it.kind = "slider";
     } else if (ui_class_is(o, "Group.mui")) {
@@ -2953,7 +3216,7 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
                 copystr(mw->pending, sizeof(mw->pending), it.label);
             if (!it.label[0] || it.w <= 0 || it.h <= 0)
                 return TRUE;
-            return mw->sink(&it, mw->ctx);
+            return mw_emit(mw, &it);
         }
     }
     if (it.w <= 0 || it.h <= 0)
@@ -2965,7 +3228,7 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
          strcmp(it.kind, "slider") == 0 || strcmp(it.kind, "toggle") == 0))
         copystr(it.label, sizeof(it.label), mw->pending);
     mw->pending[0] = '\0';
-    return mw->sink(&it, mw->ctx);
+    return mw_emit(mw, &it);
 }
 
 /* --- all of it --------------------------------------------------------- */
@@ -2991,8 +3254,10 @@ static BOOL ui_items(struct Window *w, BOOL deep, UiSink sink, void *ctx)
             if (count > before)
                 continue;                /* its children stand for it */
         }
-        if (ui_gadget_item(w, g, &it) && !sink(&it, ctx))
-            return FALSE;
+        if (ui_gadget_item(w, g, &it)) {
+            if (!sink(&it, ctx) || !ui_gt_rows(w, g, &it, sink, ctx))
+                return FALSE;
+        }
     }
     (void)deep;
     if (ui_mui_marked(w)) {
@@ -3006,7 +3271,7 @@ static BOOL ui_items(struct Window *w, BOOL deep, UiSink sink, void *ctx)
             memset(&mw, 0, sizeof(mw));
             mw.sink = sink;
             mw.ctx = ctx;
-            go = ui_mui_walk(root, 0, &mw);
+            go = ui_mui_walk(root, 0, &mw) && mw_flush(&mw);
             Permit();
             return go;
         }
@@ -5402,6 +5667,9 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         }
     }
 
+    if (g_clients[cl].xfer == XF_PUT || g_clients[cl].xfer == XF_SINK)
+        return put_frame(cl, tag, p, len);
+
     switch (tag) {
     case T_PING:
         return send_frame(fd, T_PONG, NULL, 0);
@@ -5417,12 +5685,12 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_GET:
         if (!get_str(p, len, 0, path, sizeof(path)))
             return send_perr(fd, "bad path");
-        return cmd_get(fd, path);
+        return cmd_get(cl, fd, path);
 
     case T_PUT:
         if (len < 8 || !get_str(p, len, 8, path, sizeof(path)))
             return send_perr(fd, "bad PUT header");
-        return cmd_put(fd, get_be32(p), get_be32(p + 4), path);
+        return cmd_put(cl, fd, get_be32(p), get_be32(p + 4), path);
 
     case T_DEL:
         if (!get_str(p, len, 0, path, sizeof(path)))
@@ -5645,6 +5913,7 @@ static void drop(int cl)
     }
     live_free(cl);
     posted_forget(cl);
+    xfer_abort(cl);
     if (g_clients[cl].tls) {
         tls_bye(g_clients[cl].tls);
         tls_free(g_clients[cl].tls);
@@ -5986,7 +6255,7 @@ int main(int argc, char **argv)
             if (g_clients[i].fd >= 0 && g_clients[i].secure &&
                 tls_pending(g_clients[i].tls) > 0)
                 pend = TRUE;
-        if (pend) {
+        if (pend || gets_pending()) {
             tv.tv_secs = 0;
             tv.tv_micro = 0;
         }
@@ -6028,6 +6297,7 @@ int main(int argc, char **argv)
 
         pump_posted();
         rexxport_pump();
+        pump_gets(payload);              /* a chunk of each download */
 
         {
             char line[200];
@@ -6275,6 +6545,7 @@ out:
                "must not unload. Reboot when convenient.\n");
     }
     for (i = 0; i < MAX_CLIENTS; i++) {
+        xfer_abort(i);
         live_free(i);                   /* ~7 MB per live viewer at 1280x960:
                                          * AllocMem is not given back when a
                                          * program ends (audit 4) */
@@ -6292,6 +6563,7 @@ out:
     FreeMem(payload, MAX_PAYLOAD);
     if (g_cgfx) CloseLibrary(g_cgfx);
     if (g_keymap) CloseLibrary(g_keymap);
+    if (g_gadtools) CloseLibrary(g_gadtools);
     rexxport_close();
     posted_shutdown();
     /* A rexx message left with a slow host still needs the library to

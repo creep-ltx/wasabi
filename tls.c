@@ -91,6 +91,14 @@ const char *tls_open(void)
 
     if (ctx)
         return NULL;
+    /* Keys first: AmiSSL is 3.5 MB once loaded, which a stock A1200
+     * with 8 MB should not pay for a connection that stays plain. */
+    {
+        BPTR l = Lock((STRPTR)TLS_DIR "amiga.key", ACCESS_READ);
+        if (!l)
+            return "no keys in ENVARC:wasabi/ - on the PC: wasabi keys amiga";
+        UnLock(l);
+    }
     if (!AmiSSLMasterBase) {
         AmiSSLMasterBase = OpenLibrary((STRPTR)"amisslmaster.library",
                                        AMISSLMASTER_MIN_VERSION);

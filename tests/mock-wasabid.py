@@ -698,6 +698,10 @@ class Handler(socketserver.BaseRequestHandler):
                 "\tNever\t",
                 "G\t0x00000005\t10\t20\t150\t14\tstring\t-\t4\t-"
                 "\tName\tBob",
+                "G\t0x00000007\t10\t60\t150\t30\tlist\t-\t0\tList.mui\t\t",
+                "G\t0x00000007\t12\t62\t146\t10\trow\ts\t0\t-\tAmiga BBS\t0",
+                "G\t0x00000007\t12\t72\t146\t10\trow\t-\t0\t-\tBoing Board\t1",
+                "G\t0x00000007\t0\t0\t0\t0\trow\t-\t0\t-\tCopper Lane\t2",
                 "M\t%d\t-\tQ\tProject/Quit" % (0 | (2 << 5) | (31 << 11)),
                 "M\t%d\t-\t-\tProject/Recent/First" % (0 | (1 << 5)),
                 "M\t%d\td\t-\tProject/Print" % (0 | (3 << 5) | (31 << 11)),

@@ -88,7 +88,7 @@ pulling in its libraries — captured live off the A1200.
    to `C:`, choose a key, and start it - put the last two lines in
    `S:User-Startup` to have it at every boot.
    ```
-   Copy wasabid C:
+   Copy wasabid C:                  (or wasabid.020 on a 68020 or better)
    SetEnv SAVE wasabi.key choose-a-key
    Run >NIL: C:wasabid
    ```
@@ -144,6 +144,9 @@ The same app on a phone, served from a NAS (`wasabi serve`, see
 | `slots` / `free` | **working on the real A1200 (0.4b2)** — four commands at once (one per connection); `wasabi slots` lists them, `wasabi free N` Ctrl-Cs one and lets go of the slot if it will not stop; `run --max-time` stops exactly its own slot |
 | TLS (`keys`) | **working on the real A1200 and the NAS; optional since 0.8** — Ed25519 certificates from your own CA; an Amiga with AmiSSL and keys accepts only TLS, one without works plain; a client never silently goes plain to an Amiga it reached encrypted |
 | `ui` (gadgets and menus by name) / `arexx` | **working on the real A1200; ReAction and MUI tested in FS-UAE (OS 3.2.3, MUI 5)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. Intuition, GadTools, ReAction and MUI 4/5 windows (0.7b1) |
+| list rows in `ui` | **0.9b1, tested in FS-UAE** (GadTools, MUI 5, DCTelnet's Address Book) — each row by its text, selected or not, clickable when in view |
+| transfers that do not block | **0.9b1, tested in FS-UAE** — during an 80 MB upload, ping 0.07 s and screenshots as fast as without it |
+| `wasabid.020` | **0.9b1, tested in FS-UAE as a stock A1200** (68EC020, 8 MB) — the same daemon built for 68020+; `make both` |
 | `WASABI` ARexx port | **working on the real A1200 (answers there); every command tested in FS-UAE** — Amiga programs and scripts type, press keys, click, click gadgets by name and pick menus through it |
 | MCP server (`wasabi_mcp.py`) | **working** (tested in FS-UAE; registered for every Claude Code session on the author's PC) — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
@@ -162,7 +165,7 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 252 tests, no Amiga required,
+host mock that speaks the same protocol — 255 tests, no Amiga required,
 run on Linux and macOS for every push.
 
 ### Discovery on a Wi-Fi-to-wired network
@@ -1532,9 +1535,29 @@ Disabled items are refused.
 - **MUI 4 and 5** windows: buttons, text fields (`ui set` works),
   cycle gadgets, sliders, lists, radio buttons and checkmarks, with
   their text. A field or checkmark without text of its own takes the
-  label MUI shows before it. Plain text appears as `label` and is never
-  what `ui click` clicks. Found by a search of memory the first time a
-  window is looked at (0.4 s on a 68030/50 emulator), then remembered.
+  label MUI shows before or after it. Plain text appears as `label`
+  and is never what `ui click` clicks. Found by a search of memory the
+  first time a window is looked at (0.4 s on a 68030/50 emulator), then
+  remembered.
+- **List rows (0.9):** the entries of GadTools and MUI lists, each a
+  `row` with its text, whether it is selected, and where it is drawn -
+  so a row is clicked by its text, like a button:
+
+  ```
+  $ wasabi ui list --window "Address Book"       # DCTelnet 1.10
+    button   -                        at 120,142 401x136
+        row 0    "Retro32 BBS"            at 122,146 397x16  [selected]
+        row 1    "TeleHack simulation"    at 122,162 397x16
+    button   "Connect"                at 129,300 93x26
+  $ wasabi ui click telehack --window "Address Book" --double
+  ```
+
+  GadTools rows come from the public `GT_GetGadgetAttrs()`; MUI rows
+  from the list itself (`MUIM_List_GetEntry`), placed exactly with
+  `MUIM_List_TestPos`. A row scrolled out of view is listed as such and
+  refused for a click. Up to 100 rows per list. An MUI list with
+  several columns shows its first column (the code that draws the
+  others is the program's own and not reachable from outside).
 
 Not seen: MUI 3.8 windows (nothing tells them apart without searching
 all memory for every window), custom-drawn content (games, paint
@@ -1692,10 +1715,13 @@ history, alerts and nightly backups; health; four run slots; gadgets and
 menus by name in Intuition, GadTools, ReAction and MUI windows; ARexx
 both ways; the MCP server; and optional TLS with your own certificates.
 
+Since 0.8 (0.9 betas): list rows; uploads and downloads that no longer
+make other clients wait; a 68020 build; `wasabi info` names the patches
+in place.
+
 Open: seeing into MUI 3.8 windows (finding their objects would need a
-search of all memory per window), several listeners on the debug and
-snoop streams at once, and long transfers that do not make other
-clients wait.
+search of all memory per window), MUI lists' columns after the first,
+and several listeners on the debug and snoop streams at once.
 
 The hardening list is done — snoop self-tests its own trampoline before
 it patches, the daemon can only be replaced through `update`, no

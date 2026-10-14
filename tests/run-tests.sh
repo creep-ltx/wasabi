@@ -642,6 +642,13 @@ out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
 check "and by a path into a sub-menu" "uiact 1 0x0000cccc 32" "$out"
 out=$($W ui menu print 2>&1 | grep -c "disabled")
 check "a disabled menu item is refused" "1" "$out"
+out=$($W ui list 2>/dev/null | grep -c 'row 2    "Copper Lane" *(not in view)')
+check "ui list shows a list's rows, and which are out of view" "1" "$out"
+$W ui click "boing board" --double >/dev/null 2>&1
+out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "a row is clicked by its text" "mouse 1 0 2 285 254" "$out"
+out=$($W ui click "copper lane" 2>&1 | grep -c "not in view")
+check "a row scrolled away is not clicked blind" "1" "$out"
 rm -f "$ROOT/keys.log"
 $W ui set name x >/dev/null 2>&1
 out=$(tail -1 "$ROOT/keys.log" 2>/dev/null)

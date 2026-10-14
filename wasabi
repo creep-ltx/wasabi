@@ -2738,6 +2738,9 @@ def ui_click(conn, label, window=None, kind=None, nth=None, double=False):
     sc, w, g = find_gadget(screens, label, window, kind, nth)
     if g["disabled"]:
         raise WasabiError("\"%s\" is disabled (ghosted)" % g["label"])
+    if g["kind"] == "row" and not g["height"]:
+        raise WasabiError("the row \"%s\" is not in view - scroll the list "
+                          "first" % g["label"])
     x, y = g["x"] + g["width"] // 2, g["y"] + g["height"] // 2
     if not sc["front"] or covered(sc, w, x, y):
         ui_front(conn, w)
@@ -2816,6 +2819,14 @@ def cmd_ui(conn, args):
                      "  [active]" if w["active"] else ""))
             if args.action == "list":
                 for g in w["gadgets"]:
+                    if g["kind"] == "row":
+                        print('      row %-4s %-24s %s%s'
+                              % (g["value"], '"%s"' % g["label"],
+                                 "at %d,%d %dx%d" % (g["x"], g["y"],
+                                                     g["width"], g["height"])
+                                 if g["height"] else "(not in view)",
+                                 "  [selected]" if g["selected"] else ""))
+                        continue
                     flags = [n for n in ("disabled", "selected") if g[n]]
                     print('  %-8s %-24s at %d,%d %dx%d%s%s%s'
                           % (g["kind"], '"%s"' % g["label"] if g["label"]

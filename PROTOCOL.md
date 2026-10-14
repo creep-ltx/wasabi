@@ -225,9 +225,17 @@ over the target on `END`, so an interrupted transfer never leaves a
 half-written binary where a working one used to be. On a failed transfer
 the temporary is deleted.
 
+Since 0.9 the daemon takes one `DATA` frame per main-loop turn, between
+other clients' requests, so a big upload no longer makes them wait. An
+error found mid-body (a full disk) is answered at `END`; the frames in
+between are read and dropped. Any other tag inside a body drops the
+connection, as before.
+
 ### GET — read a file
 
-Server replies with `DATA` frames then `END`, or a single `ERR`.
+Server replies with `DATA` frames then `END`, or a single `ERR`. Since
+0.9 it sends one 64 KB `DATA` frame per main-loop turn, between other
+clients' requests.
 
 ### RUN — execute, with live output
 
@@ -789,6 +797,16 @@ area data (`_left`... at object +52), text with `GetAttr` of
 `MUIA_Selected`, `MUIA_Disabled`. Kinds: `button`, `toggle`, `string`,
 `cycle`, `slider`, `list`, and `label` for plain text. These are the
 only class calls the daemon makes into another program's objects.
+
+**List rows (0.9+):** after a list's `G` line come its rows, also `G`
+lines: kind `row`, `addr` the list, `label` the row's text, `value` its
+index, flag `s` when selected, and a box of `0 0 0 0` when the row is
+scrolled out of view. GadTools: `GT_GetGadgetAttrs()` of `GTLV_Labels`,
+`GTLV_Top`, `GTLV_Selected` and `GTLV_ItemHeight` on each GadTools
+gadget; rows one item height apart inside a 2-pixel border. MUI:
+`MUIM_List_GetEntry` for each entry (text when the entry is a string),
+`MUIM_List_TestPos` down the list every 2 pixels for each row's middle
+(`yoffset` is the distance to it). At most 100 rows per list.
 
 Walked under `LockIBase()` into a 48 KB buffer, sent after it. Flag bit
 1 (`deep`) is accepted and does nothing (a search of all memory per

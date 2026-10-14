@@ -9,7 +9,9 @@
 D=$(cd "$(dirname "$0")/../.." && pwd)
 W=/tmp/wasabi-uae; H="$W/AmigaOS3.2"; U=wasabi-uae
 export WASABI_HOST=127.0.0.1 WASABI_PORT=1241
-put() { cp "$D/wasabid" "$H/C/wasabid"; }
+# BIN=wasabid.020 puts the 68020 build in instead. CONF=stock runs a
+# stock A1200 (68EC020 at 14 MHz, 8 MB fast RAM) instead of the 030/50.
+put() { cp "$D/${BIN:-wasabid}" "$H/C/wasabid"; }
 case "$1" in
 start)
   if systemctl --user is-active --quiet $U.scope; then
@@ -21,8 +23,10 @@ start)
     sed -i -e 's#^  Run >NIL: C:wasabid$#  Run >NIL: C:wasabid 1241#' "$H/S/User-Startup"
     grep -q "wasabid 1241" "$H/S/User-Startup" || { echo "uae.sh: User-Startup not patched" >&2; exit 1; }
   fi
+  base="$HOME/FS-UAE/Configurations/A1200-030-50.fs-uae"
+  [ "$CONF" = stock ] && base="$HOME/Projects/CTerm/tests/stock/A1200-Stock-fast.fs-uae"
   sed -e "s#^hard_drive_0 = .*#hard_drive_0 = $H#" -e '/^hard_drive_1/d' \
-      "$HOME/FS-UAE/Configurations/A1200-030-50.fs-uae" > "$W/wasabi.fs-uae"
+      -e '/^bsdsocket_library/d' "$base" > "$W/wasabi.fs-uae"
   echo "bsdsocket_library = 1" >> "$W/wasabi.fs-uae"
   put
   (cd ~/FS-UAE && SDL_VIDEODRIVER=offscreen systemd-run --user --scope --unit=$U \
