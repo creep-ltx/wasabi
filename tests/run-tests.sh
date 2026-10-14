@@ -72,15 +72,15 @@ echo "hello from the amiga" > "$ROOT/C/greet.txt"
 
 # The keys, as a user makes them once - inside the test's own config dir -
 # and an "Amiga drive" for the mock to take its half from.
-./wasabi keys init >/dev/null 2>&1
+./wasabi keys init >"$ROOT/keys.log" 2>&1 || cat "$ROOT/keys.log" >&2
 mkdir -p "$ROOT/drive/Prefs"
-./wasabi keys drive "$ROOT/drive" mock >/dev/null 2>&1
+./wasabi keys drive "$ROOT/drive" mock >>"$ROOT/keys.log" 2>&1 || cat "$ROOT/keys.log" >&2
 
 wait_free "$PORT"
 ./tests/mock-wasabid.py --root "$ROOT" --port "$PORT" --key "$KEY" \
     --tls "$ROOT/drive/Prefs/Env-Archive/wasabi" >"$ROOT/mock.log" 2>&1 &
 MOCK_PID=$!
-wait_up "$PORT"
+wait_up "$PORT" || { echo "the mock did not start:" >&2; cat "$ROOT/mock.log" >&2; }
 
 W="./wasabi --host 127.0.0.1 --port $PORT --key $KEY"
 
