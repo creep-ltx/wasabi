@@ -1299,4 +1299,11 @@ else no "a missing file reports an error"; fi
 
 echo
 echo "$PASS passed, $FAIL failed"
+# On a CI machine nobody can look in $ROOT afterwards: show the servers'
+# own words when something failed.
+if [ "$FAIL" -ne 0 ] && [ -n "${CI:-}" ]; then
+    for f in view.log desk.log desk2.log view2.log fleet.log serve.log; do
+        [ -f "$ROOT/$f" ] && { echo "--- $f"; head -40 "$ROOT/$f"; }
+    done
+fi
 [ "$FAIL" -eq 0 ]
