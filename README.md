@@ -73,7 +73,7 @@ pulling in its libraries — captured live off the A1200.
 | `view` | **working on the real A1200** (tested in a headless Firefox: picture, clicks, typing, Right Amiga shortcuts, right-button menus, settings) — the live screen in a window, driven with the PC's mouse and keyboard; only changes are sent, key-to-screen 52 ms over Wi-Fi |
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `slots` / `free` | **working on the real A1200 (0.4b2)** — four commands at once (one per connection); `wasabi slots` lists them, `wasabi free N` Ctrl-Cs one and lets go of the slot if it will not stop; `run --max-time` stops exactly its own slot |
-| TLS on every network connection (`keys`) | **0.6b1, tested in FS-UAE; A1200 below** — Ed25519 certificates from your own CA, no plain fallback; loopback (emulators) may stay plain |
+| TLS on every network connection (`keys`) | **0.6b1, working on the real A1200 and the NAS** — Ed25519 certificates from your own CA, no plain fallback; loopback (emulators) may stay plain |
 | `ui` (gadgets and menus by name) / `arexx` | **0.5b1, tested in FS-UAE (OS 3.2.3)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. GadTools and plain Intuition windows; ReAction windows show only their outer layout |
 | MCP server (`wasabi_mcp.py`) | **0.1, tested in FS-UAE** — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
@@ -406,7 +406,8 @@ because a new CA would lock out every Amiga that has the old one.
   AES instructions on a 68k), chosen because every public-key step is
   plain 68k arithmetic. Measured on an emulated 68030/50: a handshake
   takes ~12 s (P-256: 22 s) and data moves at ~29 KB/s (AES-256: 13).
-  The A1200's Emu68 is far faster - see the measurements below.
+  On the A1200 (Emu68): handshake 0.07 s, 11.7 MB/s up and 13 MB/s
+  down, a 1280x960 grab in 0.3 s (plain was 42 MB/s into RAM:).
 
 **It answers only addresses that cannot be routed in from the
 internet** — RFC1918 (`10/8`, `172.16/12`, `192.168/16`) plus loopback

@@ -66,7 +66,14 @@ d. **Small ones from the CTerm session (2026-10-10):**
 
 Version: wasabid 0.4b1.
 
-## 3. TLS - REQUIRED (the user's decision, 2026-10-10)
+## 3. TLS - REQUIRED (the user's decision, 2026-10-10) - DONE 2026-10-14 (wasabid 0.6b1, on the A1200)
+
+Built as: the user's own CA (`wasabi keys init`, Ed25519), every network
+connection TLS 1.3 with client certificates, no plain fallback; loopback
+(emulators, SSH tunnels) may stay plain - a 68030/50 FS-UAE needed 12-22 s
+per handshake, and loopback bytes never cross a network. A1200: handshake
+0.07 s, 11.7 MB/s up, 13 MB/s down, a 1280x960 grab in 0.3 s. NAS has its
+keys (deploy-nas.sh). Details in README "Encryption".
 
 No plain fallback: the user chose TLS as a requirement over "try TLS,
 else plain". So:
