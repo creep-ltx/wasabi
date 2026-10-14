@@ -58,10 +58,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.7b1"
+#define VERSION_STR "wasabid 0.8b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.7b1 (14.10.2026)";
+    "$VER: wasabid 0.8b1 (14.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -83,7 +83,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport"
+                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport,plainopt"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -252,6 +252,8 @@ struct Client {
 
 static struct Client g_clients[MAX_CLIENTS];
 static const char *g_tls_why = "not started";  /* why TLS is not ready */
+static BOOL g_allow_plain;           /* 'plain': unencrypted clients too,
+                                      * even when TLS is ready */
 static ULONG g_tls_tried;                      /* now_secs() of the try */
 #define TLS_RETRY_SECS 30
 #define HANDSHAKE_SECS 15
@@ -5357,7 +5359,7 @@ static void answer_probe(int s, int port)
     /* A daemon whose TLS could not start answers no client; say why
      * here, where `wasabi discover` and `ping` can show it. */
     n = sprintf(reply, "WASABI!1 %s %d %s%s%.80s\n", g_name, port,
-                VERSION_STR, tls_ready() ? "" : " - NOT READY: ",
+                VERSION_STR, tls_ready() ? "" : " - unencrypted: ",
                 tls_ready() ? "" : g_tls_why);
     sendto(s, reply, n, 0, (struct sockaddr *)&from, fromlen);
 }
@@ -5754,6 +5756,8 @@ int main(int argc, char **argv)
             g_name_set = TRUE;
         } else if (strcmp(argv[i], "trial") == 0) {
             g_trial = TRUE;
+        } else if (strcmp(argv[i], "plain") == 0) {
+            g_allow_plain = TRUE;
         } else if (strcmp(argv[i], "allow") == 0 && i + 1 < argc) {
             const char *what = argv[++i];
             if (strcmp(what, "any") == 0)
@@ -5791,7 +5795,9 @@ int main(int argc, char **argv)
          * which lands in g_allow[0], silently rewriting the running
          * daemon's own allow-list. */
         if (g_allow_any && n < (LONG)sizeof(g_extra_args) - 11)
-            sprintf(g_extra_args + n, " allow any");
+            n += sprintf(g_extra_args + n, " allow any");
+        if (g_allow_plain && n < (LONG)sizeof(g_extra_args) - 7)
+            n += sprintf(g_extra_args + n, " plain");
     }
 
     /* The daemon has no console either: a requester raised by ls, get or
@@ -5912,9 +5918,12 @@ int main(int argc, char **argv)
     g_tls_why = tls_open();
     g_tls_tried = now_secs();
     if (g_tls_why)
-        Printf("wasabid: TLS is not ready (%s) - no client can connect "
-               "until it is; trying again every %ld s\n",
+        Printf("wasabid: no encryption (%s) - connections are plain; "
+               "trying again every %ld s\n",
                (LONG)g_tls_why, (LONG)TLS_RETRY_SECS);
+    else if (g_allow_plain)
+        Printf("wasabid: 'plain' is set - unencrypted clients are let in "
+               "too\n");
 
     rexxport_open();                     /* the WASABI ARexx port */
 
@@ -6091,24 +6100,15 @@ int main(int argc, char **argv)
                     g_clients[slot].secure = FALSE;
                     g_clients[slot].since = now_secs();
                     /*
-                     * From this machine itself (127.x - which is also
-                     * how the PC reaches an FS-UAE emulator, whose
-                     * sockets are the PC's), the client may skip TLS:
-                     * those bytes never cross a network, and anything
-                     * that could watch them could read the keys. The
-                     * first byte decides (see the client loop). Every
-                     * other peer gets TLS or nothing.
+                     * TLS or plain is decided by the client's first byte,
+                     * in the client loop: 127.x (this machine, which is
+                     * also how the PC reaches an FS-UAE emulator) may
+                     * always skip TLS; others only when TLS cannot be had
+                     * here or 'plain' was given.
                      */
                     g_clients[slot].local =
                         (ntohl(peer.sin_addr.s_addr) >> 24) == 127;
-                    g_clients[slot].tls = NULL;
-                    if (!g_clients[slot].local) {
-                        g_clients[slot].tls = tls_start(fd);
-                        if (!g_clients[slot].tls) {  /* TLS not ready */
-                            CloseSocket(fd);
-                            g_clients[slot].fd = -1;
-                        }
-                    }
+                    g_clients[slot].tls = NULL;  /* the first byte says */
                 }
             }
         }
@@ -6122,20 +6122,36 @@ int main(int argc, char **argv)
                 int r;
                 if (!FD_ISSET(g_clients[i].fd, &rd))
                     continue;
-                if (g_clients[i].local && !g_clients[i].tls) {
-                    /* A TLS ClientHello starts 0x16; a HELLO frame 0x01. */
+                if (!g_clients[i].tls) {
+                    /*
+                     * A TLS ClientHello starts 0x16; a HELLO frame 0x01.
+                     * Plain is let in from this machine itself, when
+                     * TLS cannot be had here (no AmiSSL, no keys - the
+                     * startup line and discovery say so), or when the
+                     * daemon was started with 'plain'. Otherwise the
+                     * client is told why, in a frame it can read.
+                     */
                     UBYTE first = 0;
                     if (recv(g_clients[i].fd, &first, 1, MSG_PEEK) != 1) {
                         drop(i);
                         continue;
                     }
                     if (first != 0x16) {
-                        g_clients[i].secure = TRUE;      /* plain, local */
+                        if (g_clients[i].local || !tls_ready() ||
+                            g_allow_plain) {
+                            g_clients[i].secure = TRUE;  /* plain */
+                            continue;
+                        }
+                        send_perr(g_clients[i].fd, "this Amiga accepts only "
+                                  "encrypted connections - the client needs "
+                                  "its keys (wasabi keys), or start wasabid "
+                                  "with 'plain'");
+                        drop(i);
                         continue;
                     }
                     g_clients[i].tls = tls_start(g_clients[i].fd);
                     if (!g_clients[i].tls) {
-                        drop(i);
+                        drop(i);         /* TLS asked for, none here */
                         continue;
                     }
                 }

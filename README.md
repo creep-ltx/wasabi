@@ -73,7 +73,7 @@ pulling in its libraries — captured live off the A1200.
 | `view` | **working on the real A1200** (tested in a headless Firefox: picture, clicks, typing, Right Amiga shortcuts, right-button menus, settings) — the live screen in a window, driven with the PC's mouse and keyboard; only changes are sent, key-to-screen 52 ms over Wi-Fi |
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `slots` / `free` | **working on the real A1200 (0.4b2)** — four commands at once (one per connection); `wasabi slots` lists them, `wasabi free N` Ctrl-Cs one and lets go of the slot if it will not stop; `run --max-time` stops exactly its own slot |
-| TLS on every network connection (`keys`) | **0.6b1, working on the real A1200 and the NAS** — Ed25519 certificates from your own CA, no plain fallback; loopback (emulators) may stay plain |
+| TLS (`keys`) | **0.6b1 on the A1200 and the NAS; optional since 0.8b1 (tested in FS-UAE)** — Ed25519 certificates from your own CA; an Amiga with AmiSSL and keys accepts only TLS, one without works plain; a client never silently goes plain to an Amiga it reached encrypted |
 | `ui` (gadgets and menus by name) / `arexx` | **0.5b1, tested in FS-UAE (OS 3.2.3)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. Intuition, GadTools, ReAction and MUI 4/5 windows (0.7b1) |
 | `WASABI` ARexx port | **0.7b1, tested in FS-UAE** — Amiga programs and scripts type, press keys, click, click gadgets by name and pick menus through it |
 | MCP server (`wasabi_mcp.py`) | **0.1, tested in FS-UAE** — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
@@ -356,11 +356,12 @@ the Amiga side and fetch the file: `run "cmd >T:out"` then `get T:out -`.
 ## Security
 
 `wasabid` executes arbitrary commands as whatever started it, on a
-machine with no memory protection. Since 0.6 **every connection that
-crosses a network is TLS 1.3**, and both ends must prove who they are;
-the key in `ENV:wasabi.key` is still checked, inside the encryption.
+machine with no memory protection. **Encryption is optional (0.8+)**:
+an Amiga with AmiSSL 5 and its keys speaks TLS 1.3, both ends proving
+who they are, and then accepts nothing else; an Amiga without AmiSSL
+works plain. The key in `ENV:wasabi.key` is checked either way.
 
-### Encryption (wasabid 0.6+)
+### Encryption (wasabid 0.6+, optional since 0.8)
 
 Your own small certificate authority, made once on your PC, signs a
 certificate for each Amiga and one for the PC. Each end accepts only
@@ -371,11 +372,12 @@ the wire can be read or changed.
 ```
 wasabi keys init                    once: the CA and this computer's
                                     certificate, in ~/.config/wasabi/keys
-wasabi --plain keys amiga a1200     an Amiga still on an older wasabid:
-wasabi --plain update wasabid       its keys, then the TLS daemon
-wasabi keys amiga NAME              (re)install an Amiga's keys over TLS
+wasabi keys amiga NAME              install an Amiga's keys (it needs
+                                    AmiSSL 5; then restart wasabid)
 wasabi keys drive DIR NAME          into an emulator drive's folder
-wasabi keys show                    what there is, with fingerprints
+wasabi keys show                    what there is, with fingerprints,
+                                    and the Amigas reached encrypted
+wasabi keys forget HOST             let one of those be plain again
 ```
 
 The Amiga keeps its half in `ENVARC:wasabi/` (`ca.crt`, `amiga.crt`,
@@ -385,11 +387,20 @@ folder — not `ca.key`, which stays on the computer that signs new
 Amigas. Keep that folder: `wasabi keys init` refuses to replace it,
 because a new CA would lock out every Amiga that has the old one.
 
-- **No plain fallback.** A client never drops to plain because TLS
-  failed. `--plain` exists only to reach a wasabid older than 0.6 once,
-  to install its keys and update it, and is refused for everything else.
-  Its update is still proven over TLS: the test copy of the new daemon
-  must accept an encrypted connection before it replaces the old one.
+- **Who decides.** The client encrypts whenever it has keys. An Amiga
+  with TLS ready refuses plain clients (saying why) unless wasabid was
+  started with `plain`. An Amiga without AmiSSL or keys takes plain
+  clients, and says so at startup and in its discovery answer
+  (`- unencrypted: <reason>`).
+- **No silent downgrade.** A client with keys that finds an Amiga
+  without encryption goes plain and prints a warning - but only to an
+  Amiga it has never reached encrypted. Once it has (remembered in
+  `~/.config/wasabi/tls-hosts`, like SSH's known hosts), plain to that
+  address is refused: its AmiSSL or keys are gone, or something is
+  answering in its place to catch the key. `wasabi keys forget HOST`
+  when it was on purpose. `--plain` asks for no encryption for one
+  command. An update is proven the way it runs: the test copy of the
+  new daemon must accept the same kind of connection first.
 - **Except on this computer itself.** A connection from `127.x` - an
   FS-UAE emulator, whose sockets are the PC's, or an SSH tunnel - may
   skip TLS: those bytes never cross a network, and anything able to
@@ -400,9 +411,9 @@ because a new CA would lock out every Amiga that has the old one.
 - **Dates are not checked on the Amiga** (its clock may be wrong); the
   certificates are valid for 100 years so the PC does not trip either.
 - **If TLS cannot start** (AmiSSL missing, its assign not yet made at
-  boot, no keys), wasabid keeps running, refuses network clients, says
-  why in its discovery answer (`wasabi discover`), and tries again every
-  30 s. Exiting would leave a machine nobody can reach to fix it.
+  boot, no keys), wasabid runs plain, says why in its discovery answer
+  (`wasabi discover`), and tries again every 30 s; a client that knew
+  it encrypted refuses it meanwhile, as above.
 - **Cost:** Ed25519 certificates, X25519 key exchange and ChaCha20 (no
   AES instructions on a 68k), chosen because every public-key step is
   plain 68k arithmetic. Measured on an emulated 68030/50: a handshake

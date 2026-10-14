@@ -24,6 +24,7 @@ cleanup() {
     [ -n "${MOCK2_PID:-}" ] && kill "$MOCK2_PID" 2>/dev/null
     [ -n "${MOCK4_PID:-}" ] && kill "$MOCK4_PID" 2>/dev/null
     [ -n "${MOCKE_PID:-}" ] && kill "$MOCKE_PID" 2>/dev/null
+    [ -n "${MOCKP_PID:-}" ] && kill "$MOCKP_PID" 2>/dev/null
     [ -n "${VIEW_PID:-}" ] && kill "$VIEW_PID" 2>/dev/null
     rm -rf "$ROOT"
 }
@@ -684,8 +685,14 @@ out=$(WASABI_TLS=always $W get C:greet.txt - 2>/dev/null)
 check "and carries data" "hello from the amiga" "$out"
 OTHER=$(mktemp -d)
 mkdir -p "$OTHER/wasabi"
-out=$(XDG_CONFIG_HOME=$OTHER WASABI_TLS=always $W ping 2>&1 | grep -c "wasabi keys init")
-check "no keys: says how to make them" "1" "$out"
+out=$(XDG_CONFIG_HOME=$OTHER WASABI_TLS=always $W ping 2>&1 | grep -c "^mock-wasabid")
+check "no keys here: plain, encryption is optional" "1" "$out"
+grep -q "127.0.0.1:$PORT" "$XDG_CONFIG_HOME/wasabi/tls-hosts" 2>/dev/null
+check "an Amiga reached encrypted is remembered" "0" "$?"
+cp "$XDG_CONFIG_HOME/wasabi/tls-hosts" "$OTHER/wasabi/tls-hosts"
+out=$(XDG_CONFIG_HOME=$OTHER WASABI_TLS=always $W ping 2>&1 | grep -c "was reached encrypted before")
+check "and then no keys is refused, not plain" "1" "$out"
+rm -f "$OTHER/wasabi/tls-hosts"
 XDG_CONFIG_HOME=$OTHER ./wasabi keys init >/dev/null 2>&1
 out=$(XDG_CONFIG_HOME=$OTHER WASABI_TLS=always $W ping 2>&1 | grep -c "not one of your Amigas")
 check "an Amiga signed by another CA is refused" "1" "$out"
@@ -693,8 +700,25 @@ cp "$XDG_CONFIG_HOME/wasabi/keys/ca.crt" "$OTHER/wasabi/keys/ca.crt"
 out=$(XDG_CONFIG_HOME=$OTHER WASABI_TLS=always $W ping 2>&1 | grep -c "does not trust this computer")
 check "a computer with someone else's certificate is refused" "1" "$out"
 rm -rf "$OTHER"
-out=$($W --plain ls 2>&1 | grep -c "only for reaching an old wasabid")
-check "--plain is refused for everyday commands" "1" "$out"
+out=$(WASABI_TLS=always $W --plain get C:greet.txt - 2>/dev/null)
+check "--plain asks for no encryption" "hello from the amiga" "$out"
+# An Amiga without encryption (the mock without --tls): plain, said once.
+PLAINP=$((PORT+11))
+wait_free $PLAINP
+./tests/mock-wasabid.py --root "$ROOT" --port $PLAINP --key "$KEY" \
+    >"$ROOT/mockp.log" 2>&1 &
+MOCKP_PID=$!
+wait_up $PLAINP
+out=$(WASABI_TLS=always ./wasabi --host 127.0.0.1 --port $PLAINP --key $KEY ping 2>&1)
+check "an Amiga without encryption is reached plain" "1" "$(echo "$out" | grep -c '^mock-wasabid')"
+check "and the plain connection is said out loud" "1" "$(echo "$out" | grep -c 'has no encryption')"
+echo "127.0.0.1:$PLAINP" >> "$XDG_CONFIG_HOME/wasabi/tls-hosts"
+out=$(WASABI_TLS=always ./wasabi --host 127.0.0.1 --port $PLAINP --key $KEY ping 2>&1 | grep -c "Refusing plain")
+check "one reached encrypted before that now offers none is refused" "1" "$out"
+./wasabi keys forget 127.0.0.1 >/dev/null 2>&1
+out=$(WASABI_TLS=always ./wasabi --host 127.0.0.1 --port $PLAINP --key $KEY ping 2>&1 | grep -c '^mock-wasabid')
+check "keys forget allows plain to it again" "1" "$out"
+kill $MOCKP_PID 2>/dev/null
 
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")

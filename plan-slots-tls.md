@@ -127,3 +127,5 @@ Several sessions test on the A1200 through Wasabi at the same time. Before
 putting a new wasabid on it, restarting it or rebooting: message the other
 sessions, say what and when, and wait for a pause. Every step must keep
 today's `wasabi` clients working (plain stays on until all have moved).
+
+Changed 2026-10-14 (user): encryption is optional - not everyone has AmiSSL. wasabid 0.8b1: an Amiga with AmiSSL + keys accepts only TLS (unless started with `plain`), one without works plain; the client never silently goes plain to an address it reached encrypted (tls-hosts).

@@ -74,10 +74,9 @@ class AmigaSilent(WasabiError):
 # answering. --silence and WASABI_SILENCE override it.
 SILENCE = 15.0
 
-# Every connection is TLS 1.3 (wasabid 0.6+). --plain exists only to talk
-# to an older daemon once, to update it; see TLS_PLAIN_OK.
+# TLS 1.3 whenever this computer has keys and the Amiga offers it
+# (wasabid 0.6+ with AmiSSL); see Conn. --plain: not this time.
 PLAIN = False
-TLS_PLAIN_OK = ("update", "keys", "ping", "info")
 
 # Volumes and assigns where a wrong delete or overwrite costs a boot.
 # `put`, `deploy` and `del` there need --force. More names (the boot
@@ -310,57 +309,51 @@ def dress_errors(text):
 
 class Conn:
     def __init__(self, host, port, key, timeout=None, tls=None):
+        """tls None: decide - encrypted whenever this computer has keys and
+        the Amiga is not this computer itself; plain to an Amiga without
+        encryption, unless it was reached encrypted before (then refuse:
+        something may be pretending to be it). True/False: exactly that."""
         if timeout is None:
             timeout = SILENCE
-        self.sock = socket.create_connection((host, port), timeout=timeout)
-        if tls is None:
-            # On this computer itself (an emulator) TLS adds nothing: the
-            # bytes never leave the machine. Everywhere else: always.
-            tls = not PLAIN and want_tls(self.sock.getpeername()[0])
-        self.host, self.port, self.tls = host, port, tls
-        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        # Keepalive, tuned tight: a machine that is reset or freezes
-        # mid-connection sends no FIN, and a blocking recv() would wait
-        # on it forever. ~25 s of unanswered probes declares it dead.
-        # macOS spells the idle-time option TCP_KEEPALIVE where Linux
-        # says TCP_KEEPIDLE; missing either would quietly leave the
-        # 2-hour system default, which is no keepalive at all.
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        idle = getattr(socket, "TCP_KEEPIDLE",
-                       getattr(socket, "TCP_KEEPALIVE", None))
-        if idle is not None:
-            self.sock.setsockopt(socket.IPPROTO_TCP, idle, 10)
-        for opt, val in (("TCP_KEEPINTVL", 5), ("TCP_KEEPCNT", 3)):
-            if hasattr(socket, opt):    # absent on Windows; skip
-                self.sock.setsockopt(socket.IPPROTO_TCP,
-                                     getattr(socket, opt), val)
+        self.host, self.port, self.key = host, port, key
         self.buf = b""
-        self.key = key                  # kept so a stream can reconnect
+        auto = tls is None
+        self.sock = self._open(host, port, timeout)
+        peer = self.sock.getpeername()[0]
+        if auto:
+            if PLAIN or not want_tls(peer):
+                tls = False
+            elif not have_keys():
+                if tls_pinned(peer, port):
+                    self.sock.close()
+                    raise WasabiError(
+                        "%s was reached encrypted before, but this computer "
+                        "has no Wasabi keys (%s) - copy the keys folder from "
+                        "the computer that has them" % (peer, keys_dir()))
+                tls = False
+            else:
+                tls = True
+        self.tls = tls
         if tls:
             try:
-                self.sock = tls_context().wrap_socket(self.sock)
-            except ssl.SSLCertVerificationError as e:
+                self._wrap(timeout)
+            except _NoTLSThere:
                 self.sock.close()
-                raise WasabiError(
-                    "this is not one of your Amigas - its certificate is "
-                    "not signed by your Wasabi CA (%s)" % e.verify_message)
-            except ssl.SSLError as e:
-                self.sock.close()
-                raise WasabiError(
-                    "the encrypted connection failed (%s) - the Amiga may "
-                    "not trust this computer's certificate: 'wasabi keys "
-                    "amiga' installs a matching set" % (e.reason or e))
-            except (ConnectionResetError, BrokenPipeError, EOFError):
-                self.sock.close()
-                raise WasabiError(
-                    "the Amiga closed the connection during the TLS "
-                    "handshake - its wasabid may be older than 0.6 (no "
-                    "encryption: update it with 'wasabi --plain update "
-                    "wasabid'), or not trust this computer")
-            except socket.timeout:
-                self.sock.close()
-                raise AmigaSilent("the Amiga did not finish the TLS "
-                                  "handshake in %d s" % timeout)
+                if not auto:
+                    raise WasabiError(
+                        "the Amiga closed the connection during the TLS "
+                        "handshake - it has no encryption (no AmiSSL or no "
+                        "keys there, or a wasabid older than 0.6)")
+                if tls_pinned(peer, port):
+                    raise WasabiError(
+                        "%s:%d was reached encrypted before and now offers "
+                        "no encryption - its AmiSSL or keys are gone, or "
+                        "something is pretending to be it. Refusing plain. "
+                        "If you turned it off on purpose: 'wasabi keys "
+                        "forget %s'" % (peer, port, peer))
+                plain_warning(peer)
+                self.sock = self._open(host, port, timeout)
+                self.tls = False
         try:
             try:
                 self._hello(key, timeout)
@@ -375,6 +368,51 @@ class Conn:
         except BaseException:
             self.sock.close()           # a refused HELLO must not leak
             raise                       # the socket (audit 4)
+        if self.tls and auto:
+            tls_pin(peer, port)
+
+    @staticmethod
+    def _open(host, port, timeout):
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # Keepalive, tuned tight: a machine that is reset or freezes
+        # mid-connection sends no FIN, and a blocking recv() would wait
+        # on it forever. ~25 s of unanswered probes declares it dead.
+        # macOS spells the idle-time option TCP_KEEPALIVE where Linux
+        # says TCP_KEEPIDLE; missing either would quietly leave the
+        # 2-hour system default, which is no keepalive at all.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        idle = getattr(socket, "TCP_KEEPIDLE",
+                       getattr(socket, "TCP_KEEPALIVE", None))
+        if idle is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, idle, 10)
+        for opt, val in (("TCP_KEEPINTVL", 5), ("TCP_KEEPCNT", 3)):
+            if hasattr(socket, opt):    # absent on Windows; skip
+                sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
+        return sock
+
+    def _wrap(self, timeout):
+        try:
+            self.sock = tls_context().wrap_socket(self.sock)
+        except ssl.SSLCertVerificationError as e:
+            self.sock.close()
+            raise WasabiError(
+                "this is not one of your Amigas - its certificate is "
+                "not signed by your Wasabi CA (%s)" % e.verify_message)
+        except ssl.SSLError as e:
+            if "EOF" in str(e) or "UNEXPECTED_EOF" in str(e):
+                raise _NoTLSThere()
+            self.sock.close()
+            raise WasabiError(
+                "the encrypted connection failed (%s) - the Amiga may "
+                "not trust this computer's certificate: 'wasabi keys "
+                "amiga' installs a matching set" % (e.reason or e))
+        except (ConnectionResetError, BrokenPipeError, EOFError):
+            raise _NoTLSThere()
+        except socket.timeout:
+            self.sock.close()
+            raise AmigaSilent("the Amiga did not finish the TLS "
+                              "handshake in %d s" % timeout)
 
     def _hello(self, key, timeout):
         self.send(HELLO, struct.pack(">H", VERSION) + pack_str(key))
@@ -459,6 +497,67 @@ def keys_dir():
 
 
 _TLS_CTX = None
+
+
+class _NoTLSThere(Exception):
+    """The Amiga closed the connection at the TLS handshake: it has no
+    encryption to offer."""
+
+
+def have_keys():
+    d = keys_dir()
+    return all(os.path.exists(os.path.join(d, n))
+               for n in ("ca.crt", "client.crt", "client.key"))
+
+
+# Amigas that were reached encrypted: from then on, plain to them is
+# refused (as SSH refuses a changed host key) - otherwise anything that
+# could answer in an Amiga's place could ask for plain and get the key.
+def _pins_path():
+    return os.path.join(_xdg("XDG_CONFIG_HOME", "~/.config"), "wasabi",
+                        "tls-hosts")
+
+
+def _pins():
+    try:
+        with open(_pins_path()) as f:
+            return {l.strip() for l in f if l.strip()}
+    except OSError:
+        return set()
+
+
+def tls_pinned(peer, port):
+    return "%s:%d" % (peer, port) in _pins()
+
+
+def tls_pin(peer, port):
+    entry = "%s:%d" % (peer, port)
+    if entry in _pins():
+        return
+    try:
+        os.makedirs(os.path.dirname(_pins_path()), exist_ok=True)
+        with open(_pins_path(), "a") as f:
+            f.write(entry + "\n")
+    except OSError:
+        pass                            # a read-only config: no memory
+
+
+def tls_forget(host):
+    keep = [p for p in _pins() if p != host and not p.startswith(host + ":")]
+    gone = len(_pins()) - len(keep)
+    with open(_pins_path(), "w") as f:
+        f.write("".join(p + "\n" for p in sorted(keep)))
+    return gone
+
+
+_WARNED = set()
+
+
+def plain_warning(peer):
+    if peer not in _WARNED:
+        _WARNED.add(peer)
+        print("wasabi: %s has no encryption (no AmiSSL or keys there) - "
+              "this connection is plain" % peer, file=sys.stderr)
 
 
 def tls_context():
@@ -632,6 +731,15 @@ def cmd_keys(args):
                 subj = _openssl("x509", "-noout", "-subject", "-fingerprint",
                                 "-sha256", "-in", os.path.join(d, n))
                 print("%-24s %s" % (n, " ".join(subj.decode().split())))
+        for p in sorted(_pins()):
+            print("%-24s reached encrypted: plain is refused" % p)
+        return 0
+    if args.action == "forget":
+        if not args.where:
+            raise WasabiError("wasabi keys forget HOST - the address as "
+                              "'keys show' lists it")
+        n = tls_forget(args.where)
+        print("forgot %d encrypted Amiga(s) at %s" % (n, args.where))
         return 0
     if args.action == "drive":
         if not args.where or not args.name:
@@ -1154,11 +1262,10 @@ def cmd_update(conn, args):
                  % (sidecar, testport, myip))
     time.sleep(2.0)
     try:
-        # The new build is proven the way it will be used: over TLS
-        # whenever the network is in between - even while this update
-        # itself goes over --plain to an older daemon.
+        # The new build is proven the way this connection works:
+        # encrypted if this one is.
         probe = Conn(conn.host, testport, args.key, timeout=20.0,
-                     tls=want_tls(conn.sock.getpeername()[0]))
+                     tls=conn.tls)
     except (OSError, WasabiError) as exc:
         abort("it did not come up as a daemon on port %d (%s)"
               % (testport, exc), stop_probe=True)
@@ -3447,9 +3554,8 @@ def main(argv=None):
                    help="print results as JSON (ls, ps, screen, windows, "
                         "ping, run, wait, grab, health)")
     p.add_argument("--plain", action="store_true",
-                   help="no encryption - only to reach a wasabid older than "
-                        "0.6 once, to update it (%s)"
-                        % ", ".join(TLS_PLAIN_OK))
+                   help="no encryption for this command, even with keys "
+                        "(an Amiga that requires it refuses)")
     sub = p.add_subparsers(dest="cmd", required=True)
     # --json is also accepted after the command (`wasabi grab --json`),
     # which is where people write it. SUPPRESS keeps the subparser from
@@ -3758,8 +3864,10 @@ def main(argv=None):
 
     s = sub.add_parser("keys", help="the encryption keys: init (once), "
                        "amiga NAME (install on an Amiga), drive DIR NAME "
-                       "(an emulator's drive), show")
-    s.add_argument("action", choices=["init", "amiga", "drive", "show"])
+                       "(an emulator's drive), show, forget HOST (allow "
+                       "plain again to an Amiga reached encrypted before)")
+    s.add_argument("action", choices=["init", "amiga", "drive", "show",
+                                      "forget"])
     s.add_argument("where", nargs="?",
                    help="amiga: the Amiga's name; drive: the drive folder")
     s.add_argument("name", nargs="?", help="drive: the Amiga's name")
@@ -3841,10 +3949,6 @@ def main(argv=None):
     SILENCE = max(1.0, args.silence)
     global PLAIN
     if args.plain:
-        if args.cmd not in TLS_PLAIN_OK:
-            print("wasabi: --plain is only for reaching an old wasabid to "
-                  "update it (%s)" % ", ".join(TLS_PLAIN_OK), file=sys.stderr)
-            return 2
         PLAIN = True
     if args.cmd == "keys" and args.action != "amiga":
         args.fn, args.no_conn = cmd_keys, True

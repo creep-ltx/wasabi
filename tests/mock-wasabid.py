@@ -192,8 +192,10 @@ class Handler(socketserver.BaseRequestHandler):
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         # As wasabid 0.6 does on loopback: a first byte of 0x16 is a TLS
         # ClientHello, anything else a plain HELLO frame.
+        first = self.request.recv(1, socket.MSG_PEEK)
+        if first == b"\x16" and TLS_CTX is None:
+            return                      # TLS asked for, none here: close
         if TLS_CTX is not None:
-            first = self.request.recv(1, socket.MSG_PEEK)
             if first == b"\x16":
                 try:
                     self.request = TLS_CTX.wrap_socket(self.request,

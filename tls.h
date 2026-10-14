@@ -1,5 +1,5 @@
 /*
- * tls - every Wasabi connection is TLS 1.3, on AmiSSL 5.
+ * tls - Wasabi's encryption: TLS 1.3 on AmiSSL 5, when AmiSSL and keys are here.
  *
  * Both ends prove who they are with a certificate signed by the user's
  * own Wasabi CA (made on the PC by `wasabi keys init`): this end shows
