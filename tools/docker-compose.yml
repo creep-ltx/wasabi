@@ -1,0 +1,31 @@
+# Wasabi's web app (the phone and desktop pages, history, alerts, nightly
+# backups) in a container, on any always-on machine on the Amiga's LAN -
+# a NAS, a Raspberry Pi, a home server. Python 3.13, nothing to install.
+#
+#   1. Put this repository at ./wasabi (git clone, or copy it).
+#   2. mkdir -p config/wasabi files; put your key in config/wasabi/config:
+#        key = your-wasabi-key
+#      and, if your Amiga has AmiSSL, copy ca.crt, client.crt and
+#      client.key from ~/.config/wasabi/keys into config/wasabi/keys/.
+#   3. docker compose -f wasabi/tools/docker-compose.yml up -d
+#   4. Open http://<this machine>:8077 - the first visitor sets the
+#      password. Keep it on your LAN or a VPN such as Tailscale.
+services:
+  wasabi:
+    image: python:3.13-alpine
+    container_name: wasabi
+    restart: unless-stopped
+    # The host's network: the Amiga is found on the LAN by broadcast.
+    network_mode: host
+    environment:
+      - XDG_CONFIG_HOME=/config
+      - XDG_CACHE_HOME=/config/cache
+      - TZ=Europe/London
+      - PYTHONUNBUFFERED=1
+      # - WASABI_HOST=192.168.1.42    # if the Amiga cannot be found
+    volumes:
+      - ../:/app:ro                   # this repository
+      - ../../config:/config          # key, keys, the login, history
+      - ../../files:/files            # screenshots, backups, uploads
+    command: ["python3", "/app/wasabi", "serve", "--port", "8077",
+              "--files", "/files"]

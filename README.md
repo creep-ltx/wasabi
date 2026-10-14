@@ -54,6 +54,48 @@ That is `wasabi run "List SYS:C"` seen from the inside — the daemon
 opening the runner's temp file, the shell finding the binary, List
 pulling in its libraries — captured live off the A1200.
 
+## Quick start
+
+1. **On the Amiga** (OS 3.x, a TCP/IP stack): build `wasabid` with
+   `make` (see [Building and testing](#building-and-testing)), copy it
+   to `C:`, choose a key, and start it - put the last two lines in
+   `S:User-Startup` to have it at every boot.
+   ```
+   Copy wasabid C:
+   SetEnv SAVE wasabi.key choose-a-key
+   Run >NIL: C:wasabid
+   ```
+2. **On the PC** (Linux or macOS, Python 3): put `wasabi` on your path
+   and tell it the key.
+   ```
+   ln -s $PWD/wasabi ~/.local/bin/wasabi
+   mkdir -p ~/.config/wasabi && echo 'key = choose-a-key' > ~/.config/wasabi/config
+   wasabi ping                      # finds the Amiga by itself
+   wasabi desktop                   # the app in a window
+   ```
+3. **Encryption, if your Amiga has AmiSSL 5** (optional): `wasabi keys
+   init` once, `wasabi keys amiga NAME`, then `wasabi restart`. See
+   [Encryption](#encryption-wasabid-06-optional-since-08).
+
+## Pictures
+
+The desktop app (`wasabi desktop`) - the A1200's vital signs, its screen
+live and driven with your mouse and keyboard, files both ways, and the
+Amiga's debug output and DOS calls as they happen:
+
+![Overview: Pi temperature, 68k CPU load, power, memory and disks](docs/images/desktop-overview.png)
+![Screen: the Workbench, live, with an MUI program open](docs/images/desktop-screen.png)
+![Files: the PC and the Amiga side by side](docs/images/desktop-files.png)
+![Developer: the DOS call trace while a command runs](docs/images/desktop-developer.png)
+
+The same app on a phone, served from a NAS (`wasabi serve`, see
+[Wasabi phone](#wasabi-phone)):
+
+<p>
+<img src="docs/images/phone-overview.png" width="300" alt="Phone: Overview">
+<img src="docs/images/phone-screen.png" width="300" alt="Phone: the Amiga's screen">
+</p>
+
 ## Status
 
 | Piece | State |
@@ -1187,9 +1229,16 @@ is `wasabi_api.py`; the pages are in `view/src/pages/`.
 
 ## Wasabi phone
 
-The same app on a phone, served by the NAS: `wasabi serve` in a Docker
-container, reached over Tailscale at **http://bytebandit:8077** (at home
-also `http://192.168.68.118:8077`).
+The same app on a phone, served by an always-on machine on the Amiga's
+LAN: `wasabi serve` in a Docker container. Here that is a Synology NAS,
+reached over Tailscale.
+
+**Your own:** [`tools/docker-compose.yml`](tools/docker-compose.yml) runs
+it on any Docker host (a NAS, a Raspberry Pi, a home server) with the
+stock `python:3.13-alpine` image - the file says what to put where. Keep
+port 8077 on your LAN or a VPN; the login is the second lock, not the
+first. (`tools/nas-stack.yml` and `tools/deploy-nas.sh` are this
+project's own NAS setup, kept as an example.)
 
 - **A login.** The first visit chooses the password (at least 8
   characters; stored as a salted scrypt hash); after that each phone or

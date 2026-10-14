@@ -89,7 +89,8 @@ function Pane({ side, title, path, setPath, listing, selected, setSelected, busy
   const entries = listing?.entries ?? [];
   const up = side === 'pc' ? (listing?.parent ?? path) : amigaParent(path);
   const open = (e: Entry) => {
-    if (side === 'amiga') setPath(path ? amigaJoin(path, e.name) : `${e.name}:`);
+    // amigaJoin also covers a volume, listed with its colon ("Work:")
+    if (side === 'amiga') setPath(amigaJoin(path, e.name));
     else setPath(`${path.replace(/\/$/, '')}/${e.name}`);
   };
   const toggle = (name: string) => {
