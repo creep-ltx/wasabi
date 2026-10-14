@@ -4,12 +4,12 @@
 [![release](https://img.shields.io/github/v/release/creep-ltx/wasabi)](https://github.com/creep-ltx/wasabi/releases)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Remote control for a real Amiga** - from a Linux or macOS PC, a phone,
+**Remote control for a real Amiga** - from a Linux, macOS or Windows PC, a phone,
 an Amiga script, or an AI assistant.
 
 Wasabi is two programs: **`wasabid`**, a small daemon on the Amiga, and
 **`wasabi`**, a client on the PC (one Python file, standard library
-only). Together they copy files, run programs, show and drive the
+only - or one ready-made file for Linux, macOS and Windows). Together they copy files, run programs, show and drive the
 Amiga's screen, and let you watch the machine think - its debug output
 and its DOS calls, live, while your code runs on real hardware.
 
@@ -118,23 +118,43 @@ the last guru. [More: Health](docs/apps.md#health)
 
 [More: Security](docs/security.md)
 
+## Downloads
+
+From the [latest release](https://github.com/creep-ltx/wasabi/releases/latest):
+
+| File | For |
+|---|---|
+| `wasabid` | the Amiga, any 68k CPU |
+| `wasabid.020` | the Amiga, 68020 or better (a stock A1200, accelerators, PiStorm) |
+| `wasabi-linux-x86_64`, `wasabi-linux-arm64` | Linux PCs and the Raspberry Pi - one file, no Python needed |
+| `wasabi-macos-arm64`, `wasabi-macos-x86_64` | Macs with Apple Silicon or Intel |
+| `wasabi-windows-x64.exe` | Windows |
+| `wasabi` | the client as a Python script, for any system with Python 3 |
+
+The one-file clients carry everything: the command line, the desktop
+app (it opens in your browser), the phone server and the MCP server
+(`wasabi mcp`). They are not signed: on a Mac run
+`xattr -d com.apple.quarantine wasabi-macos-*` once; on Windows choose
+"More info", then "Run anyway".
+
 ## Quick start
 
-1. **On the Amiga** - copy `wasabid` (any 68k) or `wasabid.020` (68020
-   or better) from the [releases](https://github.com/creep-ltx/wasabi/releases)
-   to `C:wasabid`, choose a key, start it. Add the last two lines to
-   `S:User-Startup` to have it at every boot.
+1. **On the Amiga** - copy `wasabid` or `wasabid.020` to `C:wasabid`,
+   choose a key, start it. Add the last two lines to `S:User-Startup`
+   to have it at every boot.
    ```
    SetEnv SAVE wasabi.key choose-a-key
    Run >NIL: C:wasabid
    ```
-2. **On the PC** - put `wasabi` on your path and give it the key.
+2. **On the PC** - rename the download to `wasabi` (`wasabi.exe` on
+   Windows), make it executable on Linux and Mac (`chmod +x`), put it
+   on your path, and give it the key.
    ```
-   ln -s $PWD/wasabi ~/.local/bin/wasabi
    mkdir -p ~/.config/wasabi && echo 'key = choose-a-key' > ~/.config/wasabi/config
    wasabi ping                      # finds the Amiga by itself
-   wasabi desktop                   # the app in a window
+   wasabi desktop                   # the app
    ```
+   (On Windows the config goes in `%USERPROFILE%\.config\wasabi\config`.)
 3. **Encryption** (optional, needs AmiSSL 5 on the Amiga): `wasabi keys
    init`, `wasabi keys amiga NAME`, `wasabi restart`.
 
@@ -162,7 +182,7 @@ wasabi update wasabid                replace the daemon, checked first
 | | |
 |---|---|
 | **Amiga** | AmigaOS 3.x and a TCP/IP stack with `bsdsocket.library`. AmiSSL 5 only for encryption; MUI only to read MUI windows. |
-| **PC** | Linux or macOS with Python 3; OpenSSL 3 to make keys. |
+| **PC** | Linux, macOS or Windows - the one-file downloads need nothing else; the script needs Python 3. OpenSSL 3 to make encryption keys. |
 | **Phone app** | any Docker host on the Amiga's network ([`tools/docker-compose.yml`](tools/docker-compose.yml)). |
 | **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030 and as a stock 68020. 261 client tests on Linux and macOS for every change. |
 
