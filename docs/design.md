@@ -26,7 +26,7 @@
 | list rows in `ui` | **0.9b1, tested in FS-UAE** (GadTools, MUI 5, DCTelnet's Address Book) — each row by its text, selected or not, clickable when in view |
 | transfers that do not block | **0.9b1, tested in FS-UAE** — during an 80 MB upload, ping 0.07 s and screenshots as fast as without it |
 | `wasabid.020` | **0.9b1, tested in FS-UAE as a stock A1200** (68EC020, 8 MB) — the same daemon built for 68020+; `make both` |
-| `--native` coordinates, `grab --region`, `mouse where`, more keys | **0.9b3, tested against the mock** (261 client tests) and on the A1200 - see the commit log for the latest |
+| `--native` coordinates, `grab --region`, `mouse where`, more keys | **0.9b3, working on the real A1200** (pointer read back exactly, region grab) and in the client tests (261) |
 | `WASABI` ARexx port | **working on the real A1200 (answers there); every command tested in FS-UAE** — Amiga programs and scripts type, press keys, click, click gadgets by name and pick menus through it |
 | MCP server (`wasabi_mcp.py`) | **working** (tested in FS-UAE; registered for every Claude Code session on the author's PC) — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
