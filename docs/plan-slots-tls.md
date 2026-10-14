@@ -73,7 +73,7 @@ connection TLS 1.3 with client certificates, no plain fallback; loopback
 (emulators, SSH tunnels) may stay plain - a 68030/50 FS-UAE needed 12-22 s
 per handshake, and loopback bytes never cross a network. A1200: handshake
 0.07 s, 11.7 MB/s up, 13 MB/s down, a 1280x960 grab in 0.3 s. NAS has its
-keys (deploy-nas.sh). Details in README "Encryption".
+keys (deploy-nas.sh). Details in docs/security.md "Encryption".
 
 No plain fallback: the user chose TLS as a requirement over "try TLS,
 else plain". So:

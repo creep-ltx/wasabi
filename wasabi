@@ -78,6 +78,12 @@ SILENCE = 15.0
 # (wasabid 0.6+ with AmiSSL); see Conn. --plain: not this time.
 PLAIN = False
 
+# Coordinates: by default the picture's pixels - grab doubles a 640x256
+# screen's rows to keep its shape, and every position follows the
+# picture. NATIVE (--native, coords = native): the screen's own pixels
+# everywhere instead, as amiagent and Intuition count them.
+NATIVE = False
+
 # Volumes and assigns where a wrong delete or overwrite costs a boot.
 # `put`, `deploy` and `del` there need --force. More names (the boot
 # volume's own name, say) go in the config file: protect = AmigaOS,Work
@@ -1851,6 +1857,18 @@ def cmd_grab(conn, args):
     the details go to stderr.
     """
     box, label, k = None, "screen", 1
+    if NATIVE:
+        args.raw = True                  # the screen's own pixels
+    if args.region and args.window is not None:
+        raise WasabiError("--region or --window, not both")
+    if args.region:
+        try:
+            rx, ry, rw, rh = (int(v) for v in args.region.split(","))
+        except ValueError:
+            raise WasabiError("--region X,Y,W,H - four numbers, e.g. "
+                              "--region 0,0,320,40")
+        box = (rx, ry, rx + rw, ry + rh)
+        label = "region %d,%d %dx%d" % (rx, ry, rw, rh)
     if args.window is not None:
         if args.screen:
             raise WasabiError(
@@ -2352,6 +2370,25 @@ def cmd_mouse(conn, args):
     NOPOS = -32768
     if args.action == "wheel":
         return mouse_wheel(conn, args)
+    if args.action == "where":
+        screens, _ = list_windows(conn)
+        front = screens[0] if screens else None
+        if not front or "pointer" not in front:
+            raise WasabiError("this daemon (%s) does not say where the "
+                              "pointer is - update it with 'wasabi update "
+                              "wasabid'" % conn.banner)
+        native_out(screens)
+        x, y = front["pointer"]
+        if args.json:
+            emit_json({"x": x, "y": y, "screen": front["title"]})
+        else:
+            print("%d %d" % (x, y))
+        return
+    if NATIVE and isinstance(args.y, int):
+        # The screen's own pixels in; the daemon counts the picture's.
+        screens, _ = list_windows(conn)
+        if screens:
+            args.y *= screens[0]["row_scale"]
     if isinstance(args.x, str) or isinstance(args.y, str):
         raise WasabiError("up and down are for 'mouse wheel'")
     if args.action == "move":
@@ -2423,6 +2460,16 @@ for _row, _base in (("qwertyuiop", 0x10), ("asdfghjkl", 0x20),
         RAWKEYS[_c] = _base + _i
 for _i in range(10):
     RAWKEYS["f%d" % (_i + 1)] = 0x50 + _i
+# PC-keyboard keys as OS 3.2/3.9 and AROS number them, and the keypad.
+RAWKEYS.update({"f11": 0x4B, "f12": 0x6F, "insert": 0x47, "ins": 0x47,
+                "pageup": 0x48, "pgup": 0x48, "pagedown": 0x49,
+                "pgdn": 0x49, "home": 0x70, "end": 0x71,
+                "kpdot": 0x3C, "kpenter": 0x43, "kpminus": 0x4A,
+                "kplparen": 0x5A, "kprparen": 0x5B, "kpslash": 0x5C,
+                "kpstar": 0x5D, "kpplus": 0x5E})
+for _i, _c in enumerate((0x0F, 0x1D, 0x1E, 0x1F, 0x2D, 0x2E, 0x2F, 0x3D,
+                         0x3E, 0x3F)):
+    RAWKEYS["kp%d" % _i] = _c
 
 # Modifier name -> (its own raw key, its qualifier bit).
 MODIFIERS = {"shift": (0x60, 0x01), "lshift": (0x60, 0x01),
@@ -2449,6 +2496,8 @@ def key_combo_events(combo):
         code = MODIFIERS[key][0]
     elif key in RAWKEYS:
         code = RAWKEYS[key]
+    elif re.fullmatch(r"0x[0-7][0-9a-f]", key):
+        code = int(key, 16)              # any raw key code by number
     else:
         raise WasabiError("unknown key %r - use 'key type' for text"
                           % key)
@@ -2528,6 +2577,8 @@ def list_windows(conn):
                             "top": int(f[3]), "width": w, "height": h,
                             "depth": int(f[6]), "row_scale": k,
                             "front": not screens, "windows": []})
+            if len(f) >= 10:             # wasabid 0.9b3+: the pointer
+                screens[-1]["pointer"] = [int(f[8]), int(f[9]) * k]
         elif f[0] == "W" and len(f) >= 13 and screens:
             k = screens[-1]["row_scale"]
             screens[-1]["windows"].append({
@@ -2551,6 +2602,29 @@ def find_window(screens, title):
     return None, None
 
 
+def native_out(screens):
+    """With --native: the screen's own pixels in what is shown - undo
+    the picture's row doubling in every y and height."""
+    if not NATIVE:
+        return screens
+    for sc in screens:
+        k = sc["row_scale"]
+        if k == 1:
+            continue
+        if "pointer" in sc:
+            sc["pointer"][1] //= k
+        for w in sc["windows"]:
+            w["top"] //= k
+            w["height"] //= k
+            if "border" in w:
+                w["border"][1] //= k
+                w["border"][3] //= k
+            for g in w.get("gadgets", []):
+                g["y"] //= k
+                g["height"] //= k
+    return screens
+
+
 def cmd_windows(conn, args):
     """Every screen and its windows, front first.
 
@@ -2563,6 +2637,7 @@ def cmd_windows(conn, args):
     if args.raw:
         print("\n".join(raw))
         return
+    native_out(screens)
     if args.json:
         emit_json(screens)
         return
@@ -2807,6 +2882,7 @@ def cmd_ui(conn, args):
     if args.action == "list" or args.action == "menus":
         screens = read_ui(conn, every_screen=args.all_screens or
                           args.window is not None)
+        native_out(screens)
         pairs = ui_windows(screens, args.window)
         if args.json:
             emit_json(screens if args.window is None else
@@ -3540,7 +3616,7 @@ def load_config():
 
 
 JSON_COMMANDS = ("ls", "ps", "screen", "windows", "ping", "run", "wait",
-                 "grab", "health", "slots", "ui", "arexx")
+                 "grab", "health", "slots", "ui", "arexx", "mouse")
 
 
 def main(argv=None):
@@ -3564,6 +3640,12 @@ def main(argv=None):
     p.add_argument("--json", action="store_true",
                    help="print results as JSON (ls, ps, screen, windows, "
                         "ping, run, wait, grab, health)")
+    p.add_argument("--native", action="store_true",
+                   default=os.environ.get("WASABI_COORDS",
+                                          cfg.get("coords", "")) == "native",
+                   help="coordinates in the screen's own pixels (a 640x256 "
+                        "screen stays 640x256) instead of the picture's; "
+                        "also WASABI_COORDS=native or 'coords = native'")
     p.add_argument("--plain", action="store_true",
                    help="no encryption for this command, even with keys "
                         "(an Amiga that requires it refuses)")
@@ -3742,6 +3824,9 @@ def main(argv=None):
     s.add_argument("--raw", action="store_true",
                    help="no aspect correction - keep the pixels exactly "
                         "as read (a 640x256 screen stays 640x256)")
+    s.add_argument("--region", metavar="X,Y,W,H",
+                   help="just this rectangle of the screen, in the same "
+                        "pixels as the picture")
     s.add_argument("--diff", metavar="BASELINE.png",
                    help="compare this grab against an earlier one and "
                         "report what changed; exits 1 if anything did, "
@@ -3752,7 +3837,7 @@ def main(argv=None):
                        "menus, turn the wheel")
     s.add_argument("action",
                    choices=["move", "click", "doubleclick", "down", "up",
-                            "wheel"])
+                            "wheel", "where"])
     s.add_argument("x", nargs="?", type=mouse_arg, default=None,
                    help="absolute X in grab's pixel space; click without "
                         "coordinates clicks where the pointer is. "
@@ -3961,6 +4046,8 @@ def main(argv=None):
     global PLAIN
     if args.plain:
         PLAIN = True
+    global NATIVE
+    NATIVE = args.native
     if args.cmd == "keys" and args.action != "amiga":
         args.fn, args.no_conn = cmd_keys, True
     args.protect = {v.strip().rstrip(":").lower()

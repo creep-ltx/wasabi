@@ -602,6 +602,22 @@ check "mouse move still refuses a coordinate that is not a number" "1" "$out"
 $W key type 'å' --enter >/dev/null 2>&1
 out=$(tail -1 "$ROOT/keys.log" 2>/dev/null)
 check "key type sends Latin-1 text, Return as CR" "0001e50d" "$out"
+$W key press f12 home 0x45 >/dev/null 2>&1
+out=$(tail -1 "$ROOT/keys.log" 2>/dev/null)
+check "key press knows F12, Home and raw codes" "0000006f000000ef00000070000000f000000045000000c50000" "$out"
+out=$($W mouse where 2>/dev/null)
+check "mouse where: the pointer, in the picture's pixels" "320 200" "$out"
+out=$($W --native mouse where 2>/dev/null)
+check "and with --native, in the screen's own" "320 100" "$out"
+out=$($W --native windows 2>/dev/null | grep -c 'window "AmigaShell"  at 100,100  640x200')
+check "--native windows: the screen's own pixels" "1" "$out"
+rm -f "$ROOT/ui.log"
+$W --native mouse click 30 40 >/dev/null 2>&1
+out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "--native mouse: y doubled on the way to a 640x256 screen" "mouse 1 0 1 30 80" "$out"
+$W grab --region 2,1,4,2 "$ROOT/region.png" >/dev/null 2>&1
+out=$(python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(); print("%dx%d" % struct.unpack(">II", d[16:24]))' "$ROOT/region.png" 2>&1)
+check "grab --region crops to the rectangle" "4x2" "$out"
 out=$($W key press nosuchkey 2>&1 | grep -c "unknown key")
 check "an unknown key name is refused here" "1" "$out"
 

@@ -60,10 +60,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.9b2"
+#define VERSION_STR "wasabid 0.9b3"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.9b2 (14.10.2026)";
+    "$VER: wasabid 0.9b3 (14.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -85,7 +85,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport,plainopt"
+                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport,plainopt,pointer"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -2323,12 +2323,12 @@ static BOOL cmd_windows(int fd)
         copystr(title, sizeof(title), sc->Title ? (char *)sc->Title : "");
         win_clean(title);
         if (used + 300 > WIN_BUF) { full = TRUE; break; }
-        used += sprintf(buf + used, "S\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%ld\t%s\n",
+        used += sprintf(buf + used, "S\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%ld\t%s\t%ld\t%ld\n",
                         (unsigned long)sc, (long)sc->LeftEdge,
                         (long)sc->TopEdge, (long)sc->Width,
                         (long)sc->Height,
                         (long)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH),
-                        title);
+                        title, (long)sc->MouseX, (long)sc->MouseY);
         for (w = sc->FirstWindow; w; w = w->NextWindow) {
             char flags[3];
             LONG f = 0;
@@ -3346,12 +3346,12 @@ static BOOL cmd_ui(int fd, ULONG flags)
         copystr(title, sizeof(title), sc->Title ? (char *)sc->Title : "");
         win_clean(title);
         if (used + 300 > UI_BUF) { full = TRUE; break; }
-        used += sprintf(buf + used, "S\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%ld\t%s\n",
+        used += sprintf(buf + used, "S\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%ld\t%s\t%ld\t%ld\n",
                         (unsigned long)sc, (long)sc->LeftEdge,
                         (long)sc->TopEdge, (long)sc->Width,
                         (long)sc->Height,
                         (long)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH),
-                        title);
+                        title, (long)sc->MouseX, (long)sc->MouseY);
         for (w = sc->FirstWindow; w && !full; w = w->NextWindow) {
             char fl[3];
             LONG f = 0;
@@ -3939,6 +3939,16 @@ static const struct { const char *name; UBYTE code; } rx_keys[] = {
     { "help", 0x5F }, { "f1", 0x50 }, { "f2", 0x51 }, { "f3", 0x52 },
     { "f4", 0x53 }, { "f5", 0x54 }, { "f6", 0x55 }, { "f7", 0x56 },
     { "f8", 0x57 }, { "f9", 0x58 }, { "f10", 0x59 },
+    /* PC-keyboard keys as OS 3.2/3.9 and AROS number them */
+    { "f11", 0x4B }, { "f12", 0x6F }, { "insert", 0x47 }, { "ins", 0x47 },
+    { "pageup", 0x48 }, { "pgup", 0x48 }, { "pagedown", 0x49 },
+    { "pgdn", 0x49 }, { "home", 0x70 }, { "end", 0x71 },
+    /* the numeric keypad */
+    { "kp0", 0x0F }, { "kp1", 0x1D }, { "kp2", 0x1E }, { "kp3", 0x1F },
+    { "kp4", 0x2D }, { "kp5", 0x2E }, { "kp6", 0x2F }, { "kp7", 0x3D },
+    { "kp8", 0x3E }, { "kp9", 0x3F }, { "kpdot", 0x3C }, { "kpenter", 0x43 },
+    { "kpminus", 0x4A }, { "kplparen", 0x5A }, { "kprparen", 0x5B },
+    { "kpslash", 0x5C }, { "kpstar", 0x5D }, { "kpplus", 0x5E },
     { NULL, 0 }
 };
 static const struct { const char *name; UBYTE code; UWORD qual; } rx_mods[] = {
@@ -3983,6 +3993,13 @@ static BOOL rx_combo(const char *combo, UBYTE *out, LONG *n, LONG cap)
         for (k = 0; code < 0 && rx_mods[k].name; k++)
             if (strcmp(low, rx_mods[k].name) == 0)
                 code = rx_mods[k].code;
+        if (code < 0 && low[0] == '0' && low[1] == 'x') {
+            /* a raw key code by number: 0x45 */
+            char *end;
+            long v = strtol(low + 2, &end, 16);
+            if (!*end && v >= 0 && v < 0x80)
+                code = v;
+        }
         if (code < 0 && low[0] && !low[1]) {
             static const char row1[] = "1234567890", r2[] = "qwertyuiop",
                               r3[] = "asdfghjkl", r4[] = "zxcvbnm";

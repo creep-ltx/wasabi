@@ -64,7 +64,7 @@ BANNER = None
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
         "hb,guru,snoopentry,psfree,key,windows,health,live,clip,detach,"
-        "slots,ui,arexx")
+        "slots,ui,arexx,mouse")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -674,7 +674,7 @@ class Handler(socketserver.BaseRequestHandler):
 
     def do_windows(self):
         """One screen, two windows - the daemon's tab-separated shape."""
-        rows = ["S\t0x00001111\t0\t0\t640\t256\t2\tWorkbench Screen",
+        rows = ["S\t0x00001111\t0\t0\t640\t256\t2\tWorkbench Screen\t320\t100",
                 "W\t0x0000aaaa\t100\t100\t640\t200\t4\t11\t18\t2"
                 "\ta\t-\tAmigaShell",
                 "W\t0x0000bbbb\t0\t11\t640\t245\t0\t0\t0\t0"
@@ -688,7 +688,7 @@ class Handler(socketserver.BaseRequestHandler):
     def do_ui(self):
         """WINDOWS' lines plus gadgets and menus, as wasabid 0.5 sends
         them: a requester in front of the Shell."""
-        rows = ["S\t0x00001111\t0\t0\t640\t256\t2\tWorkbench Screen",
+        rows = ["S\t0x00001111\t0\t0\t640\t256\t2\tWorkbench Screen\t320\t100",
                 "W\t0x0000cccc\t200\t50\t200\t60\t4\t11\t4\t2"
                 "\ta\tRequestChoice\tQuestion",
                 "G\t0x00000001\t0\t0\t20\t11\tclose\t-\t0\t-\t\t",

@@ -104,6 +104,10 @@ def t_screenshot(a):
         args = ["grab", local]
         if a.get("window"):
             args += ["--window", a["window"]]
+        if a.get("region"):
+            r = a["region"]
+            args += ["--region", "%d,%d,%d,%d" % (r["x"], r["y"], r["width"],
+                                                  r["height"])]
         info = ok(*args)
         png = open(local, "rb").read()
     return [{"type": "image", "mimeType": "image/png",
@@ -166,6 +170,41 @@ def t_mouse(a):
         args.append("--middle")
     ok(*args)
     return text("done")
+
+
+def t_pointer(a):
+    return text(ok("mouse", "where"))
+
+
+def t_drag(a):
+    btn = ["--right"] if a.get("button") == "right" else \
+        ["--middle"] if a.get("button") == "middle" else []
+    ok("mouse", "move", a["x1"], a["y1"])
+    ok("mouse", "down", *btn)
+    try:
+        for x, y in a.get("via", []):
+            ok("mouse", "move", x, y, *btn)
+        ok("mouse", "move", a["x2"], a["y2"], *btn)
+    finally:
+        ok("mouse", "up", *btn)          # never leave a button held
+    return text("dragged")
+
+
+def t_screens(a):
+    return text(ok("screen", "--list"))
+
+
+def t_wait(a):
+    what = a.get("what", "window")
+    args = ["wait", what]
+    if what in ("window", "task", "file"):
+        if not a.get("name"):
+            raise ToolError("wait %s needs a name" % what)
+        args.append(a["name"])
+    if a.get("gone"):
+        args.append("--gone")
+    args += ["--timeout", a.get("timeout", 30)]
+    return text(ok(*args, timeout=float(a.get("timeout", 30)) + 30))
 
 
 def t_key_type(a):
@@ -235,9 +274,39 @@ TOOLS = [
      "for binary data. System places (SYS:, C:, S:, LIBS: ...) are refused.",
      S(path=STR("Amiga path", True), text=STR("the contents as text"),
        base64=STR("the contents as base64"))),
-    ("amiga_screenshot", t_screenshot, "The front screen, or one window, as "
-     "a PNG. Coordinates in it are the ones the mouse tools use.",
-     S(window=STR("only this window (part of its title)"))),
+    ("amiga_screenshot", t_screenshot, "The front screen, one window, or a "
+     "region of the screen, as a PNG. Coordinates in it are the ones the "
+     "mouse tools use.",
+     {"type": "object", "properties": {
+         "window": {"type": "string",
+                    "description": "only this window (part of its title)"},
+         "region": {"type": "object", "description": "only this rectangle",
+                    "properties": {"x": {"type": "number"},
+                                   "y": {"type": "number"},
+                                   "width": {"type": "number"},
+                                   "height": {"type": "number"}},
+                    "required": ["x", "y", "width", "height"]}}}),
+    ("amiga_screens", t_screens, "List the open screens, front first.", S()),
+    ("amiga_pointer", t_pointer, "Where the mouse pointer is on the front "
+     "screen (x y, in screenshot coordinates). No picture is sent.", S()),
+    ("amiga_drag", t_drag, "Press a button at x1,y1, move (through 'via' "
+     "points if given) to x2,y2, release: drag and drop, sliders, and "
+     "Amiga menus with the right button.",
+     {"type": "object", "required": ["x1", "y1", "x2", "y2"], "properties": {
+         "x1": {"type": "number"}, "y1": {"type": "number"},
+         "x2": {"type": "number"}, "y2": {"type": "number"},
+         "via": {"type": "array", "items": {"type": "array",
+                                            "items": {"type": "number"}},
+                 "description": "points to pass through, [[x,y],...]"},
+         "button": {"type": "string", "description": "left (default), "
+                    "right (menus) or middle"}}}),
+    ("amiga_wait", t_wait, "Wait for something instead of sleeping: a "
+     "window or task to appear (or go, with gone), a file, the screen to "
+     "change or to settle (still).",
+     S(what=STR("window, task, file, change or still"),
+       name=STR("the window title, task name or file path"),
+       gone=BOOL("wait for it to go instead"),
+       timeout=NUM("seconds (default 30)"))),
     ("amiga_windows", t_windows, "Every screen and window, front first, with "
      "positions.", S()),
     ("amiga_ui_list", t_ui_list, "The gadgets (buttons, text fields, "
@@ -272,7 +341,8 @@ TOOLS = [
      "keymap, into the active window.",
      S(text=STR("the text", True), enter=BOOL("press Return after it"))),
     ("amiga_key_press", t_key_press, "Press keys by name: return, esc, tab, "
-     "f1, up, ramiga+q, ctrl+c ...",
+     "f1-f12, up, home, end, pageup, pagedown, insert, kp0-kp9, kpenter, "
+     "ramiga+q, ctrl+c ... or a raw key code like 0x45.",
      {"type": "object", "required": ["keys"], "properties": {
          "keys": {"type": "array", "items": {"type": "string"},
                   "description": "one or more key names"}}}),
