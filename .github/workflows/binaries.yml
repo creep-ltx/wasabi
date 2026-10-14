@@ -21,7 +21,7 @@ jobs:
           - { os: ubuntu-22.04,     name: wasabi-linux-x86_64 }
           - { os: ubuntu-22.04-arm, name: wasabi-linux-arm64 }
           - { os: macos-14,         name: wasabi-macos-arm64 }
-          - { os: macos-13,         name: wasabi-macos-x86_64 }
+          - { os: macos-15-intel,   name: wasabi-macos-x86_64 }
           - { os: windows-latest,   name: wasabi-windows-x64.exe }
     runs-on: ${{ matrix.os }}
     defaults:
