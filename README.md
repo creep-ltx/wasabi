@@ -8,6 +8,33 @@ network, and the same connection uploads a binary anywhere on the
 system, runs it with its output streaming back, and reboots the
 machine — all from the terminal the code was written in.
 
+**What it does** (each links to its section):
+
+- **Develop on real hardware:** [put, run, deploy](#commands) with live
+  output and real exit codes, [the debug stream](#the-debug-stream),
+  [the DOS call trace](#the-snoop-stream), [guru reports](#the-guru-report),
+  four commands at once, [self-update](#updating-the-daemon).
+- **See and drive the machine:** [screenshots](#seeing-the-screen),
+  [the live screen in a window](#the-view) with your mouse and keyboard,
+  [typing and clicking](#driving-the-gui), and
+  [buttons and menus by name](#gadgets-and-menus-by-name-and-arexx) in
+  Intuition, GadTools, ReAction and MUI windows.
+- **Apps:** [the desktop app](#the-desktop-app) (overview, screen, files,
+  screenshots, developer tools) and the same app [on a phone](#wasabi-phone)
+  from a NAS, with history, alerts and nightly backups of the Amiga.
+- **ARexx both ways:** send commands to any program's ARexx port, and
+  [the `WASABI` port](#the-wasabi-arexx-port) lets Amiga scripts type,
+  click and pick menus.
+- **AI assistants:** made for scripts and for Claude
+  ([`--json`, exit codes, waiting](#made-for-scripts-and-for-claude)), and
+  an [MCP server](#mcp-wasabi-for-other-ai-tools) for Claude Code, Claude
+  Desktop, Codex, Gemini CLI, Cursor and others.
+- **Health of a PiStorm:** [Pi temperature, power dips, 68k CPU load,
+  memory](#health).
+- **Safe by design:** LAN-only by default, a key, and
+  [optional encryption](#encryption-wasabid-06-optional-since-08) with
+  your own certificates when the Amiga has AmiSSL.
+
 Two halves:
 
 - **`wasabid`** — a small daemon on the Amiga (C, Bebbo's gcc). Two
@@ -22,7 +49,7 @@ Two halves:
 
 ```
 $ wasabi discover
-192.168.68.109  :1234  a1200        wasabid 0.2
+192.168.68.107  :1234  a1200        wasabid 0.8
 
 $ wasabi deploy ccon-handler L:ccon-handler --reboot
 ccon-handler -> L:ccon-handler (106912 bytes)
@@ -115,10 +142,10 @@ The same app on a phone, served from a NAS (`wasabi serve`, see
 | `view` | **working on the real A1200** (tested in a headless Firefox: picture, clicks, typing, Right Amiga shortcuts, right-button menus, settings) — the live screen in a window, driven with the PC's mouse and keyboard; only changes are sent, key-to-screen 52 ms over Wi-Fi |
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `slots` / `free` | **working on the real A1200 (0.4b2)** — four commands at once (one per connection); `wasabi slots` lists them, `wasabi free N` Ctrl-Cs one and lets go of the slot if it will not stop; `run --max-time` stops exactly its own slot |
-| TLS (`keys`) | **0.6b1 on the A1200 and the NAS; optional since 0.8b1 (tested in FS-UAE)** — Ed25519 certificates from your own CA; an Amiga with AmiSSL and keys accepts only TLS, one without works plain; a client never silently goes plain to an Amiga it reached encrypted |
-| `ui` (gadgets and menus by name) / `arexx` | **0.5b1, tested in FS-UAE (OS 3.2.3)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. Intuition, GadTools, ReAction and MUI 4/5 windows (0.7b1) |
-| `WASABI` ARexx port | **0.7b1, tested in FS-UAE** — Amiga programs and scripts type, press keys, click, click gadgets by name and pick menus through it |
-| MCP server (`wasabi_mcp.py`) | **0.1, tested in FS-UAE** — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
+| TLS (`keys`) | **working on the real A1200 and the NAS; optional since 0.8** — Ed25519 certificates from your own CA; an Amiga with AmiSSL and keys accepts only TLS, one without works plain; a client never silently goes plain to an Amiga it reached encrypted |
+| `ui` (gadgets and menus by name) / `arexx` | **working on the real A1200; ReAction and MUI tested in FS-UAE (OS 3.2.3, MUI 5)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. Intuition, GadTools, ReAction and MUI 4/5 windows (0.7b1) |
+| `WASABI` ARexx port | **working on the real A1200 (answers there); every command tested in FS-UAE** — Amiga programs and scripts type, press keys, click, click gadgets by name and pick menus through it |
+| MCP server (`wasabi_mcp.py`) | **working** (tested in FS-UAE; registered for every Claude Code session on the author's PC) — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
 | stream heartbeat + farewell | **working on the real A1200** — a dead machine is noticed; a deliberate exit says goodbye first |
@@ -135,7 +162,8 @@ SYS:C` streamed all 119 entries, and a failing command reported
 `rc 10, IoErr 205` correctly.
 
 The client is additionally exercised end to end by `make test` against a
-host mock that speaks the same protocol — 100 tests, no Amiga required.
+host mock that speaks the same protocol — 252 tests, no Amiga required,
+run on Linux and macOS for every push.
 
 ### Discovery on a Wi-Fi-to-wired network
 
@@ -271,11 +299,12 @@ wasabi arexx PORT COMMAND [--timeout S]
                              code = its rc. No PORT: list the ports
 ```
 
-Every command also takes `--json` (where it lists something) and
-`--silence S` — see [Made for scripts](#made-for-scripts-and-for-claude).
+Every command also takes `--json` (where it lists something),
+`--plain` (no encryption this time) and `--silence S` — see [Made for scripts](#made-for-scripts-and-for-claude).
 `--host` overrides discovery, and `WASABI_HOST`/`WASABI_PORT`/`WASABI_KEY`/
 `WASABI_SILENCE` override the config file. The daemon takes `wasabid [port] [name ID] [allow
-CIDR|any]`, and is LAN-only unless told otherwise. `name` is what
+CIDR|any] [plain]`, and is LAN-only unless told otherwise; `plain` lets
+unencrypted clients in even when it has TLS. `name` is what
 discovery replies call the machine — two Amigas on one LAN stop being
 interchangeable "amiga"s — and it overrides `ENV:HOSTNAME`, which is
 the fallback (then plain `amiga`). It survives `restart` and
@@ -554,7 +583,15 @@ client was proven with.
 
 The cross-compiler is Bebbo's `m68k-amigaos-gcc`, at
 `$(HOME)/opt/amiga/bin` on this box. Override `CC` if yours lives
-elsewhere.
+elsewhere. The first `make` downloads the AmiSSL 5.27 developer kit
+(`third_party/fetch.sh`, checked by its SHA-256) for `tls.c`; the
+daemon only opens AmiSSL at run time, so it runs without it. It is
+built with `-fbbb=-`: bebbo's own optimizer pass miscompiles loops over
+small structs, and did so here.
+
+`view/` is the desktop and phone app (React); its built `dist/` is in
+git, so nothing needs Node unless you change it. `view/test/` drives
+it in a headless Firefox; `docs-*.mjs` take the README's pictures.
 
 **A release carries both halves, always.** `wasabid` and `wasabi` are
 attached to the same tag, and they are the pair that was tested
@@ -1554,8 +1591,12 @@ Zed, LM Studio. Every tool runs the `wasabi` command, so discovery, the
 key and the system-place protection are the same as on the command line.
 
 ```
-claude mcp add wasabi -- python3 ~/Projects/wasabi/wasabi_mcp.py
+claude mcp add --scope user wasabi -- python3 ~/Projects/wasabi/wasabi_mcp.py
 ```
+
+`--scope user` makes it available in every Claude Code session and
+project; leave it out for the current project only.
+`claude mcp remove --scope user wasabi` takes it away again.
 
 For Claude Desktop and most others, the `mcpServers` block:
 
@@ -1645,20 +1686,21 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 
 ## What's next
 
-**0.2 is the second non-beta build.** The 0.2 line added the guru report
-and its black box, grew snoop from 14 patched calls to 30, added entry
-logging and three output modes, stack headroom in `ps` and `grab
---diff`, and split every `SetFunction` hook out of `wasabid.c` into
-`patches.c` behind a deliberately narrow header.
+**0.8 is the third non-beta build.** Since 0.2: the keyboard, windows
+and screenshots; the live view, the desktop app and the phone app with
+history, alerts and nightly backups; health; four run slots; gadgets and
+menus by name in Intuition, GadTools, ReAction and MUI windows; ARexx
+both ways; the MCP server; and optional TLS with your own certificates.
+
+Open: seeing into MUI 3.8 windows (finding their objects would need a
+search of all memory per window), several listeners on the debug and
+snoop streams at once, and long transfers that do not make other
+clients wait.
 
 The hardening list is done — snoop self-tests its own trampoline before
 it patches, the daemon can only be replaced through `update`, no
 blocking read or write is unbounded, and a patch that cannot be removed
 keeps the binary resident rather than unloading into a guru.
-
-Deliberately on hold: **challenge-response auth**. It would keep the key
-off the wire, but the session stays plaintext either way, against a
-threat the trusted-LAN scope already puts out of bounds.
 
 `audit.md`, `audit2.md` and `audit3.md` are the defect ledgers, one per
 line of development. `PROTOCOL.md` is the wire format, and the contract

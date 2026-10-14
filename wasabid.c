@@ -58,10 +58,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.8b1"
+#define VERSION_STR "wasabid 0.8"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.8b1 (14.10.2026)";
+    "$VER: wasabid 0.8 (14.10.2026)";
 
 #define PROTO_VERSION   1
 
