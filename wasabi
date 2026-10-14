@@ -1555,8 +1555,20 @@ def cmd_stream(conn, args):
             raise StreamStop(EXIT_TIME_LIMIT if until else 0,
                              "%g s are up%s" % (limit, ", '%s' never seen"
                                                % args.until if until else ""))
-        signal.signal(signal.SIGALRM, time_up)
-        signal.setitimer(signal.ITIMER_REAL, limit)
+        if hasattr(signal, "SIGALRM"):
+            signal.signal(signal.SIGALRM, time_up)
+            signal.setitimer(signal.ITIMER_REAL, limit)
+        else:
+            # Windows has no SIGALRM: a timer thread interrupts the main
+            # one, and the KeyboardInterrupt it raises is read as the end.
+            import _thread
+            import threading
+            def ring():
+                args._timed_out = time_up
+                _thread.interrupt_main()
+            t = threading.Timer(limit, ring)
+            t.daemon = True
+            t.start()
     status("%s stream open to %s:%d (%s)%s - Ctrl-C to stop"
            % (label, host, port, conn.banner, opts))
     try:
@@ -1586,22 +1598,31 @@ def cmd_stream(conn, args):
                     time.sleep(2.0)
             status("%s: reconnected after %d s - %s"
                    % (label, int(time.time() - gone), conn.banner))
-    except StreamStop as stop:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        for stream in sorted(partial):
-            if partial[stream]:
-                write_line(stream, partial.pop(stream))
-        flush_repeats()
-        status("%s stream closed: %s" % (label, stop.why))
-        return stop.code
-    except KeyboardInterrupt:
+    except (StreamStop, KeyboardInterrupt) as exc:
+        stop = exc
+        if isinstance(exc, KeyboardInterrupt) and \
+                getattr(args, "_timed_out", None):
+            try:                         # Windows: the timer, not a person
+                args._timed_out(None, None)
+            except StreamStop as timed:
+                stop = timed
+        if isinstance(stop, StreamStop):
+            if hasattr(signal, "setitimer"):
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            for stream in sorted(partial):
+                if partial[stream]:
+                    write_line(stream, partial.pop(stream))
+            flush_repeats()
+            status("%s stream closed: %s" % (label, stop.why))
+            return stop.code
         for stream in sorted(partial):
             if partial[stream]:
                 emit(stream, "\n")       # complete the dangling line
         print(file=sys.stderr)           # step past the ^C on the tty
         status("%s stream closed" % label)
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        if hasattr(signal, "setitimer"):
+            signal.setitimer(signal.ITIMER_REAL, 0)
         conn.close()
         if logf:
             logf.close()
@@ -1845,7 +1866,8 @@ def crop_rgb(pixels, w, box):
                     for y in range(y0, y1))
 
 
-GRAB_DIR = os.path.join(os.environ.get("TMPDIR", "/tmp"), "wasabi-grab")
+GRAB_DIR = os.path.join(os.environ.get("TMPDIR") or
+                        __import__("tempfile").gettempdir(), "wasabi-grab")
 
 
 def cmd_grab(conn, args):
@@ -3002,6 +3024,17 @@ def rexx_ports(conn):
                   key=str.lower)
 
 
+def cmd_mcp(args):
+    """The MCP server (wasabi_mcp.py) - the same one, so a one-file
+    build carries it too."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import wasabi_mcp
+    sys.argv = [sys.argv[0]]             # no --probe
+    return wasabi_mcp.main()
+
+
 def cmd_arexx(conn, args):
     """Talk to an Amiga program through its ARexx port: wasabi arexx
     PORT COMMAND. The exit code is the command's own rc."""
@@ -3363,7 +3396,7 @@ def local_ipv4s():
     try:
         import fcntl
     except ImportError:
-        return []
+        return _local_ipv4s_portable()
     import array
     if sys.platform.startswith("linux"):
         SIOCGIFADDR, SIOCGIFNETMASK = 0x8915, 0x891B
@@ -3394,6 +3427,27 @@ def local_ipv4s():
     finally:
         sock.close()
     return out
+
+
+def _local_ipv4s_portable():
+    """Where there is no ioctl (Windows): this computer's addresses from
+    its host name and from the route a UDP socket would take, each taken
+    as a /24 - home networks nearly always are, and the sweep is only a
+    fallback for broadcast that does not cross Wi-Fi to wired."""
+    ips = set()
+    try:
+        ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))    # sends nothing
+        ips.add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    return [(ip, "255.255.255.0") for ip in sorted(ips)
+            if not ip.startswith(("127.", "169.254.", "0."))]
 
 
 def _to_int(dotted):
@@ -3621,6 +3675,13 @@ JSON_COMMANDS = ("ls", "ps", "screen", "windows", "ping", "run", "wait",
 
 def main(argv=None):
     global SILENCE
+    if sys.platform == "win32":
+        # A Windows console cannot print every character an Amiga sends.
+        for f in (sys.stdout, sys.stderr):
+            try:
+                f.reconfigure(errors="replace")
+            except (AttributeError, ValueError):
+                pass
     cfg = load_config()
     p = argparse.ArgumentParser(
         prog="wasabi", description="Drive a real Amiga over the network.")
@@ -3968,6 +4029,11 @@ def main(argv=None):
                    help="amiga: the Amiga's name; drive: the drive folder")
     s.add_argument("name", nargs="?", help="drive: the Amiga's name")
     s.set_defaults(fn=keys_amiga)
+
+    s = sub.add_parser("mcp", help="run the MCP server on stdin/stdout, "
+                       "for AI assistants (claude mcp add wasabi -- wasabi "
+                       "mcp)")
+    s.set_defaults(fn=cmd_mcp, no_conn=True)
 
     s = sub.add_parser("arexx", help="send a command to a program's ARexx "
                        "port; with no port, list the ports")

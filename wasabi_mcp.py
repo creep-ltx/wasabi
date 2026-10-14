@@ -34,7 +34,11 @@ class ToolError(Exception):
 def wasabi(*args, timeout=120, data=None):
     """Run the wasabi command; (exit code, stdout, stderr)."""
     try:
-        p = subprocess.run([sys.executable, WASABI] + [str(a) for a in args],
+        # The one-file build is its own `wasabi`; otherwise the script
+        # next to this file, run by the same Python.
+        cmd = [sys.executable] if getattr(sys, "frozen", False) else \
+            [sys.executable, WASABI]
+        p = subprocess.run(cmd + [str(a) for a in args],
                            input=data, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise ToolError("wasabi %s took longer than %d s" % (args[0], timeout))

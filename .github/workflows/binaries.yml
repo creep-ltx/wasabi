@@ -1,0 +1,77 @@
+# The client as one file per system, for people without Python: built on
+# each system (PyInstaller does not cross-build), smoke-tested against
+# the host mock, and attached to the release that triggered it.
+name: binaries
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  push:
+    branches: [binaries]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04,     name: wasabi-linux-x86_64 }
+          - { os: ubuntu-22.04-arm, name: wasabi-linux-arm64 }
+          - { os: macos-14,         name: wasabi-macos-arm64 }
+          - { os: macos-13,         name: wasabi-macos-x86_64 }
+          - { os: windows-latest,   name: wasabi-windows-x64.exe }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pyinstaller
+      - run: python tools/build-binary.py
+      - name: Smoke test against the mock daemon
+        run: |
+          exe=dist/wasabi; [ -f dist/wasabi.exe ] && exe=dist/wasabi.exe
+          root=$(mktemp -d)
+          mkdir -p "$root/C" && echo "hello" > "$root/C/greet.txt"
+          python tests/mock-wasabid.py --root "$root" --port 14231 --key k &
+          for i in $(seq 1 30); do
+            python -c "import socket; socket.create_connection(('127.0.0.1', 14231), 1)" 2>/dev/null && break
+            sleep 1
+          done
+          W="$exe --host 127.0.0.1 --port 14231 --key k"
+          $W ping
+          $W info | head -3
+          test "$($W get C:greet.txt -)" = "hello"
+          $W grab shot.png && test -s shot.png
+          $W --json ui list > /dev/null
+          echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | $exe mcp | grep -q amiga_screenshot
+          echo "smoke test passed"
+      - name: Name it for its system
+        run: |
+          src=dist/wasabi; [ -f dist/wasabi.exe ] && src=dist/wasabi.exe
+          mkdir -p out && cp "$src" "out/${{ matrix.name }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out/${{ matrix.name }}
+
+  release:
+    needs: build
+    if: always() && github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" art/*/* \
+            --repo "${{ github.repository }}" --clobber

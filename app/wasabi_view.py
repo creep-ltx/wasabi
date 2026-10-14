@@ -34,6 +34,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)            # the repository: view/, .deployed
+if getattr(sys, "frozen", False):        # the one-file build: unpacked here
+    ROOT = getattr(sys, "_MEIPASS", ROOT)
 DIST = os.path.join(ROOT, "view", "dist")
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -867,7 +869,10 @@ def open_window(url, kiosk=False):
     else:
         exe = shutil.which("firefox")
         if not exe:
-            return False
+            # macOS and Windows keep their browsers off PATH: the
+            # system's default one, in a new window.
+            import webbrowser
+            return webbrowser.open_new(url)
         args = [exe, "--kiosk", url] if kiosk else [exe, "--new-window", url]
     subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, start_new_session=True)

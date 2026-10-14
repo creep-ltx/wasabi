@@ -21,6 +21,7 @@ Known divergences from the C daemon, all because this is Unix underneath:
 import argparse
 import collections
 import os
+import platform
 import re
 import select
 import socket
@@ -213,7 +214,7 @@ class Handler(socketserver.BaseRequestHandler):
             if key != KEY:
                 return self.err("bad key")
             welcome = struct.pack(">H", VERSION) + pack_str(
-                BANNER or "mock-wasabid on %s" % os.uname().nodename)
+                BANNER or "mock-wasabid on %s" % platform.node())
             if CAPS:
                 welcome += pack_str(CAPS)
                 welcome += struct.pack(">I", REFUSED)
@@ -256,7 +257,7 @@ class Handler(socketserver.BaseRequestHandler):
                 ("mock-wasabid, protocol v%d\nroot: %s\nhost: %s\n"
                  "volumes:\n"
                  "  %-14s %6d MB total %6d MB free  %3d%% used\n"
-                 % (VERSION, ROOT, os.uname().nodename,
+                 % (VERSION, ROOT, platform.node(),
                     "Mock:", total, free, pct)).encode("latin-1"))
         elif tag == LS:
             self.do_ls(payload)
@@ -887,7 +888,7 @@ def main():
     os.makedirs(ROOT, exist_ok=True)
     threading.Thread(
         target=discovery_responder,
-        args=(args.port, os.uname().nodename), daemon=True).start()
+        args=(args.port, platform.node()), daemon=True).start()
     srv = Server(("127.0.0.1", args.port), Handler)
     print("mock-wasabid on 127.0.0.1:%d serving %s" % (args.port, ROOT),
           file=sys.stderr)
