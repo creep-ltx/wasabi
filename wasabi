@@ -487,12 +487,37 @@ def tls_context():
     return ctx
 
 
+_OPENSSL = None
+
+
+def openssl_bin():
+    """An OpenSSL 3 command. macOS's own `openssl` is LibreSSL, which
+    cannot make Ed25519 keys; Homebrew's openssl@3 is the usual cure."""
+    global _OPENSSL
+    if _OPENSSL:
+        return _OPENSSL
+    import shutil
+    for c in [shutil.which("openssl"),
+              "/opt/homebrew/opt/openssl@3/bin/openssl",
+              "/usr/local/opt/openssl@3/bin/openssl"]:
+        if not c or not os.path.exists(c):
+            continue
+        try:
+            v = subprocess.run([c, "version"], capture_output=True,
+                               text=True).stdout
+        except OSError:
+            continue
+        if v.startswith("OpenSSL ") and not v.startswith(("OpenSSL 0",
+                                                          "OpenSSL 1")):
+            _OPENSSL = c
+            return c
+    raise WasabiError("making keys needs OpenSSL 3 (the 'openssl' command; "
+                      "on a Mac: brew install openssl@3)")
+
+
 def _openssl(*args, stdin=None):
-    try:
-        p = subprocess.run(["openssl"] + list(args), input=stdin,
-                           capture_output=True)
-    except FileNotFoundError:
-        raise WasabiError("making keys needs the 'openssl' command")
+    p = subprocess.run([openssl_bin()] + list(args), input=stdin,
+                       capture_output=True)
     if p.returncode != 0:
         raise WasabiError("openssl %s failed: %s"
                           % (args[0], p.stderr.decode(errors="replace")

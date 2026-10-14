@@ -38,6 +38,35 @@ check() { # name expected actual
     fi
 }
 
+# A server is ready when its port answers, and gone when it does not;
+# fixed sleeps were too short on the slower macOS runners.
+wait_up() {
+    python3 - "$1" <<'PY'
+import socket, sys, time
+end = time.time() + 20
+while time.time() < end:
+    try:
+        socket.create_connection(("127.0.0.1", int(sys.argv[1])), 0.5).close()
+        sys.exit(0)
+    except OSError:
+        time.sleep(0.1)
+sys.exit(1)
+PY
+}
+wait_free() {
+    python3 - "$1" <<'PY'
+import socket, sys, time
+end = time.time() + 20
+while time.time() < end:
+    try:
+        socket.create_connection(("127.0.0.1", int(sys.argv[1])), 0.5).close()
+        time.sleep(0.1)
+    except OSError:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 mkdir -p "$ROOT/C" "$ROOT/L"
 echo "hello from the amiga" > "$ROOT/C/greet.txt"
 
@@ -47,10 +76,11 @@ echo "hello from the amiga" > "$ROOT/C/greet.txt"
 mkdir -p "$ROOT/drive/Prefs"
 ./wasabi keys drive "$ROOT/drive" mock >/dev/null 2>&1
 
+wait_free "$PORT"
 ./tests/mock-wasabid.py --root "$ROOT" --port "$PORT" --key "$KEY" \
     --tls "$ROOT/drive/Prefs/Env-Archive/wasabi" >"$ROOT/mock.log" 2>&1 &
 MOCK_PID=$!
-sleep 1
+wait_up "$PORT"
 
 W="./wasabi --host 127.0.0.1 --port $PORT --key $KEY"
 
@@ -62,10 +92,11 @@ out=$(./wasabi --port "$PORT" discover 2>&1 | grep -c "127.0.0.1")
 check "discover finds the daemon" "1" "$out"
 
 # Two emulators on this PC, one port each: both are found.
+wait_free $((PORT+1))
 ./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+1)) --key "$KEY" \
     >"$ROOT/mocke.log" 2>&1 &
 MOCKE_PID=$!
-sleep 1
+wait_up $((PORT+1))
 out=$(./wasabi --port "$PORT" discover 2>&1 | grep -c "127.0.0.1")
 check "discover lists each emulator on its own port" "2" "$out"
 kill "$MOCKE_PID" 2>/dev/null; MOCKE_PID=
@@ -334,10 +365,11 @@ rm -f "$STREAMLOG"
 # The stream must announce the loss, come back by itself, keep flowing,
 # and not mistake the daemon's restarted sequence numbers for loss.
 PORT2=$((PORT+1))
+wait_free "$PORT2"
 ./tests/mock-wasabid.py --root "$ROOT" --port "$PORT2" --key "$KEY" \
     --drop-stream-after 2 >"$ROOT/mock2.log" 2>&1 &
 MOCK2_PID=$!
-sleep 1
+wait_up "$PORT2"
 W2="./wasabi --host 127.0.0.1 --port $PORT2 --key $KEY"
 
 RECERR=$ROOT/reconnect.err
@@ -355,10 +387,11 @@ kill $MOCK2_PID 2>/dev/null; MOCK2_PID=
 # --once restores stop-on-disconnect: the client must exit on its own,
 # well before the timeout would have killed it.
 PORT2=$((PORT+2))
+wait_free "$PORT2"
 ./tests/mock-wasabid.py --root "$ROOT" --port "$PORT2" --key "$KEY" \
     --drop-stream-after 2 >"$ROOT/mock3.log" 2>&1 &
 MOCK2_PID=$!
-sleep 1
+wait_up "$PORT2"
 W2="./wasabi --host 127.0.0.1 --port $PORT2 --key $KEY"
 timeout 8 $W2 debug --once >"$ROOT/once.out" 2>&1
 check "--once exits when the connection drops" "0" "$?"
@@ -618,7 +651,7 @@ $W arexx WORKBENCH bogus >/dev/null 2>&1
 check "arexx exits with the host's rc" "10" "$?"
 out=$($W arexx NOPE hi 2>&1 | grep -c 'no port named "NOPE"')
 check "arexx to a missing port says so" "1" "$out"
-out=$($W arexx --ports 2>/dev/null | wc -l)
+out=$($W arexx --ports 2>/dev/null | wc -l | tr -d ' \t')
 check "arexx --ports lists the ports" "3" "$out"
 out=$($W --json arexx WORKBENCH getattr x 2>/dev/null)
 check "arexx --json" '{"rc": 0, "rc2": 0, "result": "47.42"}' "$out"
@@ -641,7 +674,7 @@ check "the MCP server lists tools, calls them, reports errors" \
 out=$(ls "$XDG_CONFIG_HOME/wasabi/keys" | tr '\n' ' ')
 check "keys init makes a CA and this computer's certificate" \
       "amiga-mock.crt amiga-mock.key ca.crt ca.key client.crt client.key " "$out"
-out=$(stat -c %a "$XDG_CONFIG_HOME/wasabi/keys/ca.key")
+out=$(python3 -c 'import os, sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' "$XDG_CONFIG_HOME/wasabi/keys/ca.key")
 check "the CA's key is private" "600" "$out"
 out=$(./wasabi keys init 2>&1 | grep -c "keys exist already")
 check "keys init never replaces a set (it would lock out every Amiga)" "1" "$out"
@@ -697,10 +730,11 @@ check "a small stack with room to spare is not flagged" "0" "$out"
 # A daemon from before the flags word: the client must not ask, and must
 # still read the seven-field line rather than dropping every row.
 CAPS_NOFREE="ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry"
+wait_free $((PORT+4))
 ./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+4)) --key "$KEY" \
     --caps "$CAPS_NOFREE" >"$ROOT/mock-nofree.log" 2>&1 &
 MOCK4_PID=$!
-sleep 1
+wait_up $((PORT+4))
 WOLD="./wasabi --host 127.0.0.1 --port $((PORT+4)) --key $KEY"
 out=$($WOLD ps 2>/dev/null | grep -c "input.device")
 check "a daemon without 'psfree' still lists tasks" "1" "$out"
@@ -738,10 +772,11 @@ out=$($W info 2>/dev/null | grep -cE "^  [A-Za-z]+: +[0-9]+ MB total +[0-9]+ MB 
 check "info lists volumes with size and free" "1" "$out"
 
 # A daemon too old for ps: the client should name it, not send blindly.
+wait_free $((PORT+7))
 ./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+7)) --key "$KEY" \
     --caps "ping,info,ls,put,get,run" >>"$ROOT/mock.log" 2>&1 &
 OLD_PID=$!
-sleep 1
+wait_up $((PORT+7))
 out=$(./wasabi --host 127.0.0.1 --port $((PORT+7)) --key "$KEY" ps 2>&1 | \
       grep -c "has no 'ps'")
 check "a daemon without a capability is named, not guessed at" "1" "$out"
@@ -752,20 +787,22 @@ kill $OLD_PID 2>/dev/null
 
 # One that snoops but predates entry logging: the specific gap is named,
 # not the whole command refused.
+wait_free $((PORT+9))
 ./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+9)) --key "$KEY" \
     --caps "ping,info,run,debug,snoop,hb" >>"$ROOT/mock.log" 2>&1 &
 OLD_PID=$!
-sleep 1
+wait_up $((PORT+9))
 out=$(./wasabi --host 127.0.0.1 --port $((PORT+9)) --key "$KEY" \
       snoop --entry 2>&1 | grep -c "no entry logging")
 check "and entry logging it lacks is named too" "1" "$out"
 kill $OLD_PID 2>/dev/null
 
 # A daemon from before capabilities existed: never refuse, just try.
+wait_free $((PORT+8))
 ./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+8)) --key "$KEY" \
     --caps "" >>"$ROOT/mock.log" 2>&1 &
 PRE_PID=$!
-sleep 1
+wait_up $((PORT+8))
 out=$(./wasabi --host 127.0.0.1 --port $((PORT+8)) --key "$KEY" ps 2>&1 | \
       grep -c "input.device")
 check "a pre-capability daemon is not second-guessed" "1" "$out"
@@ -773,10 +810,11 @@ kill $PRE_PID 2>/dev/null
 
 # --- refused off-LAN connections, reported to the operator ---
 rm -f "$XDG_CACHE_HOME/wasabi/refused-127.0.0.1"
+wait_free $((PORT+9))
 ./tests/mock-wasabid.py --root "$ROOT" --port $((PORT+9)) --key "$KEY" \
     --refused 673 >>"$ROOT/mock.log" 2>&1 &
 REF_PID=$!
-sleep 1
+wait_up $((PORT+9))
 R="./wasabi --host 127.0.0.1 --port $((PORT+9)) --key $KEY"
 out=$($R ping 2>&1 | grep -c "673 connection(s) refused")
 check "a rising refusal count is reported once" "1" "$out"
@@ -975,10 +1013,11 @@ send({"t": "key", "code": 0x67, "down": False})
 time.sleep(1)
 PY
 VPORT=$((PORT+7))
+wait_free $VPORT
 ./wasabi --host 127.0.0.1 --port $PORT --key $KEY view --no-browser \
     --port $VPORT >"$ROOT/view.log" 2>&1 &
 VIEW_PID=$!
-sleep 1.5
+wait_up $VPORT
 rm -f "$ROOT/keys.log"
 out=$(timeout 10 python3 "$ROOT/page.py" "$VPORT")
 check "view: the page gets a status line and the first LIVE picture" \
@@ -994,10 +1033,11 @@ kill -0 $VIEW_PID 2>/dev/null; check "view: the bridge ends once its page has go
 # The window may show a page with no live screen (Overview, Files): the
 # bridge must stay as long as the window's "hello" is open - it used to
 # quit 5 s after the Screen page was left.
+wait_free $VPORT
 ./wasabi --host 127.0.0.1 --port $PORT --key $KEY desktop --no-browser \
     --browser --port $VPORT >"$ROOT/desk2.log" 2>&1 &
 VIEW_PID=$!
-sleep 1.5
+wait_up $VPORT
 timeout 12 python3 - "$VPORT" <<'PY' &
 import base64, os, socket, sys, time
 s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
@@ -1015,20 +1055,22 @@ kill -0 $VIEW_PID 2>/dev/null; check "desktop: and ends once the window has gone
 kill $VIEW_PID 2>/dev/null
 kill $VIEW_PID 2>/dev/null
 
+wait_free $VPORT
 WASABI_VIEW_NOLIVE=1 ./wasabi --host 127.0.0.1 --port $PORT --key $KEY \
     view --no-browser --port $VPORT >"$ROOT/view2.log" 2>&1 &
 VIEW_PID=$!
-sleep 1.5
+wait_up $VPORT
 out=$(timeout 10 python3 "$ROOT/page.py" "$VPORT" | head -1)
 check "view: without LIVE it falls back to whole rows from GRAB" \
       "status, band 8x8" "$out"
 kill $VIEW_PID 2>/dev/null
 
 # --- desktop: the app's API, and the guards on it ---
+wait_free $VPORT
 ./wasabi --host 127.0.0.1 --port $PORT --key $KEY desktop --no-browser \
     --port $VPORT >"$ROOT/desk.log" 2>&1 &
 VIEW_PID=$!
-sleep 1.5
+wait_up $VPORT
 A="http://127.0.0.1:$VPORT"
 out=$(curl -s "$A/api/health" | python3 -c 'import json,sys; print(json.load(sys.stdin)["temp_c"])')
 check "desktop: /api/health reads the machine" "51.5" "$out"
@@ -1057,10 +1099,11 @@ check "desktop: lists an Amiga drawer" "True" "$out"
 kill $VIEW_PID 2>/dev/null
 
 # --- machines: more than one Amiga in one app ---
+wait_free $VPORT
 ./wasabi --host 127.0.0.1 --port $PORT --key $KEY desktop --no-browser \
     --stay --port $VPORT >"$ROOT/fleet.log" 2>&1 &
 VIEW_PID=$!
-sleep 1.5
+wait_up $VPORT
 A="http://127.0.0.1:$VPORT"
 J=(-H "Content-Type: application/json" -H "X-Wasabi: 1")
 out=$(curl -s "$A/api/machines" | python3 -c 'import json,sys; m=json.load(sys.stdin)["machines"]; print(len(m), m[0]["auto"], m[0]["online"])')
@@ -1078,10 +1121,11 @@ kill $VIEW_PID 2>/dev/null
 
 # --- serve: Wasabi phone's server - a login, and a fenced folder ---
 mkdir -p "$ROOT/srv-files"
+wait_free $VPORT
 ./wasabi --host 127.0.0.1 --port $PORT --key $KEY serve --port $VPORT \
     --files "$ROOT/srv-files" >"$ROOT/serve.log" 2>&1 &
 VIEW_PID=$!
-sleep 1.5
+wait_up $VPORT
 A="http://127.0.0.1:$VPORT"
 J=(-H "Content-Type: application/json" -H "X-Wasabi: 1")
 out=$(curl -s -o /dev/null -w "%{http_code}" "$A/api/health")
@@ -1168,10 +1212,11 @@ echo "the startup" > "$ROOT/S/Startup-Sequence"
 cat > "$ROOT/bk-cfg/wasabi/backup.json" <<J
 {"folders": ["S:"]}
 J
+wait_free $VPORT
 XDG_CONFIG_HOME="$ROOT/bk-cfg" ./wasabi --host 127.0.0.1 --port $PORT --key $KEY \
     serve --port $VPORT --files "$ROOT/bk-files" >"$ROOT/bk.log" 2>&1 &
 VIEW_PID=$!
-sleep 1.5
+wait_up $VPORT
 A="http://127.0.0.1:$VPORT"
 J=(-H "Content-Type: application/json" -H "X-Wasabi: 1")
 curl -s -c "$ROOT/bkjar" "${J[@]}" -X POST -d '{"password":"backup-test"}' "$A/api/auth/setup" >/dev/null
