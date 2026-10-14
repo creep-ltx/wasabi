@@ -28,10 +28,7 @@
 #include <graphics/gfxbase.h>
 #include <proto/graphics.h>
 #include <proto/intuition.h>
-#include <cybergraphx/cybergraphics.h>
-#define __NOLIBBASE__            /* see cmd_screen() */
-#include <proto/cybergraphics.h>
-#undef __NOLIBBASE__
+#include "wasabi_cgx.h"           /* the CyberGraphX calls, own header */
 #define __NOLIBBASE__            /* see g_keymap */
 #define KEYMAP_BASE_NAME g_keymap
 #include <proto/keymap.h>
@@ -63,10 +60,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.9b1"
+#define VERSION_STR "wasabid 0.9b2"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.9b1 (14.10.2026)";
+    "$VER: wasabid 0.9b2 (14.10.2026)";
 
 #define PROTO_VERSION   1
 

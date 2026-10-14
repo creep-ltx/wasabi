@@ -586,7 +586,10 @@ client was proven with.
 
 The cross-compiler is Bebbo's `m68k-amigaos-gcc`, at
 `$(HOME)/opt/amiga/bin` on this box. Override `CC` if yours lives
-elsewhere. The first `make` downloads the AmiSSL 5.27 developer kit
+elsewhere. No CyberGraphX or Picasso96 developer headers are needed:
+the few calls the screen grab uses are declared in
+`include/wasabi_cgx.h` (0.9b2; 0.8 needed them, found by Spot). The
+first `make` downloads the AmiSSL 5.27 developer kit
 (`third_party/fetch.sh`, checked by its SHA-256) for `tls.c`; the
 daemon only opens AmiSSL at run time, so it runs without it. It is
 built with `-fbbb=-`: bebbo's own optimizer pass miscompiles loops over
