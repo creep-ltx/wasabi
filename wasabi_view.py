@@ -399,6 +399,17 @@ TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
          ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf"}
 
 
+class QuickHTTPServer(ThreadingHTTPServer):
+    """HTTPServer.server_bind asks socket.getfqdn() for its own name -
+    a reverse lookup that, on a Mac (mDNS), took long enough that the
+    port was not listening when the page came. The name is never used."""
+
+    def server_bind(self):
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def make_handler(w, fleet, server_state, port, listen, auth=None):
     import http.cookies
     import urllib.parse
@@ -953,7 +964,7 @@ def serve(w, args, target):
         m.api.backup.start()
     handler = make_handler(w, fleet, state, args.view_port, args.listen, auth)
     try:
-        httpd = ThreadingHTTPServer((args.listen, args.view_port), handler)
+        httpd = QuickHTTPServer((args.listen, args.view_port), handler)
     except OSError as exc:
         raise w.WasabiError("cannot listen on %s:%d - %s (another 'wasabi "
                             "view' running? --port picks another)"
