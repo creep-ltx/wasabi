@@ -6,7 +6,12 @@ CC      = $(HOME)/opt/amiga/bin/m68k-amigaos-gcc
 # -Wno-pointer-sign: every string in the NDK is 'unsigned char *', so
 # passing an ordinary C literal to Printf/SystemTags warns on every call.
 # It is noise, not a finding, and it drowns real warnings if left on.
-CFLAGS  = -O2 -noixemul -fomit-frame-pointer -Wall -Wno-pointer-sign -Iinclude
+# -fbbb=-: bebbo's own backend pass off. It miscompiles loops over small
+# structs - "cmp.l (a0)+" and then the same element used as if a0 had not
+# moved (Knowledge/amiga/toolchain-and-testing.md). In 0.5b1 it made
+# posted_forget() step 18 bytes through 14-byte entries and write -1 over
+# the rexxsyslib base; the first AREXX then crashed the machine.
+CFLAGS  = -O2 -fbbb=- -noixemul -fomit-frame-pointer -Wall -Wno-pointer-sign -Iinclude
 DEPLOY  = /home/creep/Documents/FS-UAE/Hard Drives/Dump/Code
 
 all: wasabid

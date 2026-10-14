@@ -117,6 +117,10 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x50 | SLOTS    | C→S | (empty) |
 | 0x51 | FREE     | C→S | `u32 slot`, `[u32 flags]` |
 | 0x52 | SLOT     | S→C | `u32 slot` |
+| 0x53 | UI       | C→S | `[u32 flags]` (bit 0: every screen) |
+| 0x54 | UIACT    | C→S | `u32 op`, `u32 window`, `u32 arg` |
+| 0x55 | AREXX    | C→S | `u32 timeout`, `str port`, `str command` |
+| 0x56 | PORTS    | C→S | (empty) |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -708,6 +712,80 @@ windows). Tabs and newlines inside titles are sent as spaces.
 The walk runs under `LockIBase()` into a 16 KB buffer; frames go out
 after the lock is dropped. If the buffer fills, the lines so far are
 sent followed by `ERR` in place of `END`.
+
+### UI — windows, with their gadgets and menus (0.5+, caps `ui`)
+
+The `WINDOWS` lines, and after each `W` line its gadgets and menu items:
+
+```
+G  addr  left  top  width  height  kind  flags  id  class  label  value
+M  code  flags  key  path
+```
+
+Only the front screen unless flags bit 0 asks for all of them. `G`
+boxes are relative to the window's top-left, in the screen's own pixels
+(unscaled, like `WINDOWS`), already resolved for `GFLG_RELRIGHT`/
+`RELBOTTOM`/`RELWIDTH`/`RELHEIGHT` (`width + LeftEdge - 1`, as
+Intuition does) and for a GimmeZeroZero window's inner layer. `kind`:
+`close depth zoom size drag sdepth sdrag` for border gadgets, else
+`button toggle prop string integer custom`. `flags`: `d` disabled, `s`
+selected, `-`. `class` is a BOOPSI gadget's class ID (`-` for none or a
+private class). `label` is the gadget's text — an IntuiText run, or a
+`GFLG_LABELSTRING` — with GadTools' shortcut underscore and its
+separately drawn underlined letter removed; for a GadTools gadget
+without `GadgetText` (buttons) the text GadTools keeps in its own
+memory after the ExtGadget is read, only if it looks exactly like an
+IntuiText (known draw mode, a `TextAttr` naming a `.font`, printable
+text, every pointer checked with `TypeOfMem()`). `value`: a string
+gadget's contents, a prop's pot (0–65535), a GadTools cycle gadget's
+current choice.
+
+`M code` is the FULLMENUNUM (`menu | item << 5 | sub << 11`, 31 = no
+sub-item) — what Intuition puts in a MENUPICK and what `UIACT` op 1
+takes. An item with sub-items has no line of its own; its sub-items do.
+`flags`: `d` disabled (item, its parent or its menu), `c` checkable,
+`x` checked, `b` a bar or image item, `-`. `key`: the Amiga-key
+shortcut or `-`. `path`: `Menu/Item[/Sub]`, a `/` inside a name sent
+as `|`.
+
+A ReAction window shows its `layout.gadget` only: the children live in
+the layout's private data and are not in the window's gadget list.
+Nothing here calls a gadget's class (no `GetAttr`): a dispatcher run
+from the daemon under `LockIBase()` could wait on a layer its own task
+holds. Walked under the lock into a 48 KB buffer, sent after it.
+
+### UIACT — act on a window (0.5+)
+
+The window address must be one `UI` or `WINDOWS` gave; it is checked
+against Intuition's lists before use.
+
+- op 1 — pick a menu item: a MENUPICK `ExtIntuiMessage` (Code = `arg`,
+  the FULLMENUNUM) is put on the window's `UserPort`, the way Intuition
+  delivers a pick. Refused when the window has no port, does not listen
+  for `IDCMP_MENUPICK`, or the item is missing or disabled. A
+  `CHECKIT` item is toggled (or set, without `MENUTOGGLE`) and its
+  `MutualExclude` partners cleared first, as Intuition would. `OK` is
+  sent at once; the message is freed when the program replies.
+- op 2 — `ScreenToFront`, `WindowToFront` and `ActivateWindow`, so a
+  click lands on it. `OK`; Intuition does it a moment later.
+
+### AREXX — a command to an ARexx port (0.5+, caps `arexx`)
+
+A `RexxMsg` (`RXCOMM | RXFF_RESULT`) with the command as its argstring
+goes to the public port by that name (found and put under `Forbid()`).
+The daemon does not wait: the reply is collected by the main loop, so
+other clients carry on. Answer: one `DATA` with `i32 rc`, `u32 rc2`
+(the secondary code when rc ≠ 0, else 0) and then RESULT's bytes (when
+rc = 0 and the host set one, at most 32 KB), then `END`. After
+`timeout` seconds (1–3600, default 30) the client gets `ERR` instead;
+the message stays the host's until it replies and is freed then. At
+exit, messages still out leave the reply port behind with `PA_IGNORE`,
+so a late reply writes into nothing that was freed.
+
+### PORTS — every public message port
+
+One name per line in `DATA` frames, then `END`. ARexx ports are public
+ports, so this is the list of what `AREXX` can talk to (and more).
 
 ### LIVE — the front screen for a live view: only what changed
 

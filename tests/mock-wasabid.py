@@ -48,6 +48,8 @@ DEBUG, SNOOP, LOG = 0x30, 0x31, 0x32
 REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN = 0x46, 0x47, 0x48, 0x49
 KEYIN, WINDOWS, HEALTH, LIVE, CLIP = 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
+MOUSE = 0x4A
+UI, UIACT, AREXX, PORTS = 0x53, 0x54, 0x55, 0x56
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -61,7 +63,7 @@ BANNER = None
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
         "hb,guru,snoopentry,psfree,key,windows,health,live,clip,detach,"
-        "slots")
+        "slots,ui,arexx")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -267,6 +269,19 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_key(payload)
         elif tag == WINDOWS:
             self.do_windows()
+        elif tag == UI:
+            self.do_ui()
+        elif tag == UIACT:
+            self.log_ui("uiact %d 0x%08x %d" % struct.unpack(">III", payload))
+            self.send(OK)
+        elif tag == MOUSE:
+            self.log_ui("mouse %d %d %d %d %d"
+                        % struct.unpack(">HHHhh", payload[:10]))
+            self.send(OK)
+        elif tag == AREXX:
+            self.do_arexx(payload)
+        elif tag == PORTS:
+            self.send_data(b"REXX\nWORKBENCH\nAREXX\n")
         elif tag == HEALTH:
             self.do_health()
         elif tag == LIVE:
@@ -650,6 +665,41 @@ class Handler(socketserver.BaseRequestHandler):
                 "W\t0x0000bbbb\t0\t11\t640\t245\t0\t0\t0\t0"
                 "\tb\tWorkbench\t"]
         self.send_data(("\n".join(rows) + "\n").encode("latin-1"))
+
+    def log_ui(self, line):
+        with open(os.path.join(ROOT, "ui.log"), "a") as f:
+            f.write(line + "\n")
+
+    def do_ui(self):
+        """WINDOWS' lines plus gadgets and menus, as wasabid 0.5 sends
+        them: a requester in front of the Shell."""
+        rows = ["S\t0x00001111\t0\t0\t640\t256\t2\tWorkbench Screen",
+                "W\t0x0000cccc\t200\t50\t200\t60\t4\t11\t4\t2"
+                "\ta\tRequestChoice\tQuestion",
+                "G\t0x00000001\t0\t0\t20\t11\tclose\t-\t0\t-\t\t",
+                "G\t0x00000002\t10\t40\t40\t14\tbutton\t-\t1\t-\tYes\t",
+                "G\t0x00000003\t60\t40\t40\t14\tbutton\t-\t2\t-\tNo\t",
+                "G\t0x00000004\t110\t40\t60\t14\tbutton\td\t3\t-"
+                "\tNever\t",
+                "G\t0x00000005\t10\t20\t150\t14\tstring\t-\t4\t-"
+                "\tName\tBob",
+                "M\t%d\t-\tQ\tProject/Quit" % (0 | (2 << 5) | (31 << 11)),
+                "M\t%d\t-\t-\tProject/Recent/First" % (0 | (1 << 5)),
+                "M\t%d\td\t-\tProject/Print" % (0 | (3 << 5) | (31 << 11)),
+                "W\t0x0000aaaa\t100\t100\t640\t200\t4\t11\t18\t2"
+                "\t-\t-\tAmigaShell",
+                "G\t0x00000006\t0\t0\t20\t11\tclose\t-\t0\t-\t\t"]
+        self.send_data(("\n".join(rows) + "\n").encode("latin-1"))
+
+    def do_arexx(self, payload):
+        secs = struct.unpack_from(">I", payload)[0]
+        port, off = unpack_str(payload, 4)
+        cmd, _ = unpack_str(payload, off)
+        if port not in ("WORKBENCH", "REXX"):
+            return self.err('no port named "%s"' % port)
+        if cmd.lower().startswith("getattr"):
+            return self.send_data(struct.pack(">iI", 0, 0) + b"47.42")
+        self.send_data(struct.pack(">iI", 10, 209))
 
     def do_grab(self):
         """A tiny synthetic screen: header then raw RGB rows."""

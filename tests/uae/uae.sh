@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# uae.sh start|stop|put - a private FS-UAE for testing wasabid itself: the
+# 68030/50 A1200 with OS 3.2 and the emulated bsdsocket, on a copy of the
+# drive in /tmp/wasabi-uae, its wasabid on port 1241 (WASABI_PORT=1241),
+# so the shared A1200 and other sessions' emulators (1234, 1240) are never
+# touched. put: this tree's wasabid as C:wasabid (start does it too; a
+# running emulator needs 'wasabi update' instead). Headless, in a systemd
+# scope of its own (2 GB at most); stop ends that scope only.
+D=$(cd "$(dirname "$0")/../.." && pwd)
+W=/tmp/wasabi-uae; H="$W/AmigaOS3.2"; U=wasabi-uae
+export WASABI_HOST=127.0.0.1 WASABI_PORT=1241
+put() { cp "$D/wasabid" "$H/C/wasabid"; }
+case "$1" in
+start)
+  if systemctl --user is-active --quiet $U.scope; then
+    echo "uae.sh: ours runs already"; exit 0
+  fi
+  mkdir -p "$W"
+  if [ ! -d "$H" ]; then
+    cp -a "$HOME/FS-UAE/Hard Drives/AmigaOS3.2-030" "$H"
+    sed -i -e 's#^  Run >NIL: C:wasabid$#  Run >NIL: C:wasabid 1241#' "$H/S/User-Startup"
+    grep -q "wasabid 1241" "$H/S/User-Startup" || { echo "uae.sh: User-Startup not patched" >&2; exit 1; }
+  fi
+  sed -e "s#^hard_drive_0 = .*#hard_drive_0 = $H#" -e '/^hard_drive_1/d' \
+      "$HOME/FS-UAE/Configurations/A1200-030-50.fs-uae" > "$W/wasabi.fs-uae"
+  echo "bsdsocket_library = 1" >> "$W/wasabi.fs-uae"
+  put
+  (cd ~/FS-UAE && SDL_VIDEODRIVER=offscreen systemd-run --user --scope --unit=$U \
+     -p MemoryMax=2G fs-uae "$W/wasabi.fs-uae" >"$W/uae.out" 2>&1 &)
+  for i in $(seq 1 60); do "$D/wasabi" ping >/dev/null 2>&1 && break; sleep 2; done
+  "$D/wasabi" ping >/dev/null 2>&1 || { echo "uae.sh: no wasabi on 1241" >&2; exit 1; }
+  echo "up"
+  ;;
+put) put ;;
+stop)
+  systemctl --user stop $U.scope 2>/dev/null
+  while systemctl --user is-active --quiet $U.scope; do sleep 1; done
+  ;;
+*) echo "usage: uae.sh start|stop|put" >&2; exit 2 ;;
+esac

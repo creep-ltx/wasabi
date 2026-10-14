@@ -576,6 +576,61 @@ check "unscaled" "100" "$out"
 out=$($W windows --raw 2>/dev/null | grep -c "^W")
 check "windows --raw passes the daemon's lines through" "2" "$out"
 
+# --- gadgets and menus by name, ARexx (wasabid 0.5) ---
+# The mock's UI: a requester "Question" at 200,50 in front of the Shell,
+# on a 640x256 screen (rows doubled). It logs MOUSE and UIACT to ui.log.
+rm -f "$ROOT/ui.log"
+out=$($W ui list 2>/dev/null | grep -c 'button   "Yes" .*at 210,180 40x28')
+check "ui list shows a gadget in the picture's pixels" "1" "$out"
+out=$($W ui list 2>/dev/null | grep -c 'value "Bob"')
+check "and a text field's contents" "1" "$out"
+$W ui click yes >/dev/null 2>&1
+out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "ui click clicks the middle of the gadget" "mouse 1 0 1 230 194" "$out"
+$W ui click close >/dev/null 2>&1
+out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "close names the frontmost window's close gadget" "mouse 1 0 1 210 111" "$out"
+out=$($W ui click never 2>&1 | grep -c "disabled")
+check "a disabled gadget is not clicked" "1" "$out"
+out=$($W ui click nosuch 2>&1 | grep -c "no gadget 'nosuch'")
+check "a missing gadget says so" "1" "$out"
+$W ui menu quit >/dev/null 2>&1
+out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "ui menu picks by the item's name alone" "uiact 1 0x0000cccc 63552" "$out"
+$W ui menu project/recent/first >/dev/null 2>&1
+out=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "and by a path into a sub-menu" "uiact 1 0x0000cccc 32" "$out"
+out=$($W ui menu print 2>&1 | grep -c "disabled")
+check "a disabled menu item is refused" "1" "$out"
+rm -f "$ROOT/keys.log"
+$W ui set name x >/dev/null 2>&1
+out=$(tail -1 "$ROOT/keys.log" 2>/dev/null)
+check "ui set types the text and Return" "0001780d" "$out"
+out=$($W arexx WORKBENCH getattr application.version 2>/dev/null)
+check "arexx prints the RESULT" "47.42" "$out"
+$W arexx WORKBENCH bogus >/dev/null 2>&1
+check "arexx exits with the host's rc" "10" "$?"
+out=$($W arexx NOPE hi 2>&1 | grep -c 'no port named "NOPE"')
+check "arexx to a missing port says so" "1" "$out"
+out=$($W arexx --ports 2>/dev/null | wc -l)
+check "arexx --ports lists the ports" "3" "$out"
+out=$($W --json arexx WORKBENCH getattr x 2>/dev/null)
+check "arexx --json" '{"rc": 0, "rc2": 0, "result": "47.42"}' "$out"
+
+# The MCP server: the same commands, spoken as JSON-RPC on stdin/stdout.
+out=$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"amiga_arexx","arguments":{"port":"WORKBENCH","command":"getattr x"}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"amiga_ui_click","arguments":{"name":"nosuch"}}}' \
+  | WASABI_HOST=127.0.0.1 WASABI_PORT=$PORT WASABI_KEY=$KEY python3 wasabi_mcp.py \
+  | python3 -c 'import sys, json
+r = [json.loads(l) for l in sys.stdin]
+print(r[0]["result"]["serverInfo"]["name"], len(r[1]["result"]["tools"]) > 15,
+      r[2]["result"]["content"][0]["text"], r[3]["result"]["isError"])')
+check "the MCP server lists tools, calls them, reports errors" \
+      "wasabi True 47.42 True" "$out"
+
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")
 check "ps lists tasks" "1" "$out"

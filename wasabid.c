@@ -36,6 +36,12 @@
 #define KEYMAP_BASE_NAME g_keymap
 #include <proto/keymap.h>
 #undef __NOLIBBASE__
+#include <intuition/classes.h>
+#include <rexx/storage.h>
+#define __NOLIBBASE__            /* opened on the first AREXX */
+#define REXXSYSLIB_BASE_NAME g_rexxsys
+#include <proto/rexxsyslib.h>
+#undef __NOLIBBASE__
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -51,10 +57,10 @@
 #include "patches.h"                 /* everything that hijacks a vector */
 #include "health.h"                  /* the machine's vital signs */
 
-#define VERSION_STR "wasabid 0.4b3"
+#define VERSION_STR "wasabid 0.5b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.4b3 (10.10.2026)";
+    "$VER: wasabid 0.5b1 (14.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -76,7 +82,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health,live,clip,detach,slots"
+                 "key,windows,health,live,clip,detach,slots,ui,arexx"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -131,6 +137,10 @@ typedef char welcome_fits_its_buffer[
 #define T_SLOTS   0x50   /* list the run slots */
 #define T_FREE    0x51   /* stop a slot's command, or let go of it */
 #define T_SLOT    0x52   /* daemon -> client: your RUN is in slot N */
+#define T_UI      0x53   /* windows plus gadgets and menus */
+#define T_UIACT   0x54   /* pick a menu item; bring a window to front */
+#define T_AREXX   0x55   /* send a command to an ARexx port */
+#define T_PORTS   0x56   /* list the public message ports */
 
 struct Library *SocketBase;
 /*
@@ -2213,6 +2223,767 @@ static BOOL cmd_windows(int fd)
     return send_frame(fd, T_END, NULL, 0);
 }
 
+/* --- the GUI as objects: gadgets and menus ------------------------- */
+
+/*
+ * UI: what `windows` says, plus each window's gadgets and menu strip,
+ * so a client can click "the OK button" or pick "Project/Quit" by name
+ * instead of by guessed pixels.
+ *
+ *   S and W lines exactly as WINDOWS sends them, then after each W:
+ *   G <addr> <left> <top> <width> <height> <kind> <flags> <id>
+ *     <class> <label> <value>
+ *   M <code> <flags> <key> <path>
+ *
+ * G boxes are relative to the window's top-left, already resolved for
+ * GFLG_RELRIGHT/RELBOTTOM/RELWIDTH/RELHEIGHT and for a GimmeZeroZero
+ * window's inner layer. kind is close, depth, zoom, size, drag, sdepth,
+ * sdrag, button, toggle, prop, string, integer, custom. flags: 'd'
+ * disabled, 's' selected, '-' neither. class is a BOOPSI gadget's class
+ * name ('-' otherwise). label is the gadget's own text, IntuiText runs
+ * joined by spaces, the shortcut underscore removed. value: a string
+ * gadget's contents, a prop's pot as 0-65535.
+ *
+ * M code is FULLMENUNUM (menu | item << 5 | sub << 11, 31 = none), what
+ * a MENUPICK carries and what UIACT's menu pick wants back. flags: 'd'
+ * disabled (the item or its menu), 'c' checkable, 'x' checked, 'b' a
+ * bar (no text), '-' none. key is the Amiga-key shortcut or '-'.
+ *
+ * Same discipline as WINDOWS: walked under LockIBase() into a buffer,
+ * sent after the lock is dropped. Nothing here calls into a gadget's
+ * class - a dispatcher run from our task under the IBase lock could
+ * wait on a layer its own task holds, and that is a frozen screen.
+ */
+#define UI_BUF 49152
+
+#define GTYPMASK_SYS 0x00F0
+static const char *ui_kind(struct Gadget *g)
+{
+    UWORD t = g->GadgetType;
+
+    if (t & GTYP_SYSGADGET) {
+        switch (t & GTYPMASK_SYS) {
+        case GTYP_SIZING:    return "size";
+        case GTYP_WDRAGGING: return "drag";
+        case GTYP_SDRAGGING: return "sdrag";
+        case GTYP_WDEPTH:    return "depth";
+        case GTYP_SDEPTH:    return "sdepth";
+        case GTYP_WZOOM:     return "zoom";
+        case GTYP_CLOSE:     return "close";
+        }
+        return "system";
+    }
+    switch (t & GTYP_GTYPEMASK) {
+    case GTYP_PROPGADGET:   return "prop";
+    case GTYP_STRGADGET:
+        return (g->Activation & GACT_LONGINT) ? "integer" : "string";
+    case GTYP_CUSTOMGADGET: return "custom";
+    }
+    return (g->Activation & GACT_TOGGLESELECT) ? "toggle" : "button";
+}
+
+/* Append src to out (at *n, capacity sz) without tabs or newlines;
+ * a gadget label also loses the underscore that marks its shortcut. */
+static void ui_putx(char *out, LONG *n, LONG sz, const UBYTE *src,
+                    BOOL label)
+{
+    for (; src && *src && *n < sz - 1; src++) {
+        UBYTE c = *src;
+        if (label && c == '_')
+            continue;
+        if (c == '\t' || c == '\n' || c == '\r')
+            c = ' ';
+        out[(*n)++] = c;
+    }
+    out[*n] = '\0';
+}
+
+#define ui_put(o, n, sz, src) ui_putx(o, n, sz, src, FALSE)
+
+/* Memory we may read: RAM exec knows, or the ROM (where a ROM font's
+ * name lives). Anything else might not be there at all. */
+static BOOL ui_readable(const void *p)
+{
+    ULONG a = (ULONG)p;
+    if (!a || (a & 1))
+        return FALSE;
+    if (a >= 0xF80000UL && a < 0x1000000UL)
+        return TRUE;
+    return TypeOfMem((APTR)p) != 0;
+}
+
+static BOOL ui_printable(const UBYTE *t)
+{
+    int k;
+    if (!ui_readable(t))
+        return FALSE;
+    for (k = 0; k < 80 && t[k]; k++)
+        if (t[k] < 32 || (t[k] > 126 && t[k] < 160))
+            return FALSE;
+    return k > 0 && k < 80;
+}
+
+/*
+ * A GadTools button keeps its text out of GadgetText: GadTools draws it
+ * from an IntuiText in its own memory just after the ExtGadget, and a
+ * cycle gadget keeps its current choice the same way (checked on OS
+ * 3.2's gadtools 47). That memory is private, so it is only believed if
+ * it looks exactly like an IntuiText: a draw mode Intuition knows, a
+ * font whose TextAttr names a ".font", and printable text. Read-only,
+ * a bounded window, every pointer checked before it is followed.
+ */
+#define GTYP_GADTOOLS_FLAG 0x0100
+static const UBYTE *ui_gt_text(struct Gadget *g)
+{
+    const UBYTE *base = (const UBYTE *)g + sizeof(struct ExtGadget);
+    LONG off;
+
+    if (!(g->GadgetType & GTYP_GADTOOLS_FLAG) || !(g->Flags & GFLG_EXTENDED))
+        return NULL;
+    for (off = 0; off <= 80; off += 2) {
+        const struct IntuiText *it = (const struct IntuiText *)(base + off);
+        const struct TextAttr *ta = it->ITextFont;
+        const UBYTE *nm;
+        int k;
+        if (it->DrawMode > 7 || ((const UBYTE *)it)[3] != 0 || !ui_readable(ta))
+            continue;
+        nm = (const UBYTE *)ta->ta_Name;
+        if (!ui_printable(nm))
+            continue;
+        for (k = 0; nm[k]; k++)
+            ;
+        if (k < 6 || strcmp((const char *)nm + k - 5, ".font") != 0)
+            continue;
+        if (ui_printable(it->IText))
+            return it->IText;
+    }
+    return NULL;
+}
+
+static void ui_label(struct Gadget *g, char *out, LONG sz)
+{
+    LONG n = 0;
+
+    out[0] = '\0';
+    if (!g->GadgetText)
+        return;
+    switch (g->Flags & GFLG_LABELMASK) {
+    case GFLG_LABELSTRING:
+        ui_putx(out, &n, sz, (UBYTE *)g->GadgetText, TRUE);
+        break;
+    case GFLG_LABELITEXT: {
+        struct IntuiText *it;
+        int k = 0;
+        for (it = g->GadgetText; it && k < 8; it = it->NextText, k++) {
+            if (!it->IText)
+                continue;
+            /* GadTools underlines a shortcut letter by drawing it again
+             * as a text of its own: "Name" then "N". Not a word. */
+            if (n && it->IText[0] && !it->IText[1] &&
+                strchr(out, it->IText[0]))
+                continue;
+            if (n && n < sz - 1)
+                out[n++] = ' ';
+            ui_putx(out, &n, sz, it->IText, TRUE);
+        }
+        break;
+    }
+    }                                   /* LABELIMAGE: a picture, no text */
+}
+
+/* One menu item's text: an IntuiText run, or nothing for an image. */
+static void ui_item_text(struct MenuItem *mi, char *out, LONG *n, LONG sz)
+{
+    struct IntuiText *it;
+    int k = 0;
+    LONG start = *n;
+
+    if (!(mi->Flags & ITEMTEXT) || !mi->ItemFill)
+        return;
+    for (it = (struct IntuiText *)mi->ItemFill; it && k < 4;
+         it = it->NextText, k++) {
+        if (!it->IText)
+            continue;
+        if (*n > start && *n < sz - 1)
+            out[(*n)++] = ' ';
+        ui_put(out, n, sz, it->IText);
+    }
+    /* A '/' inside a name would split the path; keep it readable. */
+    for (; start < *n; start++)
+        if (out[start] == '/')
+            out[start] = '|';
+}
+
+/* One M line. parent is the item a sub-item hangs off, or NULL. */
+static LONG ui_menu_line(char *buf, LONG used, struct Menu *m,
+                         struct MenuItem *parent, struct MenuItem *x,
+                         ULONG code, const char *path)
+{
+    char fl[6], key[2];
+    int f = 0;
+
+    if (!(m->Flags & MENUENABLED) || !(x->Flags & ITEMENABLED) ||
+        (parent && !(parent->Flags & ITEMENABLED)))
+        fl[f++] = 'd';
+    if (x->Flags & CHECKIT) fl[f++] = 'c';
+    if (x->Flags & CHECKED) fl[f++] = 'x';
+    if (!(x->Flags & ITEMTEXT)) fl[f++] = 'b';
+    if (!f) fl[f++] = '-';
+    fl[f] = '\0';
+    key[0] = ((x->Flags & COMMSEQ) && x->Command) ? x->Command : '-';
+    key[1] = '\0';
+    return used + sprintf(buf + used, "M\t%lu\t%s\t%s\t%s\n",
+                          (unsigned long)code, fl, key, path);
+}
+
+static LONG ui_menus(struct Window *w, char *buf, LONG used, LONG cap,
+                     BOOL *full)
+{
+    struct Menu *m;
+    struct MenuItem *it, *sub;
+    ULONG mn, in, sn;
+    char path[200];
+    LONG pm, pi, pn;
+
+    for (m = w->MenuStrip, mn = 0; m && mn < 31; m = m->NextMenu, mn++) {
+        pm = 0;
+        path[0] = '\0';
+        ui_put(path, &pm, sizeof(path) - 2, (UBYTE *)m->MenuName);
+        for (it = m->FirstItem, in = 0; it && in < 63;
+             it = it->NextItem, in++) {
+            pi = pm;
+            path[pi++] = '/';
+            path[pi] = '\0';
+            ui_item_text(it, path, &pi, sizeof(path) - 2);
+            if (!it->SubItem) {
+                if (used + 300 > cap) { *full = TRUE; return used; }
+                used = ui_menu_line(buf, used, m, NULL, it,
+                                    mn | (in << 5) | (31UL << 11), path);
+                continue;
+            }
+            for (sub = it->SubItem, sn = 0; sub && sn < 31;
+                 sub = sub->NextItem, sn++) {
+                pn = pi;
+                path[pn++] = '/';
+                path[pn] = '\0';
+                ui_item_text(sub, path, &pn, sizeof(path));
+                if (used + 300 > cap) { *full = TRUE; return used; }
+                used = ui_menu_line(buf, used, m, it, sub,
+                                    mn | (in << 5) | (sn << 11), path);
+            }
+        }
+    }
+    return used;
+}
+
+static LONG ui_gadgets(struct Window *w, char *buf, LONG used, LONG cap,
+                       BOOL *full)
+{
+    struct Gadget *g;
+    char label[120], value[120], cls[40];
+    BOOL gzz = (w->Flags & WFLG_GIMMEZEROZERO) != 0;
+    LONG k = 0;
+
+    for (g = w->FirstGadget; g && k < 400; g = g->NextGadget, k++) {
+        LONG cw = w->Width, ch = w->Height, ox = 0, oy = 0;
+        LONG x, y, gw, gh;
+        char fl[3];
+        int f = 0;
+
+        if (gzz && !(g->GadgetType & GTYP_GZZGADGET)) {
+            cw = w->GZZWidth;
+            ch = w->GZZHeight;
+            ox = w->BorderLeft;
+            oy = w->BorderTop;
+        }
+        x  = (g->Flags & GFLG_RELRIGHT)  ? cw + g->LeftEdge - 1 : g->LeftEdge;
+        y  = (g->Flags & GFLG_RELBOTTOM) ? ch + g->TopEdge - 1  : g->TopEdge;
+        gw = (g->Flags & GFLG_RELWIDTH)  ? cw + g->Width  : g->Width;
+        gh = (g->Flags & GFLG_RELHEIGHT) ? ch + g->Height : g->Height;
+        if (gw <= 0 || gh <= 0)
+            continue;                    /* nothing there to click */
+
+        if (g->Flags & GFLG_DISABLED) fl[f++] = 'd';
+        if (g->Flags & GFLG_SELECTED) fl[f++] = 's';
+        if (!f) fl[f++] = '-';
+        fl[f] = '\0';
+
+        ui_label(g, label, sizeof(label));
+        value[0] = '\0';
+        {
+            const UBYTE *gt = ui_gt_text(g);
+            LONG ln = 0;
+            if (gt && !label[0])
+                ui_putx(label, &ln, sizeof(label), gt, TRUE);
+            else if (gt && strcmp((const char *)gt, label) != 0)
+                ui_put(value, &ln, sizeof(value), gt);   /* cycle choice */
+        }
+        if ((g->GadgetType & GTYP_GTYPEMASK) == GTYP_STRGADGET &&
+            !(g->GadgetType & GTYP_SYSGADGET) && g->SpecialInfo) {
+            LONG vn = 0;
+            ui_put(value, &vn, sizeof(value),
+                   ((struct StringInfo *)g->SpecialInfo)->Buffer);
+        } else if ((g->GadgetType & GTYP_GTYPEMASK) == GTYP_PROPGADGET &&
+                   !(g->GadgetType & GTYP_SYSGADGET) && g->SpecialInfo) {
+            struct PropInfo *pi = (struct PropInfo *)g->SpecialInfo;
+            sprintf(value, "%u", (unsigned)((pi->Flags & FREEVERT) ?
+                                            pi->VertPot : pi->HorizPot));
+        }
+        cls[0] = '\0';
+        if ((g->GadgetType & GTYP_GTYPEMASK) == GTYP_CUSTOMGADGET &&
+            !(g->GadgetType & GTYP_SYSGADGET)) {
+            struct IClass *ic = OCLASS(g);
+            LONG cn = 0;
+            if (ic && ic->cl_ID)
+                ui_put(cls, &cn, sizeof(cls), ic->cl_ID);
+        }
+
+        if (used + 400 > cap) { *full = TRUE; break; }
+        used += sprintf(buf + used,
+                        "G\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%s\t%s\t%u"
+                        "\t%s\t%s\t%s\n",
+                        (unsigned long)g, (long)(x + ox), (long)(y + oy),
+                        (long)gw, (long)gh,
+                        ui_kind(g), fl, (unsigned)g->GadgetID,
+                        cls[0] ? cls : "-", label, value);
+    }
+    return used;
+}
+
+static BOOL send_lines(int fd, char *buf, LONG used)
+{
+    LONG i, n;
+    BOOL ok = TRUE;
+
+    for (i = 0; ok && i < used; i += n) {
+        n = used - i;
+        if (n > 8192) {
+            n = 8192;
+            while (n > 0 && buf[i + n - 1] != '\n')
+                n--;
+        }
+        ok = send_frame(fd, T_DATA, buf + i, n);
+    }
+    return ok;
+}
+
+/* flags bit 0: every screen; otherwise only the front one, which is
+ * where a click can land. */
+static BOOL cmd_ui(int fd, ULONG flags)
+{
+    struct Screen *sc;
+    struct Window *w, *active;
+    char *buf;
+    char task[48], title[120];
+    LONG used = 0;
+    BOOL ok, full = FALSE;
+    ULONG ib;
+
+    buf = AllocMem(UI_BUF, MEMF_ANY);
+    if (!buf)
+        return send_perr(fd, "out of memory");
+
+    ib = LockIBase(0);
+    active = IntuitionBase->ActiveWindow;
+    for (sc = IntuitionBase->FirstScreen; sc && !full; sc = sc->NextScreen) {
+        copystr(title, sizeof(title), sc->Title ? (char *)sc->Title : "");
+        win_clean(title);
+        if (used + 300 > UI_BUF) { full = TRUE; break; }
+        used += sprintf(buf + used, "S\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%ld\t%s\n",
+                        (unsigned long)sc, (long)sc->LeftEdge,
+                        (long)sc->TopEdge, (long)sc->Width,
+                        (long)sc->Height,
+                        (long)GetBitMapAttr(sc->RastPort.BitMap, BMA_DEPTH),
+                        title);
+        for (w = sc->FirstWindow; w && !full; w = w->NextWindow) {
+            char fl[3];
+            LONG f = 0;
+            if (used + 300 > UI_BUF) { full = TRUE; break; }
+            if (w == active) fl[f++] = 'a';
+            if (w->Flags & WFLG_BACKDROP) fl[f++] = 'b';
+            if (!f) fl[f++] = '-';
+            fl[f] = '\0';
+            win_task_name(w, task, sizeof(task));
+            win_clean(task);
+            copystr(title, sizeof(title), w->Title ? (char *)w->Title : "");
+            win_clean(title);
+            used += sprintf(buf + used,
+                    "W\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld"
+                    "\t%s\t%s\t%s\n",
+                    (unsigned long)w, (long)w->LeftEdge, (long)w->TopEdge,
+                    (long)w->Width, (long)w->Height,
+                    (long)w->BorderLeft, (long)w->BorderTop,
+                    (long)w->BorderRight, (long)w->BorderBottom,
+                    fl, task[0] ? task : "-", title);
+            used = ui_gadgets(w, buf, used, UI_BUF, &full);
+            if (!full)
+                used = ui_menus(w, buf, used, UI_BUF, &full);
+        }
+        if (!(flags & 1))
+            break;
+    }
+    UnlockIBase(ib);
+
+    ok = send_lines(fd, buf, used);
+    FreeMem(buf, UI_BUF);
+    if (!ok)
+        return FALSE;
+    if (full)
+        return send_perr(fd, "too many gadgets; the list is cut short");
+    return send_frame(fd, T_END, NULL, 0);
+}
+
+/* --- messages we post and wait for: ARexx and menu picks ----------- */
+
+/*
+ * One reply port for every message the daemon sends to somebody else's
+ * port. Nothing here waits: the main loop adds the port's signal to its
+ * WaitSelect, so a slow ARexx host holds up only the client that asked.
+ *
+ * A message whose answer is late still belongs to its receiver until it
+ * comes back, so a timeout only tells the client; the message stays in
+ * g_posted and is freed when it is finally replied. If the daemon exits
+ * with some still out, the port is set to PA_IGNORE and left behind -
+ * deleting it, or leaving it signalling a task that is gone, would make
+ * the late ReplyMsg write into freed memory.
+ */
+#define MAX_POSTED 16
+#define POST_REXX  1
+#define POST_MENU  2
+
+struct Posted {
+    struct Message *msg;             /* NULL: entry free */
+    UBYTE  kind;
+    int    client;                   /* -1: nobody waits any more */
+    ULONG  deadline;                 /* now_secs() */
+};
+
+static struct Posted   g_posted[MAX_POSTED];
+static struct MsgPort *g_post_port;
+static struct Library *g_rexxsys;
+
+static LONG posted_count(void)
+{
+    LONG i, n = 0;
+    for (i = 0; i < MAX_POSTED; i++)
+        if (g_posted[i].msg)
+            n++;
+    return n;
+}
+
+static struct Posted *post_slot(void)
+{
+    LONG i;
+    if (!g_post_port && !(g_post_port = CreateMsgPort()))
+        return NULL;
+    for (i = 0; i < MAX_POSTED; i++)
+        if (!g_posted[i].msg)
+            return &g_posted[i];
+    return NULL;
+}
+
+static ULONG posted_sigmask(void)
+{
+    return g_post_port ? 1UL << g_post_port->mp_SigBit : 0;
+}
+
+static void posted_free(struct Posted *ps)
+{
+    if (ps->kind == POST_REXX) {
+        struct RexxMsg *rm = (struct RexxMsg *)ps->msg;
+        if (rm->rm_Args[0])
+            DeleteArgstring(rm->rm_Args[0]);
+        if (rm->rm_Result1 == 0 && rm->rm_Result2)
+            DeleteArgstring((UBYTE *)rm->rm_Result2);
+        DeleteRexxMsg(rm);
+    } else
+        FreeMem(ps->msg, sizeof(struct ExtIntuiMessage));
+    ps->msg = NULL;
+}
+
+/* AREXX: payload u32 timeout seconds, str port, str command.
+ * Answer: DATA = u32 rc, u32 rc2, result bytes; then END. */
+static BOOL cmd_arexx(int cl, int fd, const UBYTE *p, LONG len)
+{
+    /* Static: a kilobyte is an eighth of the shell's 8 KB stack, and the
+     * daemon runs on that stack when started at boot (this crashed it
+     * in the emulator the first time). */
+    static char port[64], cmd[1024];
+    struct Posted *ps;
+    struct RexxMsg *rm;
+    struct MsgPort *dest;
+    ULONG secs;
+
+    if (len < 4 || !get_str(p, len, 4, port, sizeof(port)) ||
+        !get_str(p, len, 6 + (LONG)strlen(port), cmd, sizeof(cmd)))
+        return send_perr(fd, "bad AREXX header");
+    secs = get_be32(p);
+    if (secs == 0 || secs > 3600)
+        secs = 30;
+    if (!g_rexxsys)
+        g_rexxsys = OpenLibrary("rexxsyslib.library", 36);
+    if (!g_rexxsys)
+        return send_perr(fd, "cannot open rexxsyslib.library - is ARexx "
+                            "installed?");
+    if (!(ps = post_slot()))
+        return send_perr(fd, "too many ARexx messages are still waiting "
+                            "for an answer");
+    if (!(rm = CreateRexxMsg(g_post_port, NULL, NULL)))
+        return send_perr(fd, "out of memory");
+    if (!(rm->rm_Args[0] = CreateArgstring(cmd, (ULONG)strlen(cmd)))) {
+        DeleteRexxMsg(rm);
+        return send_perr(fd, "out of memory");
+    }
+    rm->rm_Action = RXCOMM | RXFF_RESULT;
+
+    Forbid();
+    dest = FindPort(port);
+    if (dest)
+        PutMsg(dest, (struct Message *)rm);
+    Permit();
+    if (!dest) {
+        char msg[120];
+        DeleteArgstring(rm->rm_Args[0]);
+        DeleteRexxMsg(rm);
+        sprintf(msg, "no port named \"%.60s\" (port names are case "
+                     "sensitive)", port);
+        return send_perr(fd, msg);
+    }
+    ps->msg = (struct Message *)rm;
+    ps->kind = POST_REXX;
+    ps->client = cl;
+    ps->deadline = now_secs() + secs;
+    return TRUE;                         /* the answer comes from pump */
+}
+
+/*
+ * UIACT: payload u32 op, u32 window address, u32 argument.
+ *   op 1  pick a menu item: a MENUPICK message to the window's IDCMP
+ *         port, argument = the FULLMENUNUM from UI. What the program
+ *         then does is exactly what it does when a person picks it;
+ *         what it does not get is Intuition's own side effects - a
+ *         checkmark item is toggled here, as Intuition would.
+ *   op 2  bring the window's screen and the window to the front and
+ *         make it the active window, so a click lands on it.
+ * The window must still be in Intuition's lists: an address from a
+ * minute ago may have been closed and reused since.
+ */
+static BOOL window_alive(struct Window *want)
+{
+    struct Screen *sc;
+    struct Window *w;
+    for (sc = IntuitionBase->FirstScreen; sc; sc = sc->NextScreen)
+        for (w = sc->FirstWindow; w; w = w->NextWindow)
+            if (w == want)
+                return TRUE;
+    return FALSE;
+}
+
+static BOOL cmd_uiact(int fd, ULONG op, ULONG waddr, ULONG arg)
+{
+    struct Window *w = (struct Window *)waddr;
+    const char *why = NULL;
+    ULONG ib;
+
+    if (op == 2) {
+        ib = LockIBase(0);
+        if (!window_alive(w)) {
+            UnlockIBase(ib);
+            return send_perr(fd, "that window is gone");
+        }
+        UnlockIBase(ib);
+        /* Not under the lock: these queue work for Intuition's own
+         * task, which needs that lock to do it. A window closed in the
+         * moment between is the remaining risk, as with any tool that
+         * holds a window address. */
+        ScreenToFront(w->WScreen);
+        WindowToFront(w);
+        ActivateWindow(w);
+        return send_frame(fd, T_OK, NULL, 0);
+    }
+    if (op != 1)
+        return send_perr(fd, "bad UIACT op");
+
+    {
+        struct Posted *ps = post_slot();
+        struct ExtIntuiMessage *im;
+        struct MenuItem *it;
+        ULONG s, m;
+
+        if (!ps)
+            return send_perr(fd, "too many messages are still waiting for "
+                                "an answer");
+        im = AllocMem(sizeof(*im), MEMF_PUBLIC | MEMF_CLEAR);
+        if (!im)
+            return send_perr(fd, "out of memory");
+
+        ib = LockIBase(0);
+        if (!window_alive(w))
+            why = "that window is gone";
+        else if (!w->UserPort)
+            why = "that window has no IDCMP port";
+        else if (!(w->IDCMPFlags & IDCMP_MENUPICK))
+            why = "that window does not listen for menu picks";
+        else if (!w->MenuStrip ||
+                 !(it = ItemAddress(w->MenuStrip, (UWORD)arg)))
+            why = "no such menu item";
+        else if (!(it->Flags & ITEMENABLED))
+            why = "that menu item is disabled";
+        else {
+            if (it->Flags & CHECKIT) {
+                if ((it->Flags & MENUTOGGLE) || !(it->Flags & CHECKED))
+                    it->Flags ^= CHECKED;
+                /* Mutual exclusion is the program's to apply on the
+                 * next refresh; Intuition does it on release, which
+                 * this message stands in for. */
+                if (it->MutualExclude && (it->Flags & CHECKED)) {
+                    struct Menu *mm = w->MenuStrip;
+                    struct MenuItem *o;
+                    ULONG mnum = arg & 31, k;
+                    for (k = 0; mm && k < mnum; k++)
+                        mm = mm->NextMenu;
+                    o = mm ? mm->FirstItem : NULL;
+                    if (((arg >> 11) & 31) != 31)
+                        o = NULL;        /* sub-items: leave it alone */
+                    for (k = 0; o && k < 32; o = o->NextItem, k++)
+                        if (o != it && (it->MutualExclude & (1UL << k)))
+                            o->Flags &= ~CHECKED;
+                }
+            }
+            it->NextSelect = MENUNULL;
+            CurrentTime(&s, &m);
+            im->eim_IntuiMessage.ExecMessage.mn_Node.ln_Type = NT_MESSAGE;
+            im->eim_IntuiMessage.ExecMessage.mn_ReplyPort = g_post_port;
+            im->eim_IntuiMessage.ExecMessage.mn_Length = sizeof(*im);
+            im->eim_IntuiMessage.Class = IDCMP_MENUPICK;
+            im->eim_IntuiMessage.Code = (UWORD)arg;
+            im->eim_IntuiMessage.IDCMPWindow = w;
+            im->eim_IntuiMessage.MouseX = w->MouseX;
+            im->eim_IntuiMessage.MouseY = w->MouseY;
+            im->eim_IntuiMessage.Seconds = s;
+            im->eim_IntuiMessage.Micros = m;
+            PutMsg(w->UserPort, (struct Message *)im);
+        }
+        UnlockIBase(ib);
+        if (why) {
+            FreeMem(im, sizeof(*im));
+            return send_perr(fd, why);
+        }
+        ps->msg = (struct Message *)im;
+        ps->kind = POST_MENU;
+        ps->client = -1;                 /* answered now, not on reply */
+        ps->deadline = 0;
+        return send_frame(fd, T_OK, NULL, 0);
+    }
+}
+
+/* Main loop: collect replies, answer who asked, time out the slow. */
+static void pump_posted(void)
+{
+    struct Message *msg;
+    LONG i;
+    ULONG now;
+
+    if (!g_post_port)
+        return;
+    while ((msg = GetMsg(g_post_port))) {
+        for (i = 0; i < MAX_POSTED; i++)
+            if (g_posted[i].msg == msg)
+                break;
+        if (i == MAX_POSTED)
+            continue;                    /* not ours: cannot happen */
+        if (g_posted[i].kind == POST_REXX && g_posted[i].client >= 0) {
+            struct RexxMsg *rm = (struct RexxMsg *)msg;
+            int fd = g_clients[g_posted[i].client].fd;
+            /* One DATA frame: rc, rc2, then as much RESULT as fits. */
+            static UBYTE out[8 + 32768];
+            LONG n = 0;
+            put_be32(out, (ULONG)rm->rm_Result1);
+            put_be32(out + 4, rm->rm_Result1 ? (ULONG)rm->rm_Result2 : 0);
+            if (rm->rm_Result1 == 0 && rm->rm_Result2) {
+                n = LengthArgstring((UBYTE *)rm->rm_Result2);
+                if (n > 32768)
+                    n = 32768;
+                memcpy(out + 8, (UBYTE *)rm->rm_Result2, n);
+            }
+            if (!send_frame(fd, T_DATA, out, 8 + n) ||
+                !send_frame(fd, T_END, NULL, 0))
+                drop(g_posted[i].client);
+        }
+        posted_free(&g_posted[i]);
+    }
+    now = now_secs();
+    for (i = 0; i < MAX_POSTED; i++) {
+        struct Posted *ps = &g_posted[i];
+        if (ps->msg && ps->client >= 0 && ps->deadline && now > ps->deadline) {
+            int cl = ps->client;
+            ps->client = -1;             /* the message stays until replied */
+            if (!send_perr(g_clients[cl].fd, "the ARexx host did not answer "
+                          "in time (it may still act on the command)"))
+                drop(cl);
+        }
+    }
+}
+
+/* drop(): nobody is left to tell. */
+static void posted_forget(int cl)
+{
+    LONG i;
+    for (i = 0; i < MAX_POSTED; i++)
+        if (g_posted[i].client == cl)
+            g_posted[i].client = -1;
+}
+
+/* Exit: a few seconds for late replies, then leave the port deaf. */
+static void posted_shutdown(void)
+{
+    int w;
+    if (!g_post_port)
+        return;
+    for (w = 0; posted_count() && w < 100; w++) {
+        pump_posted();
+        if (posted_count())
+            Delay(5);
+    }
+    if (posted_count()) {
+        g_post_port->mp_Flags = PA_IGNORE;
+        Printf("wasabid: %ld message(s) never came back; their reply port "
+               "stays in memory\n", posted_count());
+    } else
+        DeleteMsgPort(g_post_port);
+    g_post_port = NULL;
+}
+
+/* PORTS: every public message port, one name per line. */
+static BOOL cmd_ports(int fd)
+{
+    char *buf = AllocMem(16384, MEMF_ANY);
+    struct Node *n;
+    LONG used = 0;
+    BOOL ok, full = FALSE;
+
+    if (!buf)
+        return send_perr(fd, "out of memory");
+    Forbid();
+    for (n = SysBase->PortList.lh_Head; n->ln_Succ; n = n->ln_Succ) {
+        LONG k = 0;
+        if (!n->ln_Name || !n->ln_Name[0])
+            continue;
+        if (used + 80 > 16384) { full = TRUE; break; }
+        ui_put(buf + used, &k, 78, (UBYTE *)n->ln_Name);
+        used += k;
+        buf[used++] = '\n';
+    }
+    Permit();
+    ok = send_lines(fd, buf, used);
+    FreeMem(buf, 16384);
+    if (!ok)
+        return FALSE;
+    if (full)
+        return send_perr(fd, "too many ports; the list is cut short");
+    return send_frame(fd, T_END, NULL, 0);
+}
+
 /*
  * Throughput measurement, deliberately storage-free: received bytes are
  * counted and dropped, sent bytes come from one static-pattern buffer.
@@ -3599,6 +4370,20 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
     case T_WINDOWS:
         return cmd_windows(fd);
 
+    case T_UI:
+        return cmd_ui(fd, len >= 4 ? get_be32(p) : 0);
+
+    case T_UIACT:
+        if (len < 12)
+            return send_perr(fd, "bad UIACT header");
+        return cmd_uiact(fd, get_be32(p), get_be32(p + 4), get_be32(p + 8));
+
+    case T_AREXX:
+        return cmd_arexx(cl, fd, p, len);
+
+    case T_PORTS:
+        return cmd_ports(fd);
+
     case T_CLIP:
         if (len < 4)
             return send_perr(fd, "bad CLIP header");
@@ -3713,6 +4498,7 @@ static void drop(int cl)
         g_snoop_client = -1;
     }
     live_free(cl);
+    posted_forget(cl);
     CloseSocket(g_clients[cl].fd);
     g_clients[cl].fd = -1;
     g_clients[cl].hello = FALSE;
@@ -3970,7 +4756,7 @@ int main(int argc, char **argv)
     while (!g_quit) {
         fd_set rd;
         struct timeval tv;
-        ULONG sigs = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_F;
+        ULONG sigs = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_F | posted_sigmask();
         int nfds = listen_fd;
         LONG n;
 
@@ -3994,8 +4780,15 @@ int main(int argc, char **argv)
         {
             BOOL busy = (runners_alive() || g_dbg_client >= 0 ||
                          g_snoop_client >= 0);
+            /* A waiting ARexx answer wakes us by signal; the timer is
+             * only for its time limit, so a second is plenty. */
+            if (!busy && posted_count()) {
+                tv.tv_secs = 1;
+                tv.tv_micro = 0;
+            } else {
             tv.tv_secs  = busy ? 0 : 2;
             tv.tv_micro = busy ? 50000 : 0;
+            }
         }
 
         n = WaitSelect(nfds + 1, &rd, NULL, NULL, &tv, &sigs);
@@ -4017,6 +4810,8 @@ int main(int argc, char **argv)
             drop(g_dbg_client);
         if (g_snoop_client >= 0 && !pump_snoop_stream())
             drop(g_snoop_client);
+
+        pump_posted();
 
         {
             char line[200];
@@ -4205,6 +5000,10 @@ out:
     FreeMem(payload, MAX_PAYLOAD);
     if (g_cgfx) CloseLibrary(g_cgfx);
     if (g_keymap) CloseLibrary(g_keymap);
+    posted_shutdown();
+    /* A rexx message left with a slow host still needs the library to
+     * be freed one day; keep it open in that case. */
+    if (g_rexxsys && !g_post_port) CloseLibrary(g_rexxsys);
     CloseLibrary(SocketBase);
 
     /*

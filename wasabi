@@ -36,6 +36,7 @@ REBOOT, INFO, RESTART, PS, KILL, SPEED = 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
 QUIT, INSTALL, GRAB, SCREEN, MOUSE = 0x46, 0x47, 0x48, 0x49, 0x4A
 KEY, WINDOWS, HEALTH, LIVE, CLIP = 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
 SLOTS, FREE, SLOT = 0x50, 0x51, 0x52
+UI, UIACT, AREXX, PORTS = 0x53, 0x54, 0x55, 0x56   # daemon 0.5+
 FREE_BREAK_ONLY = 1
 RUN_SLOT = 4            # RUN flag: tell me which slot (daemon 0.4+)
 
@@ -2205,6 +2206,363 @@ def cmd_windows(conn, args):
                      "  [%s]" % ", ".join(flags) if flags else ""))
 
 
+# --- the GUI as objects: gadgets and menus by name --------------------
+
+SYSTEM_KINDS = ("close", "depth", "zoom", "size", "drag", "sdepth", "sdrag")
+
+
+def ui_norm(s):
+    """How names are compared: any case, no shortcut underscore, no
+    trailing colon or dots, spaces folded - 'Save _As...' == 'save as'."""
+    s = s.replace("_", "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s.rstrip(".:… ").strip()
+
+
+def read_ui(conn, every_screen=False):
+    """Screens, front first, each with its windows, each with its
+    gadgets and menu items - all in grab's pixel space, like `windows`.
+
+    A gadget's x/y/width/height are relative to its screen, so its
+    centre is where `mouse click` goes."""
+    if conn.caps and "ui" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) cannot list gadgets - update it with "
+            "'wasabi update wasabid'" % conn.banner)
+    conn.send(UI, struct.pack(">I", 1 if every_screen else 0))
+    text = []
+    drain_to_end(conn, text.append)
+    screens = []
+    win = None
+    for line in b"".join(text).decode("latin-1").splitlines():
+        f = line.split("\t")
+        if f[0] == "S" and len(f) >= 8:
+            w, h = int(f[4]), int(f[5])
+            screens.append({"addr": f[1], "title": f[7], "left": int(f[2]),
+                            "top": int(f[3]), "width": w, "height": h,
+                            "depth": int(f[6]), "row_scale": row_scale(w, h),
+                            "front": not screens, "windows": []})
+            win = None
+        elif f[0] == "W" and len(f) >= 13 and screens:
+            k = screens[-1]["row_scale"]
+            win = {"addr": f[1], "title": f[12], "task": f[11],
+                   "left": int(f[2]), "top": int(f[3]) * k,
+                   "width": int(f[4]), "height": int(f[5]) * k,
+                   "active": "a" in f[10], "backdrop": "b" in f[10],
+                   "gadgets": [], "menus": []}
+            screens[-1]["windows"].append(win)
+        elif f[0] == "G" and len(f) >= 12 and win is not None:
+            k = screens[-1]["row_scale"]
+            win["gadgets"].append({
+                "addr": f[1], "kind": f[6], "label": f[10],
+                "value": f[11], "class": "" if f[9] == "-" else f[9],
+                "id": int(f[8]),
+                "x": win["left"] + int(f[2]), "y": win["top"] + int(f[3]) * k,
+                "width": int(f[4]), "height": int(f[5]) * k,
+                "disabled": "d" in f[7], "selected": "s" in f[7]})
+        elif f[0] == "M" and len(f) >= 5 and win is not None:
+            win["menus"].append({
+                "code": int(f[1]), "path": f[4],
+                "key": "" if f[3] == "-" else f[3],
+                "disabled": "d" in f[2], "checkable": "c" in f[2],
+                "checked": "x" in f[2], "bar": "b" in f[2]})
+    return screens
+
+
+def ui_windows(screens, title=None):
+    """(screen, window) pairs to search, front first. With a title: the
+    windows whose title contains it, on any screen listed."""
+    out = []
+    for sc in screens:
+        for w in sc["windows"]:
+            if title is None or ui_norm(title) in ui_norm(w["title"]):
+                out.append((sc, w))
+    return out
+
+
+def ui_match(name, items, key):
+    """Items whose key matches NAME: exact first, then starts-with, then
+    contains. Returns the best non-empty tier."""
+    n = ui_norm(name)
+    tiers = ([], [], [])
+    for it in items:
+        v = ui_norm(key(it))
+        if not v:
+            continue
+        if v == n:
+            tiers[0].append(it)
+        elif v.startswith(n):
+            tiers[1].append(it)
+        elif n in v:
+            tiers[2].append(it)
+    for t in tiers:
+        if t:
+            return t
+    return []
+
+
+def find_gadget(screens, label, window=None, kind=None, nth=None):
+    """(screen, window, gadget) for LABEL. A system kind name (close,
+    depth, zoom, size, drag) finds that border gadget. The frontmost
+    window with a match wins; two matches there need --nth."""
+    pairs = ui_windows(screens, window)
+    if not pairs:
+        raise WasabiError("no window titled %r" % window if window
+                          else "no windows on the front screen")
+    for sc, w in pairs:
+        gads = [g for g in w["gadgets"] if not kind or g["kind"] == kind]
+        if not label and kind:          # "the string gadget"
+            hits = gads
+        elif ui_norm(label) in SYSTEM_KINDS:
+            hits = [g for g in gads if g["kind"] == ui_norm(label)]
+        else:
+            hits = ui_match(label, gads, lambda g: g["label"])
+        if not hits:
+            continue
+        if nth is not None:
+            if not 1 <= nth <= len(hits):
+                raise WasabiError("--nth %d: there are %d matches"
+                                  % (nth, len(hits)))
+            return sc, w, hits[nth - 1]
+        if len(hits) > 1:
+            raise WasabiError(
+                "%d gadgets match %r in \"%s\": %s - say which with --nth N"
+                % (len(hits), label, w["title"],
+                   ", ".join('"%s" (%s at %d,%d)' % (g["label"], g["kind"],
+                                                     g["x"], g["y"])
+                             for g in hits[:8])))
+        return sc, w, hits[0]
+    raise WasabiError("no gadget %r%s - 'wasabi ui list' shows what there is"
+                      % (label or kind, " in a window titled %r" % window
+                         if window else " on the front screen"))
+
+
+def covered(sc, w, x, y):
+    """Is (x, y) inside a window in front of W on its screen?"""
+    for other in sc["windows"]:
+        if other is w:
+            return False
+        if (other["left"] <= x < other["left"] + other["width"] and
+                other["top"] <= y < other["top"] + other["height"]):
+            return True
+    return False
+
+
+def ui_front(conn, w):
+    conn.send(UIACT, struct.pack(">III", 2, int(w["addr"], 16), 0))
+    conn.expect_ok()
+    time.sleep(0.3)                     # Intuition does it in its own time
+
+
+def ui_click(conn, label, window=None, kind=None, nth=None, double=False):
+    """Click a gadget by name. Brings its window (and screen) to the
+    front first when something would be in the way. Returns the gadget."""
+    screens = read_ui(conn, every_screen=window is not None)
+    sc, w, g = find_gadget(screens, label, window, kind, nth)
+    if g["disabled"]:
+        raise WasabiError("\"%s\" is disabled (ghosted)" % g["label"])
+    x, y = g["x"] + g["width"] // 2, g["y"] + g["height"] // 2
+    if not sc["front"] or covered(sc, w, x, y):
+        ui_front(conn, w)
+    conn.send(MOUSE, struct.pack(">HHHhh", 1, 0, 2 if double else 1, x, y))
+    conn.expect_ok()
+    return w, g
+
+
+def find_menu(screens, path, window=None):
+    """(window, item) for PATH ('Project/Save As'). Without a window:
+    the active window, else the frontmost one that has menus."""
+    pairs = ui_windows(screens, window)
+    if window is None:
+        pairs.sort(key=lambda p: not p[1]["active"])
+    pairs = [p for p in pairs if p[1]["menus"]]
+    if not pairs:
+        raise WasabiError("no window with menus%s"
+                          % (" titled %r" % window if window else
+                             " on the front screen"))
+    want = [s for s in path.split("/") if s.strip()]
+    w = pairs[0][1]
+    items = [m for m in w["menus"] if not m["bar"]]
+    if len(want) == 1:                  # just "Quit": any item named so
+        hits = ui_match(want[0], items, lambda m: m["path"].split("/")[-1])
+        if len(hits) == 1:
+            return w, hits[0]
+    for depth, seg in enumerate(want):
+        n = ui_norm(seg)
+        segs = lambda m: m["path"].split("/")
+        level = [m for m in items if len(segs(m)) > depth]
+        pick = [m for m in level if ui_norm(segs(m)[depth]) == n] or \
+               [m for m in level if ui_norm(segs(m)[depth]).startswith(n)] or \
+               [m for m in level if n in ui_norm(segs(m)[depth])]
+        items = pick
+    items = [m for m in items if len(m["path"].split("/")) == len(want)] \
+        or items
+    if not items:
+        raise WasabiError("no menu item %r in \"%s\" - 'wasabi ui menus' "
+                          "lists them" % (path, w["title"]))
+    if len(items) > 1:
+        raise WasabiError("%r matches %d menu items: %s" % (
+            path, len(items), ", ".join(m["path"] for m in items[:8])))
+    return w, items[0]
+
+
+def ui_menu(conn, path, window=None):
+    screens = read_ui(conn, every_screen=window is not None)
+    w, m = find_menu(screens, path, window)
+    if m["disabled"]:
+        raise WasabiError("\"%s\" is disabled (ghosted)" % m["path"])
+    conn.send(UIACT, struct.pack(">III", 1, int(w["addr"], 16), m["code"]))
+    conn.expect_ok()
+    return w, m
+
+
+def cmd_ui(conn, args):
+    """Gadgets and menus by name: list them, click one, pick a menu item.
+
+    Gadgets are clicked with the real mouse, at their middle, so the
+    program sees exactly what a person's click gives it. A menu item is
+    picked by handing the window the message Intuition would send - no
+    mouse, so it works whatever the menu looks like (pop-up or bar).
+    """
+    if args.action == "list" or args.action == "menus":
+        screens = read_ui(conn, every_screen=args.all_screens or
+                          args.window is not None)
+        pairs = ui_windows(screens, args.window)
+        if args.json:
+            emit_json(screens if args.window is None else
+                      [w for _, w in pairs])
+            return
+        for sc, w in pairs:
+            print('window "%s"  at %d,%d  %dx%d  task %s%s'
+                  % (w["title"], w["left"], w["top"], w["width"],
+                     w["height"], w["task"],
+                     "  [active]" if w["active"] else ""))
+            if args.action == "list":
+                for g in w["gadgets"]:
+                    flags = [n for n in ("disabled", "selected") if g[n]]
+                    print('  %-8s %-24s at %d,%d %dx%d%s%s%s'
+                          % (g["kind"], '"%s"' % g["label"] if g["label"]
+                             else "-", g["x"], g["y"], g["width"],
+                             g["height"],
+                             "  (%s)" % g["class"] if g["class"] else "",
+                             '  value "%s"' % g["value"] if g["value"] and
+                             g["kind"] != "prop" else "",
+                             "  [%s]" % ", ".join(flags) if flags else ""))
+            for m in w["menus"]:
+                if m["bar"]:
+                    continue
+                flags = [n for n in ("disabled", "checked") if m[n]]
+                print('  menu     %-32s%s%s'
+                      % (m["path"], "  Amiga+%s" % m["key"] if m["key"]
+                         else "", "  [%s]" % ", ".join(flags) if flags
+                         else ""))
+        return
+    if args.action == "front":
+        if not args.name:
+            raise WasabiError("ui front needs a window title")
+        pairs = ui_windows(read_ui(conn, every_screen=True), args.name)
+        if not pairs:
+            raise WasabiError("no window titled %r" % args.name)
+        ui_front(conn, pairs[0][1])
+        print('"%s" is in front and active' % pairs[0][1]["title"])
+        return
+    if not args.name and not (args.kind and args.action in ("click", "set")):
+        raise WasabiError("ui %s needs a name" % args.action)
+    if args.action == "click":
+        w, g = ui_click(conn, args.name, args.window, args.kind, args.nth,
+                        args.double)
+        print('clicked %s "%s" in "%s"' % (g["kind"], g["label"] or "-",
+                                           w["title"]))
+    elif args.action == "set":
+        if args.text is None:
+            raise WasabiError("ui set needs the text: "
+                              "wasabi ui set NAME TEXT")
+        w, g = ui_click(conn, args.name, args.window,
+                        args.kind, args.nth)
+        if g["kind"] not in ("string", "integer", "custom"):
+            raise WasabiError('"%s" is a %s, not a text field'
+                              % (g["label"], g["kind"]))
+        # Right Amiga+X clears a string gadget; then type, then Return
+        # so the program hears GADGETUP, as it would from a person.
+        conn.send(KEY, struct.pack(">H", 0) + b"".join(
+            struct.pack(">HH", c, q) for c, q in key_combo_events("ramiga+x")))
+        conn.expect_ok()
+        text = args.text + ("" if args.no_enter else "\r")
+        try:
+            data = text.encode("latin-1")
+        except UnicodeEncodeError as e:
+            raise WasabiError("the Amiga cannot type %r (not Latin-1)"
+                              % text[e.start])
+        conn.send(KEY, struct.pack(">H", 1) + data)
+        conn.expect_ok()
+        print('set "%s" in "%s"' % (g["label"] or g["kind"], w["title"]))
+    elif args.action == "menu":
+        w, m = ui_menu(conn, args.name, args.window)
+        print('picked "%s" in "%s"' % (m["path"], w["title"]))
+
+
+# --- ARexx --------------------------------------------------------------
+
+
+def arexx(conn, port, command, timeout=30):
+    """Send COMMAND to the ARexx port PORT; (rc, rc2, result).
+
+    rc 0 is success and result is what the host set as RESULT; otherwise
+    rc is the host's error level (5 warn, 10 error, 20 failure) and rc2
+    its secondary code."""
+    if conn.caps and "arexx" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) has no ARexx - update it with "
+            "'wasabi update wasabid'" % conn.banner)
+    conn.send(AREXX, struct.pack(">I", int(timeout)) + pack_str(port) +
+              pack_str(command))
+    conn.sock.settimeout(max(SILENCE, timeout + 10))
+    parts = []
+    drain_to_end(conn, parts.append)
+    data = b"".join(parts)
+    if len(data) < 8:
+        raise WasabiError("short ARexx answer")
+    rc, rc2 = struct.unpack(">iI", data[:8])
+    return rc, rc2, data[8:].decode("latin-1")
+
+
+def rexx_ports(conn):
+    if conn.caps and "arexx" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) cannot list ports - update it with "
+            "'wasabi update wasabid'" % conn.banner)
+    conn.send(PORTS)
+    parts = []
+    drain_to_end(conn, parts.append)
+    return sorted(set(b"".join(parts).decode("latin-1").splitlines()),
+                  key=str.lower)
+
+
+def cmd_arexx(conn, args):
+    """Talk to an Amiga program through its ARexx port: wasabi arexx
+    PORT COMMAND. The exit code is the command's own rc."""
+    if args.ports or not args.rexxport:
+        ports = rexx_ports(conn)
+        if args.json:
+            emit_json(ports)
+        else:
+            print("\n".join(ports))
+        return 0
+    if not args.command:
+        raise WasabiError("wasabi arexx PORT COMMAND - what to send?")
+    rc, rc2, result = arexx(conn, args.rexxport, " ".join(args.command),
+                            args.timeout)
+    if args.json:
+        emit_json({"rc": rc, "rc2": rc2, "result": result})
+    elif rc == 0:
+        if result:
+            print(result)
+    else:
+        print("wasabi: %s answered rc %d (%d)" % (args.rexxport, rc, rc2),
+              file=sys.stderr)
+    return rc if 0 <= rc < 256 else 1
+
+
 def cmd_screen(conn, args):
     """List the open screens, and optionally reorder them.
 
@@ -2787,7 +3145,7 @@ def load_config():
 
 
 JSON_COMMANDS = ("ls", "ps", "screen", "windows", "ping", "run", "wait",
-                 "grab", "health", "slots")
+                 "grab", "health", "slots", "ui", "arexx")
 
 
 def main(argv=None):
@@ -3093,6 +3451,42 @@ def main(argv=None):
                    help="the daemon's tab-separated lines, for scripts")
     s.set_defaults(fn=cmd_windows)
 
+    s = sub.add_parser("ui", help="gadgets and menus by name: list, "
+                       "click, set a text field, pick a menu item")
+    s.add_argument("action",
+                   choices=["list", "menus", "click", "set", "menu", "front"],
+                   help="list: gadgets and menus; menus: menus only; "
+                        "click NAME: click a gadget; set NAME TEXT: fill a "
+                        "text field; menu PATH: pick 'Project/Quit'; "
+                        "front TITLE: bring a window to the front")
+    s.add_argument("name", nargs="?",
+                   help="gadget label (or close, depth, zoom, size, drag), "
+                        "menu path, or window title for 'front'")
+    s.add_argument("text", nargs="?", help="set: the text to type")
+    s.add_argument("--window", metavar="TITLE",
+                   help="only the window whose title contains this")
+    s.add_argument("--all-screens", action="store_true",
+                   help="list: every screen, not only the front one")
+    s.add_argument("--kind", help="only gadgets of this kind (button, "
+                   "string, toggle, prop, custom, ...)")
+    s.add_argument("--nth", type=int, help="the Nth of several matches")
+    s.add_argument("--double", action="store_true", help="double-click")
+    s.add_argument("--no-enter", action="store_true",
+                   help="set: do not press Return after the text")
+    s.set_defaults(fn=cmd_ui)
+
+    s = sub.add_parser("arexx", help="send a command to a program's ARexx "
+                       "port; with no port, list the ports")
+    # dest is not "port": that is the global --port, the daemon's.
+    s.add_argument("rexxport", nargs="?", metavar="port",
+                   help="the ARexx port name (case matters)")
+    s.add_argument("command", nargs="*", help="the command to send")
+    s.add_argument("--ports", action="store_true",
+                   help="list the public ports")
+    s.add_argument("--timeout", type=float, default=30,
+                   help="seconds to wait for the answer (default 30)")
+    s.set_defaults(fn=cmd_arexx)
+
     s = sub.add_parser("screen", help="list screens; flip between them")
     s.add_argument("--list", action="store_true",
                    help="list the open screens (the default)")
@@ -3180,7 +3574,8 @@ def main(argv=None):
              "grab": "grab", "screen": "screen",
              "mouse": "mouse", "key": "key",
              "windows": "windows", "health": "health",
-             "clip": "clip", "slots": "slots", "free": "slots"}.get(args.cmd)
+             "clip": "clip", "slots": "slots", "free": "slots",
+             "ui": "ui", "arexx": "arexx"}.get(args.cmd)
     if args.cmd == "wait":
         needs = {"window": "windows", "change": "grab",
                  "still": "grab"}.get(args.what)

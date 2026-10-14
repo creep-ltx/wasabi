@@ -73,6 +73,8 @@ pulling in its libraries — captured live off the A1200.
 | `view` | **working on the real A1200** (tested in a headless Firefox: picture, clicks, typing, Right Amiga shortcuts, right-button menus, settings) — the live screen in a window, driven with the PC's mouse and keyboard; only changes are sent, key-to-screen 52 ms over Wi-Fi |
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `slots` / `free` | **working on the real A1200 (0.4b2)** — four commands at once (one per connection); `wasabi slots` lists them, `wasabi free N` Ctrl-Cs one and lets go of the slot if it will not stop; `run --max-time` stops exactly its own slot |
+| `ui` (gadgets and menus by name) / `arexx` | **0.5b1, tested in FS-UAE (OS 3.2.3)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. GadTools and plain Intuition windows; ReAction windows show only their outer layout |
+| MCP server (`wasabi_mcp.py`) | **0.1, tested in FS-UAE** — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
 | stream heartbeat + farewell | **working on the real A1200** — a dead machine is noticed; a deliberate exit says goodbye first |
@@ -210,6 +212,17 @@ wasabi key type TEXT [--enter]
                              type text, through the Amiga's own keymap
 wasabi key press KEY...      press keys by name: return, esc, f1, up,
                              ramiga+w, ctrl+c, lamiga+shift+a
+wasabi ui list|menus [--window T] [--all-screens]
+                             gadgets and menu items by name
+wasabi ui click NAME [--window T] [--kind K] [--nth N] [--double]
+                             click a gadget by its label (or close,
+                             depth, zoom, size, drag)
+wasabi ui set NAME TEXT [--no-enter]   fill a text field
+wasabi ui menu PATH [--window T]       pick 'Project/Save As' or 'Quit'
+wasabi ui front TITLE        bring a window to the front, activate it
+wasabi arexx PORT COMMAND [--timeout S]
+                             send an ARexx command, print RESULT; exit
+                             code = its rc. No PORT: list the ports
 ```
 
 Every command also takes `--json` (where it lists something) and
@@ -1311,6 +1324,99 @@ Keys go to whichever window is active, exactly like the real keyboard.
 keys. A dialog that has no text field selected ignores typing, and not
 every dialog closes on Esc — Workbench's Execute Command needs its
 underlined shortcut (`key press c` for Cancel).
+
+## Gadgets and menus by name, and ARexx
+
+`windows` gives places; `ui` gives *things*. It lists each window's
+gadgets — buttons, text fields, checkboxes, cycle gadgets, sliders,
+the border gadgets — with their labels, states and boxes, and its menu
+strip, all in the pixels `grab` and `mouse` use:
+
+```
+$ wasabi ui list --window gtwin
+window "gtwin test"  at 120,80  300x208  task RAM:gtwin  [active]
+  close    -                        at 120,80 20x22
+  string   "Name"                   at 216,122 148x16  value "Hello Åsa"
+  button   "Colour"                 at 210,156 160x28  value "Green"
+  toggle   "Loud"                   at 210,196 26x22  [selected]
+  button   "Save"                   at 210,236 100x28
+  menu     Project/Open...                   Amiga+O
+  menu     Project/Recent/Second file
+  menu     Settings/Loud                     [checked]
+  menu     Settings/Disabled one             [disabled]
+$ wasabi ui set name 'Hello Åsa'      # click, Right Amiga+X, type, Return
+$ wasabi ui click save
+$ wasabi ui click close --window Execute
+$ wasabi ui menu 'project/recent/second'
+$ wasabi ui menu quit
+```
+
+Names match in any case, without the shortcut underscore and trailing
+dots or colon: exact first, then the start of a name, then any part of
+it. Two matches in one window are an error that lists them; `--nth`
+picks one. Without `--window` the front screen is searched, front
+window first.
+
+**A click is a real click**, at the middle of the gadget, with the
+same mouse `mouse` uses — so the program sees exactly what a person's
+click gives it. When another window covers the spot, or the window's
+screen is not in front, `ui click` brings the window forward first. A
+disabled (ghosted) gadget is refused rather than clicked.
+
+**A menu pick is not mouse work.** `ui menu` hands the window the
+message Intuition sends when someone picks an item (an IDCMP MENUPICK
+with the item's number). It works the same with pop-up menus or the
+menu bar, in a window that is not active, and cannot slip onto the
+neighbouring item. A checkmark item is ticked the way Intuition would.
+Disabled items are refused.
+
+**What it sees:** plain Intuition and GadTools windows, system
+requesters (their buttons are `frbuttonclass`), the border gadgets of
+every window. GadTools keeps a button's text in its own memory; the
+daemon reads it there, carefully (see PROTOCOL.md). **What it does not
+see:** inside ReAction windows — most of OS 3.2's own prefs and tools —
+only the outer `layout.gadget` shows, because the buttons live in the
+layout's private data. MUI windows are the same. For those, `grab` and
+`mouse` as before.
+
+**ARexx.** `wasabi arexx PORT COMMAND` sends one command to a
+program's ARexx port and prints its RESULT; the exit code is the
+command's own rc (0, 5, 10, 20). `wasabi arexx` alone lists the public
+ports. Port names are case-sensitive.
+
+```
+$ wasabi arexx WORKBENCH getattr application.version
+47.42
+```
+
+The daemon does not wait for the answer: the reply comes back through
+its main loop, so a slow program holds up only the command that asked.
+For a whole ARexx script, `wasabi run --max-time 30 'rx script.rexx'`.
+
+## MCP: Wasabi for other AI tools
+
+`wasabi_mcp.py` is an MCP server (standard library only) that offers the
+Amiga as tools — `amiga_run`, `amiga_read_file`, `amiga_write_file`,
+`amiga_screenshot`, `amiga_ui_list`, `amiga_ui_click`, `amiga_ui_set`,
+`amiga_ui_menu`, `amiga_mouse`, `amiga_key_type`, `amiga_arexx` and more
+— to any MCP client: Claude Desktop, Codex CLI, Gemini CLI, Cursor,
+Zed, LM Studio. Every tool runs the `wasabi` command, so discovery, the
+key and the system-place protection are the same as on the command line.
+
+```
+claude mcp add wasabi -- python3 ~/Projects/wasabi/wasabi_mcp.py
+```
+
+For Claude Desktop and most others, the `mcpServers` block:
+
+```json
+{ "mcpServers": { "wasabi": {
+    "command": "python3",
+    "args": ["/home/you/Projects/wasabi/wasabi_mcp.py"] } } }
+```
+
+`python3 wasabi_mcp.py --probe` checks the link without any AI. Claude
+Code sessions on this PC do not need it - they use the `wasabi` skill.
 
 ## Speedtest
 
