@@ -574,7 +574,24 @@ def keys_init(quiet=False):
                           "set" % d)
     os.makedirs(d, mode=0o700, exist_ok=True)
     os.chmod(d, 0o700)
-    host = socket.gethostname()
+    # A certificate's name holds 64 characters; a Mac in the cloud is
+    # called "sat12-bq155-2006...-A67B0C05C82A.local".
+    host = socket.gethostname().split(".")[0][:32]
+    try:
+        _keys_make_ca(d, host)
+    except BaseException:
+        for n in ("ca.key", "ca.crt", "client.key", "client.crt"):
+            if os.path.exists(os.path.join(d, n)):
+                os.remove(os.path.join(d, n))  # no half set to trip on
+        raise
+    if not quiet:
+        print("made a Wasabi CA and this computer's certificate in %s" % d)
+        print("next: 'wasabi --plain keys amiga NAME' for each Amiga still "
+              "on an old wasabid, or 'wasabi keys drive DIR NAME' for an "
+              "emulator's drive")
+
+
+def _keys_make_ca(d, host):
     _openssl("req", "-x509", "-new", "-newkey", "ed25519", "-nodes",
              "-keyout", os.path.join(d, "ca.key"),
              "-out", os.path.join(d, "ca.crt"), "-days", DAYS,
@@ -583,11 +600,6 @@ def keys_init(quiet=False):
              "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     os.chmod(os.path.join(d, "ca.key"), 0o600)
     make_leaf("client", "Wasabi client (%s)" % host, "clientAuth")
-    if not quiet:
-        print("made a Wasabi CA and this computer's certificate in %s" % d)
-        print("next: 'wasabi --plain keys amiga NAME' for each Amiga still "
-              "on an old wasabid, or 'wasabi keys drive DIR NAME' for an "
-              "emulator's drive")
 
 
 def amiga_set(name):
@@ -599,7 +611,7 @@ def amiga_set(name):
     key = os.path.join(d, "amiga-%s.key" % safe)
     crt = os.path.join(d, "amiga-%s.crt" % safe)
     if not (os.path.exists(key) and os.path.exists(crt)):
-        key, crt = make_leaf("amiga-" + safe, "Wasabi Amiga %s" % name,
+        key, crt = make_leaf("amiga-" + safe, "Wasabi Amiga %s" % name[:40],
                              "serverAuth")
     read = lambda p: open(p, "rb").read()
     return {"ca.crt": read(os.path.join(d, "ca.crt")),
