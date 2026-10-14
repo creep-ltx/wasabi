@@ -763,11 +763,32 @@ takes. An item with sub-items has no line of its own; its sub-items do.
 shortcut or `-`. `path`: `Menu/Item[/Sub]`, a `/` inside a name sent
 as `|`.
 
-A ReAction window shows its `layout.gadget` only: the children live in
-the layout's private data and are not in the window's gadget list.
-Nothing here calls a gadget's class (no `GetAttr`): a dispatcher run
-from the daemon under `LockIBase()` could wait on a layer its own task
-holds. Walked under the lock into a 48 KB buffer, sent after it.
+**ReAction (0.7+):** a `layout.gadget` in the list is replaced by its
+children. They are not in the window's gadget list but in an exec
+MinList inside the layout's instance data (OS 3.2's layout.gadget
+47.61: at +56, the child object at node +14). The daemon assumes
+neither offset: it finds a non-empty MinList by its shape (head, NULL,
+tailpred) and the object's place in the node by trying each word until
+it holds a BOOPSI gadget or image; nested layouts are followed. Reads
+only, every pointer checked with `TypeOfMem()`.
+
+**MUI 4/5 (0.7+):** a window whose title-bar gadgets are drawn with
+`muiborderimage` is an MUI window. Its Window.mui object is found by
+searching memory for the window's address inside a `MUI_RenderInfo`
+(documented: WindowObject, Screen, DrawInfo, Pens, Window - so the
+window's screen one word before and a Window.mui object one before
+that), confirmed with `MUIA_Window_Window`, and remembered per window.
+The tree from `MUIA_Window_RootObject` through each group's
+`MUIA_Group_ChildList` is read under `Forbid()`: boxes from the public
+area data (`_left`... at object +52), text with `GetAttr` of
+`MUIA_Text_Contents`, `MUIA_String_Contents`, `MUIA_InputMode`,
+`MUIA_Selected`, `MUIA_Disabled`. Kinds: `button`, `toggle`, `string`,
+`cycle`, `slider`, `list`, and `label` for plain text. These are the
+only class calls the daemon makes into another program's objects.
+
+Walked under `LockIBase()` into a 48 KB buffer, sent after it. Flag bit
+1 (`deep`) is accepted and does nothing (a search of all memory per
+unmarked window was too slow: 20 s on a 68030/50).
 
 ### UIACT — act on a window (0.5+)
 

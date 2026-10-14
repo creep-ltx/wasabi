@@ -74,7 +74,8 @@ pulling in its libraries — captured live off the A1200.
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `slots` / `free` | **working on the real A1200 (0.4b2)** — four commands at once (one per connection); `wasabi slots` lists them, `wasabi free N` Ctrl-Cs one and lets go of the slot if it will not stop; `run --max-time` stops exactly its own slot |
 | TLS on every network connection (`keys`) | **0.6b1, working on the real A1200 and the NAS** — Ed25519 certificates from your own CA, no plain fallback; loopback (emulators) may stay plain |
-| `ui` (gadgets and menus by name) / `arexx` | **0.5b1, tested in FS-UAE (OS 3.2.3)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. GadTools and plain Intuition windows; ReAction windows show only their outer layout |
+| `ui` (gadgets and menus by name) / `arexx` | **0.5b1, tested in FS-UAE (OS 3.2.3)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. Intuition, GadTools, ReAction and MUI 4/5 windows (0.7b1) |
+| `WASABI` ARexx port | **0.7b1, tested in FS-UAE** — Amiga programs and scripts type, press keys, click, click gadgets by name and pick menus through it |
 | MCP server (`wasabi_mcp.py`) | **0.1, tested in FS-UAE** — the same tools for Claude Desktop, Codex, Gemini CLI, Cursor and other MCP clients |
 | `mouse` / `key` / `windows` | **working on the real A1200** — click, drag and drive menus; type text through the Amiga's own keymap (Swedish å/ä/ö/@ checked byte for byte) and press keys by name; every screen and window as text |
 | `name` + `ENV:HOSTNAME` discovery | **working on the real A1200** — it answers as `a1200`, not "an amiga" |
@@ -1423,14 +1424,50 @@ menu bar, in a window that is not active, and cannot slip onto the
 neighbouring item. A checkmark item is ticked the way Intuition would.
 Disabled items are refused.
 
-**What it sees:** plain Intuition and GadTools windows, system
-requesters (their buttons are `frbuttonclass`), the border gadgets of
-every window. GadTools keeps a button's text in its own memory; the
-daemon reads it there, carefully (see PROTOCOL.md). **What it does not
-see:** inside ReAction windows — most of OS 3.2's own prefs and tools —
-only the outer `layout.gadget` shows, because the buttons live in the
-layout's private data. MUI windows are the same. For those, `grab` and
-`mouse` as before.
+**What it sees:** plain Intuition and GadTools windows (most of OS
+3.2's Prefs editors), system requesters (their buttons are
+`frbuttonclass`), the border gadgets of every window, and since 0.7:
+
+- **ReAction** windows: the buttons, fields and other gadgets inside
+  their layouts, nested layouts included. Their children live in the
+  layout's own memory; the daemon finds them there, read-only, by the
+  shape of the data rather than fixed offsets (see PROTOCOL.md).
+- **MUI 4 and 5** windows: buttons, text fields (`ui set` works),
+  cycle gadgets, sliders, lists, radio buttons and checkmarks, with
+  their text. A field or checkmark without text of its own takes the
+  label MUI shows before it. Plain text appears as `label` and is never
+  what `ui click` clicks. Found by a search of memory the first time a
+  window is looked at (0.4 s on a 68030/50 emulator), then remembered.
+
+Not seen: MUI 3.8 windows (nothing tells them apart without searching
+all memory for every window), custom-drawn content (games, paint
+areas), and a GadTools checkbox whose label is a picture. For those,
+`grab` and `mouse` as before. GadTools keeps a button's text in its own
+memory; the daemon reads it there, carefully.
+
+### The WASABI ARexx port
+
+Amiga programs and scripts get the same hands, without a network:
+
+```rexx
+/* drive a window from ARexx */
+options results
+address WASABI
+'ACTIVATEWINDOW "Shell#?"'        /* AmigaDOS pattern; RESULT = title */
+'TYPE "dir<return>"'              /* <key> names inside, << for a < */
+'KEY ramiga+q'
+'CLICK 120 40'                    /* front screen pixels; RIGHT, DOUBLE */
+'CLICKGADGET Save WINDOW "MyPrefs#?"'   /* NTH n for the nth match */
+'MENU "Project/Quit"'             /* or just 'MENU Quit' */
+'WINDOWS'; say result             /* every titled window */
+'LASTERROR'; say result           /* why the last command failed */
+```
+
+`rc` is 0 done, 5 nothing matched, 10 refused (LASTERROR says why), 20
+not a command. Without `WINDOW`, CLICKGADGET and MENU use the active
+window. `CLICKGADGET` sees what `wasabi ui` sees, ReAction and MUI
+included. Only programs on the Amiga itself reach the port, and they
+could do all of this through input.device anyway.
 
 **ARexx.** `wasabi arexx PORT COMMAND` sends one command to a
 program's ARexx port and prints its RESULT; the exit code is the

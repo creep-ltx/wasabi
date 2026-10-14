@@ -242,8 +242,9 @@ TOOLS = [
      "positions.", S()),
     ("amiga_ui_list", t_ui_list, "The gadgets (buttons, text fields, "
      "checkboxes, ...) and menu items of the windows on the front screen, "
-     "by name, with positions and states. ReAction windows show only their "
-     "outer layout; use a screenshot and the mouse for those.",
+     "by name, with positions and states: Intuition, GadTools, ReAction and "
+     "MUI 4/5 windows. Custom-drawn content needs a screenshot and the "
+     "mouse.",
      S(window=STR("only windows whose title contains this"),
        all_screens=BOOL("every screen, not only the front one"))),
     ("amiga_ui_click", t_ui_click, "Click a gadget by its label with the "

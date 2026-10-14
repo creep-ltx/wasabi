@@ -58,10 +58,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.6b1"
+#define VERSION_STR "wasabid 0.7b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.6b1 (14.10.2026)";
+    "$VER: wasabid 0.7b1 (14.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -83,7 +83,7 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls"
+                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport"
 
 /* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
@@ -1999,8 +1999,8 @@ static void close_input(struct IOStdReq *io)
     DeleteMsgPort(mp);
 }
 
-static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
-                      WORD x, WORD y)
+static const char *do_mouse(ULONG action, ULONG button, ULONG count,
+                            WORD x, WORD y)
 {
     struct IOStdReq *io;
     struct InputEvent ie;
@@ -2014,10 +2014,10 @@ static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
     ULONG i;
 
     if (button > 2 || count > 3 || action > 3)
-        return send_perr(fd, "bad INPUT parameters");
+        return "bad INPUT parameters";
 
     if (!(io = open_input()))
-        return send_err(fd, "cannot open input.device");
+        return "cannot open input.device";
 
     if (x != INPUT_NOPOS) {
         memset(&ie, 0, sizeof(ie));
@@ -2065,9 +2065,14 @@ static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
 
     close_input(io);
 
-    if (!ok)
-        return send_err(fd, "input event write failed");
-    return send_frame(fd, T_OK, NULL, 0);
+    return ok ? NULL : "input event write failed";
+}
+
+static BOOL cmd_input(int fd, ULONG action, ULONG button, ULONG count,
+                      WORD x, WORD y)
+{
+    const char *why = do_mouse(action, button, count, x, y);
+    return why ? send_perr(fd, why) : send_frame(fd, T_OK, NULL, 0);
 }
 
 /* --- remote keyboard: key positions, and text ---------------------- */
@@ -2117,7 +2122,7 @@ static BOOL key_event(struct IOStdReq *io, UWORD code, UWORD qual,
     return write_input_event(io, &ie);
 }
 
-static BOOL cmd_key(int fd, ULONG mode, const UBYTE *p, LONG len)
+static const char *do_key(ULONG mode, const UBYTE *p, LONG len)
 {
     struct IOStdReq *io;
     UBYTE pairs[6];                     /* up to two dead keys + the key */
@@ -2125,16 +2130,16 @@ static BOOL cmd_key(int fd, ULONG mode, const UBYTE *p, LONG len)
     BOOL ok = TRUE;
 
     if (mode == KEY_RAW && (len % 4) != 0)
-        return send_perr(fd, "bad KEY event list");
+        return "bad KEY event list";
     if (mode == KEY_TEXT && len > KEY_MAX_TEXT)
-        return send_perr(fd, "KEY text too long");
+        return "KEY text too long";
     if (mode > KEY_TEXT)
-        return send_perr(fd, "bad KEY mode");
+        return "bad KEY mode";
 
     if (mode == KEY_TEXT && !g_keymap)
         g_keymap = OpenLibrary("keymap.library", 37);
     if (mode == KEY_TEXT && !g_keymap)
-        return send_err(fd, "cannot open keymap.library");
+        return "cannot open keymap.library";
 
     /* Map everything before the first event goes out: a character the
      * keymap cannot make must fail the command, not leave half a line
@@ -2142,15 +2147,15 @@ static BOOL cmd_key(int fd, ULONG mode, const UBYTE *p, LONG len)
     for (i = 0; mode == KEY_TEXT && i < len; i++) {
         n = MapANSI((STRPTR)(p + i), 1, (STRPTR)pairs, 3, NULL);
         if (n <= 0) {
-            char msg[64];
+            static char msg[64];
             sprintf(msg, "the keymap cannot type character %u (0x%02x)",
                     (unsigned)p[i], (unsigned)p[i]);
-            return send_err(fd, msg);
+            return msg;
         }
     }
 
     if (!(io = open_input()))
-        return send_err(fd, "cannot open input.device");
+        return "cannot open input.device";
 
     if (mode == KEY_RAW) {
         for (i = 0; ok && i < len; i += 4)
@@ -2172,9 +2177,13 @@ static BOOL cmd_key(int fd, ULONG mode, const UBYTE *p, LONG len)
 
     close_input(io);
 
-    if (!ok)
-        return send_err(fd, "input event write failed");
-    return send_frame(fd, T_OK, NULL, 0);
+    return ok ? NULL : "input event write failed";
+}
+
+static BOOL cmd_key(int fd, ULONG mode, const UBYTE *p, LONG len)
+{
+    const char *why = do_key(mode, p, len);
+    return why ? send_perr(fd, why) : send_frame(fd, T_OK, NULL, 0);
 }
 
 /* --- every screen and window, as text ------------------------------ */
@@ -2391,10 +2400,21 @@ static BOOL ui_readable(const void *p)
     return TypeOfMem((APTR)p) != 0;
 }
 
+/* Text may start at any byte; structures and pointers to them may not. */
+static BOOL ui_readable_text(const void *p)
+{
+    ULONG a = (ULONG)p;
+    if (!a)
+        return FALSE;
+    if (a >= 0xF80000UL && a < 0x1000000UL)
+        return TRUE;
+    return TypeOfMem((APTR)p) != 0;
+}
+
 static BOOL ui_printable(const UBYTE *t)
 {
     int k;
-    if (!ui_readable(t))
+    if (!ui_readable_text(t))
         return FALSE;
     for (k = 0; k < 80 && t[k]; k++)
         if (t[k] < 32 || (t[k] > 126 && t[k] < 160))
@@ -2555,78 +2575,469 @@ static LONG ui_menus(struct Window *w, char *buf, LONG used, LONG cap,
     return used;
 }
 
-static LONG ui_gadgets(struct Window *w, char *buf, LONG used, LONG cap,
-                       BOOL *full)
+/* A gadget's box relative to its window, resolved for the REL flags
+ * (Intuition's own `width + LeftEdge - 1`) and a GimmeZeroZero window's
+ * inner layer. FALSE when it has no area to click. */
+static BOOL ui_box(struct Window *w, struct Gadget *g, LONG *x, LONG *y,
+                   LONG *gw, LONG *gh)
+{
+    LONG cw = w->Width, ch = w->Height, ox = 0, oy = 0;
+
+    if ((w->Flags & WFLG_GIMMEZEROZERO) &&
+        !(g->GadgetType & GTYP_GZZGADGET)) {
+        cw = w->GZZWidth;
+        ch = w->GZZHeight;
+        ox = w->BorderLeft;
+        oy = w->BorderTop;
+    }
+    *x  = ((g->Flags & GFLG_RELRIGHT)  ? cw + g->LeftEdge - 1 : g->LeftEdge)
+          + ox;
+    *y  = ((g->Flags & GFLG_RELBOTTOM) ? ch + g->TopEdge - 1  : g->TopEdge)
+          + oy;
+    *gw = (g->Flags & GFLG_RELWIDTH)  ? cw + g->Width  : g->Width;
+    *gh = (g->Flags & GFLG_RELHEIGHT) ? ch + g->Height : g->Height;
+    return *gw > 0 && *gh > 0;
+}
+
+/*
+ * Everything clickable in a window, as UiItems: its Intuition gadgets,
+ * the children inside a ReAction layout.gadget, and the objects of an
+ * MUI window. One collector, two users: UI (lines for the client) and
+ * the WASABI ARexx port's CLICKGADGET.
+ */
+struct UiItem {
+    ULONG addr;                      /* gadget or object */
+    LONG  x, y, w, h;                /* relative to the window */
+    const char *kind;
+    BOOL  disabled, selected;
+    UWORD id;
+    char  cls[40], label[120], value[120];
+};
+
+/* FALSE from a sink: stop, the buffer is full. */
+typedef BOOL (*UiSink)(struct UiItem *it, void *ctx);
+
+/* A BOOPSI object we may read: header and class in memory that exists,
+ * a dispatcher that does too. */
+static BOOL ui_obj_ok(const void *o)
+{
+    struct IClass *c;
+    if (!ui_readable(o) || !ui_readable((const UBYTE *)o -
+                                        sizeof(struct _Object)))
+        return FALSE;
+    c = OCLASS(o);
+    return ui_readable(c) && ui_readable(c->cl_Dispatcher.h_Entry);
+}
+
+static BOOL ui_class_is(const void *o, const char *name)
+{
+    struct IClass *c;
+    int k = 0;
+    for (c = OCLASS(o); ui_readable(c) && k < 16; c = c->cl_Super, k++)
+        if (c->cl_ID && ui_readable(c->cl_ID) &&
+            strcmp((const char *)c->cl_ID, name) == 0)
+            return TRUE;
+    return FALSE;
+}
+
+/* The nearest named class: a private subclass shows its public parent. */
+static void ui_class_name(const void *o, char *out, LONG sz)
+{
+    struct IClass *c;
+    int k = 0;
+    LONG n = 0;
+    out[0] = '\0';
+    for (c = OCLASS(o); ui_readable(c) && k < 16; c = c->cl_Super, k++)
+        if (c->cl_ID && ui_readable(c->cl_ID)) {
+            ui_put(out, &n, sz, c->cl_ID);
+            return;
+        }
+}
+
+/* An Intuition gadget (plain, GadTools, or a BOOPSI one) as an item. */
+static BOOL ui_gadget_item(struct Window *w, struct Gadget *g,
+                           struct UiItem *it)
+{
+    if (!ui_box(w, g, &it->x, &it->y, &it->w, &it->h))
+        return FALSE;
+    it->addr = (ULONG)g;
+    it->kind = ui_kind(g);
+    it->disabled = (g->Flags & GFLG_DISABLED) != 0;
+    it->selected = (g->Flags & GFLG_SELECTED) != 0;
+    it->id = g->GadgetID;
+    ui_label(g, it->label, sizeof(it->label));
+    it->value[0] = '\0';
+    {
+        const UBYTE *gt = ui_gt_text(g);
+        LONG ln = 0;
+        if (gt && !it->label[0])
+            ui_putx(it->label, &ln, sizeof(it->label), gt, TRUE);
+        else if (gt && strcmp((const char *)gt, it->label) != 0)
+            ui_put(it->value, &ln, sizeof(it->value), gt);  /* cycle */
+    }
+    if ((g->GadgetType & GTYP_GTYPEMASK) == GTYP_STRGADGET &&
+        !(g->GadgetType & GTYP_SYSGADGET) && ui_readable(g->SpecialInfo)) {
+        LONG vn = 0;
+        ui_put(it->value, &vn, sizeof(it->value),
+               ((struct StringInfo *)g->SpecialInfo)->Buffer);
+    } else if ((g->GadgetType & GTYP_GTYPEMASK) == GTYP_PROPGADGET &&
+               !(g->GadgetType & GTYP_SYSGADGET) && g->SpecialInfo) {
+        struct PropInfo *pi = (struct PropInfo *)g->SpecialInfo;
+        sprintf(it->value, "%u", (unsigned)((pi->Flags & FREEVERT) ?
+                                            pi->VertPot : pi->HorizPot));
+    }
+    it->cls[0] = '\0';
+    if ((g->GadgetType & GTYP_GTYPEMASK) == GTYP_CUSTOMGADGET &&
+        !(g->GadgetType & GTYP_SYSGADGET) && ui_obj_ok(g))
+        ui_class_name(g, it->cls, sizeof(it->cls));
+    return TRUE;
+}
+
+/* --- ReAction -------------------------------------------------------- */
+
+/*
+ * A layout.gadget keeps its children in an exec MinList inside its own
+ * instance data, one node per child with the child object in it (found
+ * on OS 3.2's layout.gadget 47.61: the list at +56, the object at node
+ * +14). None of that is documented, so nothing is assumed: the list is
+ * found by its shape (head, NULL, tailpred), and the object's place in
+ * the node by trying each word until every node holds a BOOPSI gadget
+ * or image there. Read-only, every pointer checked; a version that
+ * keeps its children another way simply shows its layout as before.
+ */
+static LONG ui_react_offset(const struct MinNode *n)
+{
+    LONG j;
+    for (j = 8; j <= 40; j += 2) {
+        const void *o = *(const void * const *)((const UBYTE *)n + j);
+        if (ui_obj_ok(o) && (ui_class_is(o, "gadgetclass") ||
+                             ui_class_is(o, "imageclass")))
+            return j;
+    }
+    return -1;
+}
+
+static BOOL ui_reaction(struct Window *w, const void *lay, int depth,
+                        UiSink sink, void *ctx, int *count)
+{
+    struct IClass *c;
+    const UBYTE *d;
+    LONG i, size;
+    int k = 0;
+
+    for (c = OCLASS(lay); ui_readable(c) && k < 16; c = c->cl_Super, k++)
+        if (c->cl_ID && ui_readable(c->cl_ID) &&
+            strcmp((const char *)c->cl_ID, "layout.gadget") == 0)
+            break;
+    if (!ui_readable(c) || k >= 16 || depth > 8)
+        return TRUE;
+    d = (const UBYTE *)lay + c->cl_InstOffset;
+    size = c->cl_InstSize;
+    for (i = 0; i + 12 <= size && i < 512; i += 2) {
+        const ULONG *e = (const ULONG *)(d + i);
+        const struct MinNode *n;
+        LONG j, nodes = 0;
+        if (!ui_readable((void *)e[0]) || e[1] != 0 ||
+            !ui_readable((void *)e[2]) || e[0] == (ULONG)&e[1])
+            continue;                    /* not a (non-empty) MinList */
+        n = (const struct MinNode *)e[0];
+        if ((j = ui_react_offset(n)) < 0)
+            continue;
+        for (; ui_readable(n) && n->mln_Succ && nodes < 200;
+             n = n->mln_Succ, nodes++) {
+            const void *o = *(const void * const *)((const UBYTE *)n + j);
+            struct UiItem it;
+            if (!ui_obj_ok(o))
+                continue;
+            if (ui_class_is(o, "layout.gadget")) {
+                if (!ui_reaction(w, o, depth + 1, sink, ctx, count))
+                    return FALSE;
+                continue;
+            }
+            if (!ui_class_is(o, "gadgetclass") || ++*count > 400)
+                continue;
+            if (ui_gadget_item(w, (struct Gadget *)o, &it) &&
+                !sink(&it, ctx))
+                return FALSE;
+        }
+        return TRUE;                     /* the children list: done */
+    }
+    return TRUE;
+}
+
+/* --- MUI ------------------------------------------------------------- */
+
+#define MUIA_Window_RootObject 0x8042cba5
+#define MUIA_Window_Window     0x80426a42
+#define MUIA_Group_ChildList   0x80424748
+#define MUIA_Text_Contents     0x8042f8dc
+#define MUIA_String_Contents   0x80428ffd
+#define MUIA_InputMode         0x8042fb04
+#define MUIA_Selected          0x8042654b
+#define MUIA_Disabled          0x80423661
+#define MUIA_Cycle_Active      0x80421788
+#define MUIA_Cycle_Entries     0x80420629
+
+/* MUI's text: escapes (ESC c, ESC b, ESC I[...]) and the shortcut
+ * underscore out. */
+static void ui_mui_text(const UBYTE *s, char *out, LONG sz)
+{
+    LONG n = 0;
+    int k = 0;
+    if (!ui_readable_text(s))
+        s = (const UBYTE *)"";
+    for (; *s && n < sz - 1 && k < 400; s++, k++) {
+        if (*s == 27) {
+            if (!s[1])
+                break;
+            s++;
+            if ((*s == 'I' || *s == 'O' || *s == 'P') && s[1] == '[') {
+                while (*s && *s != ']')
+                    s++;
+                if (!*s)
+                    break;
+            }
+            continue;
+        }
+        if (*s == '_')
+            continue;
+        out[n++] = (*s == '\t' || *s == '\n' || *s == '\r') ? ' ' : *s;
+    }
+    while (n > 0 && out[n - 1] == ' ')
+        n--;
+    out[n] = '\0';
+}
+
+/*
+ * From an Intuition window to its MUI window object. MUI keeps no
+ * pointer back that is documented, but every MUI object's MUI_RenderInfo
+ * (documented: WindowObject, Screen, DrawInfo, Pens, Window) holds both:
+ * so the memory is searched for this window's address with its screen
+ * one word before and an object of Window.mui one word before that,
+ * which MUI then confirms (MUIA_Window_Window). Found once per window,
+ * then kept; a kept answer is checked again before it is used.
+ */
+#define MUI_CACHE 16
+static struct { struct Window *w; Object *o; } g_mui[MUI_CACHE];
+static LONG g_mui_next;
+
+static BOOL ui_mui_is(Object *o, struct Window *w)
+{
+    ULONG ww = 0;
+    return ui_obj_ok(o) && ui_class_is(o, "Window.mui") &&
+           GetAttr(MUIA_Window_Window, o, &ww) && ww == (ULONG)w;
+}
+
+/* Plain reads only, so multitasking runs on during the search; the
+ * caller confirms the answer with ui_mui_is() under Forbid. */
+static BOOL ui_mui_cheap(Object *o)
+{
+    return ui_obj_ok(o) && ui_class_is(o, "Window.mui");
+}
+
+static Object *ui_mui_window(struct Window *w)
+{
+    struct MemHeader *mh;
+    LONG i;
+
+    for (i = 0; i < MUI_CACHE; i++)
+        if (g_mui[i].w == w) {
+            if (g_mui[i].o && ui_mui_cheap(g_mui[i].o))
+                return g_mui[i].o;
+            g_mui[i].w = NULL;           /* gone or reused: search again */
+        }
+    for (mh = (struct MemHeader *)SysBase->MemList.lh_Head;
+         mh->mh_Node.ln_Succ;
+         mh = (struct MemHeader *)mh->mh_Node.ln_Succ) {
+        ULONG *p = (ULONG *)(((ULONG)mh->mh_Lower + 19) & ~3UL);
+        ULONG *e = (ULONG *)((ULONG)mh->mh_Upper & ~3UL);
+        for (; p < e; p++)
+            if (*p == (ULONG)w && p[-3] == (ULONG)w->WScreen &&
+                ui_mui_cheap((Object *)p[-4])) {
+                g_mui[g_mui_next].w = w;
+                g_mui[g_mui_next].o = (Object *)p[-4];
+                g_mui_next = (g_mui_next + 1) % MUI_CACHE;
+                return (Object *)p[-4];
+            }
+    }
+    return NULL;
+}
+
+/* MUI 4/5 put their own gadgets in the title bar, drawn with an image
+ * of class muiborderimage: a sign worth a search, which a window
+ * without it does not get unless it is asked for by name. */
+static BOOL ui_mui_marked(struct Window *w)
 {
     struct Gadget *g;
-    char label[120], value[120], cls[40];
-    BOOL gzz = (w->Flags & WFLG_GIMMEZEROZERO) != 0;
-    LONG k = 0;
+    int k = 0;
+    for (g = w->FirstGadget; g && k < 64; g = g->NextGadget, k++)
+        if (ui_obj_ok(g->GadgetRender) &&
+            ui_class_is(g->GadgetRender, "muiborderimage"))
+            return TRUE;
+    return FALSE;
+}
+
+struct MuiWalk {
+    UiSink sink;
+    void *ctx;
+    int count;
+    char pending[120];               /* the last label, for the next
+                                      * unlabelled control */
+};
+
+static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
+{
+    struct UiItem it;
+    const WORD *box = (const WORD *)((const UBYTE *)o + 52);  /* _left.. */
+    ULONG v = 0;
+
+    if (depth > 14 || ++mw->count > 400 || !ui_obj_ok(o) ||
+        !ui_class_is(o, "Area.mui"))
+        return TRUE;
+    memset(&it, 0, sizeof(it));
+    it.addr = (ULONG)o;
+    it.x = box[0];
+    it.y = box[1];
+    it.w = box[2];
+    it.h = box[3];
+    ui_class_name(o, it.cls, sizeof(it.cls));
+    if (GetAttr(MUIA_Disabled, o, &v) && v)
+        it.disabled = TRUE;
+
+    if (ui_class_is(o, "String.mui")) {
+        it.kind = "string";
+        if (GetAttr(MUIA_String_Contents, o, &v))
+            ui_mui_text((const UBYTE *)v, it.value, sizeof(it.value));
+    } else if (ui_class_is(o, "Cycle.mui")) {
+        ULONG e = 0;
+        it.kind = "cycle";
+        if (GetAttr(MUIA_Cycle_Active, o, &v) &&
+            GetAttr(MUIA_Cycle_Entries, o, &e) && ui_readable((void *)e) &&
+            v < 64)
+            ui_mui_text((const UBYTE *)((ULONG *)e)[v], it.value,
+                        sizeof(it.value));
+    } else if (ui_class_is(o, "List.mui")) {
+        it.kind = "list";
+    } else if (ui_class_is(o, "Numeric.mui")) {
+        it.kind = "slider";
+    } else if (ui_class_is(o, "Group.mui")) {
+        struct List *l = NULL;
+        struct Node *n;
+        int k = 0;
+        if (!GetAttr(MUIA_Group_ChildList, o, (ULONG *)&l) ||
+            !ui_readable(l))
+            return TRUE;
+        for (n = l->lh_Head; ui_readable(n) && n->ln_Succ && k < 200;
+             n = n->ln_Succ, k++)
+            if (!ui_mui_walk((Object *)((struct _Object *)n + 1), depth + 1,
+                             mw))
+                return FALSE;
+        return TRUE;
+    } else {
+        ULONG mode = 0;
+        GetAttr(MUIA_InputMode, o, &mode);
+        if (ui_class_is(o, "Text.mui") &&
+            GetAttr(MUIA_Text_Contents, o, &v))
+            ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
+        it.kind = mode == 1 ? "button" : mode == 3 ? "toggle" :
+                  mode == 2 ? "button" : "label";
+        if (mode && GetAttr(MUIA_Selected, o, &v) && v)
+            it.selected = TRUE;
+        if (!mode) {                     /* a label: remember it */
+            if (it.label[0])
+                copystr(mw->pending, sizeof(mw->pending), it.label);
+            if (!it.label[0] || it.w <= 0 || it.h <= 0)
+                return TRUE;
+            return mw->sink(&it, mw->ctx);
+        }
+    }
+    if (it.w <= 0 || it.h <= 0)
+        return TRUE;                     /* hidden: a page not shown */
+    /* A control MUI lays out after its Label: string, cycle, slider,
+     * checkmark. A button has its own text, a list its own title. */
+    if (!it.label[0] && mw->pending[0] &&
+        (strcmp(it.kind, "string") == 0 || strcmp(it.kind, "cycle") == 0 ||
+         strcmp(it.kind, "slider") == 0 || strcmp(it.kind, "toggle") == 0))
+        copystr(it.label, sizeof(it.label), mw->pending);
+    mw->pending[0] = '\0';
+    return mw->sink(&it, mw->ctx);
+}
+
+/* --- all of it --------------------------------------------------------- */
+
+/* MUI windows are read when MUI 4/5 marked their title bar. Without
+ * the mark (MUI 3.8) finding the object would take a search of all
+ * memory per window - 20 s on a 68030/50, with Intuition held - so
+ * such a window shows only its Intuition gadgets. `deep` is kept for
+ * the protocol (UI flag 2) and does nothing more. */
+static BOOL ui_items(struct Window *w, BOOL deep, UiSink sink, void *ctx)
+{
+    struct Gadget *g;
+    struct UiItem it;
+    int k = 0, count = 0;
 
     for (g = w->FirstGadget; g && k < 400; g = g->NextGadget, k++) {
-        LONG cw = w->Width, ch = w->Height, ox = 0, oy = 0;
-        LONG x, y, gw, gh;
-        char fl[3];
-        int f = 0;
-
-        if (gzz && !(g->GadgetType & GTYP_GZZGADGET)) {
-            cw = w->GZZWidth;
-            ch = w->GZZHeight;
-            ox = w->BorderLeft;
-            oy = w->BorderTop;
-        }
-        x  = (g->Flags & GFLG_RELRIGHT)  ? cw + g->LeftEdge - 1 : g->LeftEdge;
-        y  = (g->Flags & GFLG_RELBOTTOM) ? ch + g->TopEdge - 1  : g->TopEdge;
-        gw = (g->Flags & GFLG_RELWIDTH)  ? cw + g->Width  : g->Width;
-        gh = (g->Flags & GFLG_RELHEIGHT) ? ch + g->Height : g->Height;
-        if (gw <= 0 || gh <= 0)
-            continue;                    /* nothing there to click */
-
-        if (g->Flags & GFLG_DISABLED) fl[f++] = 'd';
-        if (g->Flags & GFLG_SELECTED) fl[f++] = 's';
-        if (!f) fl[f++] = '-';
-        fl[f] = '\0';
-
-        ui_label(g, label, sizeof(label));
-        value[0] = '\0';
-        {
-            const UBYTE *gt = ui_gt_text(g);
-            LONG ln = 0;
-            if (gt && !label[0])
-                ui_putx(label, &ln, sizeof(label), gt, TRUE);
-            else if (gt && strcmp((const char *)gt, label) != 0)
-                ui_put(value, &ln, sizeof(value), gt);   /* cycle choice */
-        }
-        if ((g->GadgetType & GTYP_GTYPEMASK) == GTYP_STRGADGET &&
-            !(g->GadgetType & GTYP_SYSGADGET) && g->SpecialInfo) {
-            LONG vn = 0;
-            ui_put(value, &vn, sizeof(value),
-                   ((struct StringInfo *)g->SpecialInfo)->Buffer);
-        } else if ((g->GadgetType & GTYP_GTYPEMASK) == GTYP_PROPGADGET &&
-                   !(g->GadgetType & GTYP_SYSGADGET) && g->SpecialInfo) {
-            struct PropInfo *pi = (struct PropInfo *)g->SpecialInfo;
-            sprintf(value, "%u", (unsigned)((pi->Flags & FREEVERT) ?
-                                            pi->VertPot : pi->HorizPot));
-        }
-        cls[0] = '\0';
         if ((g->GadgetType & GTYP_GTYPEMASK) == GTYP_CUSTOMGADGET &&
-            !(g->GadgetType & GTYP_SYSGADGET)) {
-            struct IClass *ic = OCLASS(g);
-            LONG cn = 0;
-            if (ic && ic->cl_ID)
-                ui_put(cls, &cn, sizeof(cls), ic->cl_ID);
+            !(g->GadgetType & GTYP_SYSGADGET) && ui_obj_ok(g) &&
+            ui_class_is(g, "layout.gadget")) {
+            int before = count;
+            if (!ui_reaction(w, g, 0, sink, ctx, &count))
+                return FALSE;
+            if (count > before)
+                continue;                /* its children stand for it */
         }
-
-        if (used + 400 > cap) { *full = TRUE; break; }
-        used += sprintf(buf + used,
-                        "G\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%s\t%s\t%u"
-                        "\t%s\t%s\t%s\n",
-                        (unsigned long)g, (long)(x + ox), (long)(y + oy),
-                        (long)gw, (long)gh,
-                        ui_kind(g), fl, (unsigned)g->GadgetID,
-                        cls[0] ? cls : "-", label, value);
+        if (ui_gadget_item(w, g, &it) && !sink(&it, ctx))
+            return FALSE;
     }
-    return used;
+    (void)deep;
+    if (ui_mui_marked(w)) {
+        Object *mo = ui_mui_window(w), *root = NULL;
+        Forbid();                        /* the app must not free them
+                                          * while they are read */
+        if (mo && ui_mui_is(mo, w) &&
+            GetAttr(MUIA_Window_RootObject, mo, (ULONG *)&root) && root) {
+            struct MuiWalk mw;
+            BOOL go;
+            memset(&mw, 0, sizeof(mw));
+            mw.sink = sink;
+            mw.ctx = ctx;
+            go = ui_mui_walk(root, 0, &mw);
+            Permit();
+            return go;
+        }
+        Permit();
+    }
+    return TRUE;
+}
+
+/* UI's sink: one G line each. */
+struct UiBuf {
+    char *buf;
+    LONG used, cap;
+    BOOL full;
+};
+
+static BOOL ui_line(struct UiItem *it, void *ctx)
+{
+    struct UiBuf *b = (struct UiBuf *)ctx;
+    char fl[3];
+    int f = 0;
+    if (b->used + 400 > b->cap) {
+        b->full = TRUE;
+        return FALSE;
+    }
+    if (it->disabled) fl[f++] = 'd';
+    if (it->selected) fl[f++] = 's';
+    if (!f) fl[f++] = '-';
+    fl[f] = '\0';
+    b->used += sprintf(b->buf + b->used,
+                       "G\t0x%08lx\t%ld\t%ld\t%ld\t%ld\t%s\t%s\t%u"
+                       "\t%s\t%s\t%s\n",
+                       (unsigned long)it->addr, (long)it->x, (long)it->y,
+                       (long)it->w, (long)it->h, it->kind, fl,
+                       (unsigned)it->id, it->cls[0] ? it->cls : "-",
+                       it->label, it->value);
+    return TRUE;
 }
 
 static BOOL send_lines(int fd, char *buf, LONG used)
@@ -2694,7 +3105,16 @@ static BOOL cmd_ui(int fd, ULONG flags)
                     (long)w->BorderLeft, (long)w->BorderTop,
                     (long)w->BorderRight, (long)w->BorderBottom,
                     fl, task[0] ? task : "-", title);
-            used = ui_gadgets(w, buf, used, UI_BUF, &full);
+            {
+                struct UiBuf b;
+                b.buf = buf;
+                b.used = used;
+                b.cap = UI_BUF;
+                b.full = FALSE;
+                ui_items(w, (flags & 2) != 0, ui_line, &b);
+                used = b.used;
+                full = b.full;
+            }
             if (!full)
                 used = ui_menus(w, buf, used, UI_BUF, &full);
         }
@@ -2858,31 +3278,11 @@ static BOOL window_alive(struct Window *want)
     return FALSE;
 }
 
-static BOOL cmd_uiact(int fd, ULONG op, ULONG waddr, ULONG arg)
+/* Pick menu item `code` (FULLMENUNUM) in w: NULL, or why not. */
+static const char *menu_pick(struct Window *w, ULONG code)
 {
-    struct Window *w = (struct Window *)waddr;
     const char *why = NULL;
     ULONG ib;
-
-    if (op == 2) {
-        ib = LockIBase(0);
-        if (!window_alive(w)) {
-            UnlockIBase(ib);
-            return send_perr(fd, "that window is gone");
-        }
-        UnlockIBase(ib);
-        /* Not under the lock: these queue work for Intuition's own
-         * task, which needs that lock to do it. A window closed in the
-         * moment between is the remaining risk, as with any tool that
-         * holds a window address. */
-        ScreenToFront(w->WScreen);
-        WindowToFront(w);
-        ActivateWindow(w);
-        return send_frame(fd, T_OK, NULL, 0);
-    }
-    if (op != 1)
-        return send_perr(fd, "bad UIACT op");
-
     {
         struct Posted *ps = post_slot();
         struct ExtIntuiMessage *im;
@@ -2890,11 +3290,10 @@ static BOOL cmd_uiact(int fd, ULONG op, ULONG waddr, ULONG arg)
         ULONG s, m;
 
         if (!ps)
-            return send_perr(fd, "too many messages are still waiting for "
-                                "an answer");
+            return "too many messages are still waiting for an answer";
         im = AllocMem(sizeof(*im), MEMF_PUBLIC | MEMF_CLEAR);
         if (!im)
-            return send_perr(fd, "out of memory");
+            return "out of memory";
 
         ib = LockIBase(0);
         if (!window_alive(w))
@@ -2904,7 +3303,7 @@ static BOOL cmd_uiact(int fd, ULONG op, ULONG waddr, ULONG arg)
         else if (!(w->IDCMPFlags & IDCMP_MENUPICK))
             why = "that window does not listen for menu picks";
         else if (!w->MenuStrip ||
-                 !(it = ItemAddress(w->MenuStrip, (UWORD)arg)))
+                 !(it = ItemAddress(w->MenuStrip, (UWORD)code)))
             why = "no such menu item";
         else if (!(it->Flags & ITEMENABLED))
             why = "that menu item is disabled";
@@ -2918,11 +3317,11 @@ static BOOL cmd_uiact(int fd, ULONG op, ULONG waddr, ULONG arg)
                 if (it->MutualExclude && (it->Flags & CHECKED)) {
                     struct Menu *mm = w->MenuStrip;
                     struct MenuItem *o;
-                    ULONG mnum = arg & 31, k;
+                    ULONG mnum = code & 31, k;
                     for (k = 0; mm && k < mnum; k++)
                         mm = mm->NextMenu;
                     o = mm ? mm->FirstItem : NULL;
-                    if (((arg >> 11) & 31) != 31)
+                    if (((code >> 11) & 31) != 31)
                         o = NULL;        /* sub-items: leave it alone */
                     for (k = 0; o && k < 32; o = o->NextItem, k++)
                         if (o != it && (it->MutualExclude & (1UL << k)))
@@ -2935,7 +3334,7 @@ static BOOL cmd_uiact(int fd, ULONG op, ULONG waddr, ULONG arg)
             im->eim_IntuiMessage.ExecMessage.mn_ReplyPort = g_post_port;
             im->eim_IntuiMessage.ExecMessage.mn_Length = sizeof(*im);
             im->eim_IntuiMessage.Class = IDCMP_MENUPICK;
-            im->eim_IntuiMessage.Code = (UWORD)arg;
+            im->eim_IntuiMessage.Code = (UWORD)code;
             im->eim_IntuiMessage.IDCMPWindow = w;
             im->eim_IntuiMessage.MouseX = w->MouseX;
             im->eim_IntuiMessage.MouseY = w->MouseY;
@@ -2946,14 +3345,45 @@ static BOOL cmd_uiact(int fd, ULONG op, ULONG waddr, ULONG arg)
         UnlockIBase(ib);
         if (why) {
             FreeMem(im, sizeof(*im));
-            return send_perr(fd, why);
+            return why;
         }
         ps->msg = (struct Message *)im;
         ps->kind = POST_MENU;
         ps->client = -1;                 /* answered now, not on reply */
         ps->deadline = 0;
-        return send_frame(fd, T_OK, NULL, 0);
+        return NULL;
     }
+}
+
+/* Screen, window to the front, and make it the active one. */
+static const char *window_front(struct Window *w)
+{
+    ULONG ib = LockIBase(0);
+    BOOL alive = window_alive(w);
+    UnlockIBase(ib);
+    if (!alive)
+        return "that window is gone";
+    /* Not under the lock: these queue work for Intuition's own task,
+     * which needs that lock to do it. A window closed in the moment
+     * between is the remaining risk, as with any tool that holds a
+     * window address. */
+    ScreenToFront(w->WScreen);
+    WindowToFront(w);
+    ActivateWindow(w);
+    return NULL;
+}
+
+static BOOL cmd_uiact(int fd, ULONG op, ULONG waddr, ULONG arg)
+{
+    const char *why;
+
+    if (op == 1)
+        why = menu_pick((struct Window *)waddr, arg);
+    else if (op == 2)
+        why = window_front((struct Window *)waddr);
+    else
+        why = "bad UIACT op";
+    return why ? send_perr(fd, why) : send_frame(fd, T_OK, NULL, 0);
 }
 
 /* Main loop: collect replies, answer who asked, time out the slow. */
@@ -3061,6 +3491,634 @@ static BOOL cmd_ports(int fd)
     if (full)
         return send_perr(fd, "too many ports; the list is cut short");
     return send_frame(fd, T_END, NULL, 0);
+}
+
+/* --- the WASABI ARexx port: Amiga programs drive the machine too ----- */
+
+/*
+ * The same hands the PC has - type, press keys, click, click a gadget by
+ * its label, pick a menu item by name, bring a window forward - offered
+ * on this machine as a public ARexx port, so a script or a program can
+ * use them without a network or a PC:
+ *
+ *   address WASABI
+ *   'ACTIVATEWINDOW "Shell#?"'
+ *   'TYPE "dir<return>"'
+ *   'CLICKGADGET Save WINDOW "MyPrefs#?"'
+ *   'MENU "Project/Quit"'
+ *
+ * rc 0 done, 5 nothing matched, 10 refused or failed (LASTERROR says
+ * why), 20 not a command. Results (VERSION, WINDOWS, ACTIVATEWINDOW's
+ * title) come back in RESULT when the sender asked for one.
+ *
+ * Only programs on this Amiga reach a public port, and they can do all
+ * of this through input.device anyway; the port adds convenience, not
+ * reach. A trial instance opens none: the running daemon owns the name.
+ */
+#define REXX_PORT_NAME "WASABI"
+
+static struct MsgPort *g_rexx_port;
+static char g_rx_error[160];
+
+static void rexxport_open(void)
+{
+    struct MsgPort *mp;
+
+    if (g_rexx_port || g_trial)
+        return;
+    if (!g_rexxsys)
+        g_rexxsys = OpenLibrary("rexxsyslib.library", 36);
+    if (!g_rexxsys || !(mp = CreateMsgPort()))
+        return;
+    mp->mp_Node.ln_Name = REXX_PORT_NAME;
+    mp->mp_Node.ln_Pri = 0;
+    Forbid();
+    if (FindPort(REXX_PORT_NAME)) {      /* another daemon has it */
+        Permit();
+        DeleteMsgPort(mp);
+        return;
+    }
+    AddPort(mp);
+    Permit();
+    g_rexx_port = mp;
+}
+
+static ULONG rexxport_sigmask(void)
+{
+    return g_rexx_port ? 1UL << g_rexx_port->mp_SigBit : 0;
+}
+
+static void rexxport_close(void)
+{
+    struct Message *m;
+
+    if (!g_rexx_port)
+        return;
+    Forbid();
+    RemPort(g_rexx_port);                /* nobody finds it from now on */
+    Permit();
+    while ((m = GetMsg(g_rexx_port))) {
+        ((struct RexxMsg *)m)->rm_Result1 = 20;
+        ((struct RexxMsg *)m)->rm_Result2 = 0;
+        ReplyMsg(m);
+    }
+    DeleteMsgPort(g_rexx_port);
+    g_rexx_port = NULL;
+}
+
+/* The next word of *pp into out: "quoted", 'quoted' or bare. FALSE at
+ * the end. */
+static BOOL rx_word(char **pp, char *out, LONG sz)
+{
+    char *p = *pp;
+    LONG n = 0;
+    char q = 0;
+
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (!*p)
+        return FALSE;
+    if (*p == '"' || *p == '\'')
+        q = *p++;
+    while (*p && (q ? *p != q : (*p != ' ' && *p != '\t'))) {
+        if (n < sz - 1)
+            out[n++] = *p;
+        p++;
+    }
+    if (q && *p == q)
+        p++;
+    out[n] = '\0';
+    *pp = p;
+    return TRUE;
+}
+
+/* How names are compared: any case, no underscore, no trailing dots,
+ * colon or spaces - "Save _As..." is "save as". */
+static void rx_norm(const char *in, char *out, LONG sz)
+{
+    LONG n = 0;
+    for (; *in && n < sz - 1; in++) {
+        UBYTE c = (UBYTE)*in;
+        if (c == '_')
+            continue;
+        if (c >= 'A' && c <= 'Z')
+            c += 32;
+        else if (c >= 0xC0 && c <= 0xDE && c != 0xD7)
+            c += 32;                     /* Latin-1 capitals */
+        if (c == ' ' && (n == 0 || out[n - 1] == ' '))
+            continue;
+        out[n++] = (char)c;
+    }
+    while (n > 0 && (out[n - 1] == '.' || out[n - 1] == ':' ||
+                     out[n - 1] == ' '))
+        n--;
+    out[n] = '\0';
+}
+
+/* 0 exact, 1 starts with, 2 contains, -1 no match (both normalized). */
+static int rx_tier(const char *have, const char *want)
+{
+    LONG lw = (LONG)strlen(want);
+    if (!want[0] || !have[0])
+        return -1;
+    if (strcmp(have, want) == 0)
+        return 0;
+    if (strncmp(have, want, lw) == 0)
+        return 1;
+    return strstr(have, want) ? 2 : -1;
+}
+
+/* The row doubling grab applies, which the pointer's y also follows:
+ * 1 for square pixels, 2 for 640x256, 4 for 1280x256. */
+static LONG rx_row_scale(struct Screen *sc)
+{
+    LONG k = 1;
+    while (sc->Height && sc->Width >= 2 * sc->Height * k)
+        k *= 2;
+    return k;
+}
+
+/* A window by AmigaDOS pattern on its title, front to back; NULL
+ * pattern: the active window. Call under LockIBase. */
+static struct Window *rx_find_window(const char *pat)
+{
+    static char tok[256];
+    struct Screen *sc;
+    struct Window *w;
+
+    if (!pat)
+        return IntuitionBase->ActiveWindow;
+    if (ParsePatternNoCase((STRPTR)pat, tok, sizeof(tok)) < 0)
+        return NULL;
+    for (sc = IntuitionBase->FirstScreen; sc; sc = sc->NextScreen)
+        for (w = sc->FirstWindow; w; w = w->NextWindow)
+            if (w->Title && MatchPatternNoCase(tok, w->Title))
+                return w;
+    return NULL;
+}
+
+static LONG rx_fail(LONG rc, const char *why)
+{
+    copystr(g_rx_error, sizeof(g_rx_error), why);
+    return rc;
+}
+
+/* Key names, as the PC's `wasabi key press` knows them. */
+static const struct { const char *name; UBYTE code; } rx_keys[] = {
+    { "space", 0x40 }, { "backspace", 0x41 }, { "tab", 0x42 },
+    { "enter", 0x43 }, { "return", 0x44 }, { "esc", 0x45 },
+    { "escape", 0x45 }, { "del", 0x46 }, { "delete", 0x46 },
+    { "up", 0x4C }, { "down", 0x4D }, { "right", 0x4E }, { "left", 0x4F },
+    { "help", 0x5F }, { "f1", 0x50 }, { "f2", 0x51 }, { "f3", 0x52 },
+    { "f4", 0x53 }, { "f5", 0x54 }, { "f6", 0x55 }, { "f7", 0x56 },
+    { "f8", 0x57 }, { "f9", 0x58 }, { "f10", 0x59 },
+    { NULL, 0 }
+};
+static const struct { const char *name; UBYTE code; UWORD qual; } rx_mods[] = {
+    { "shift", 0x60, 0x01 }, { "lshift", 0x60, 0x01 },
+    { "rshift", 0x61, 0x02 }, { "ctrl", 0x63, 0x08 }, { "alt", 0x64, 0x10 },
+    { "lalt", 0x64, 0x10 }, { "ralt", 0x65, 0x20 }, { "lamiga", 0x66, 0x40 },
+    { "ramiga", 0x67, 0x80 }, { "amiga", 0x67, 0x80 },
+    { NULL, 0, 0 }
+};
+
+/* "ramiga+shift+q" -> raw events (code, qual as 4 bytes each) appended
+ * at out[*n]; modifiers down first and up last, as fingers do it. */
+static BOOL rx_combo(const char *combo, UBYTE *out, LONG *n, LONG cap)
+{
+    char part[24], low[24];
+    const char *p = combo;
+    UBYTE mods[6];
+    LONG nm = 0, i, k;
+    UWORD qual = 0;
+    LONG code = -1;
+
+    while (*p) {
+        LONG pn = 0;
+        while (*p && *p != '+' && pn < (LONG)sizeof(part) - 1)
+            part[pn++] = *p++;
+        part[pn] = '\0';
+        if (*p == '+')
+            p++;
+        rx_norm(part, low, sizeof(low));
+        if (*p) {                        /* not the last: a modifier */
+            for (k = 0; rx_mods[k].name; k++)
+                if (strcmp(low, rx_mods[k].name) == 0)
+                    break;
+            if (!rx_mods[k].name || nm >= 6)
+                return FALSE;
+            mods[nm++] = (UBYTE)k;
+            continue;
+        }
+        for (k = 0; rx_keys[k].name; k++)
+            if (strcmp(low, rx_keys[k].name) == 0)
+                code = rx_keys[k].code;
+        for (k = 0; code < 0 && rx_mods[k].name; k++)
+            if (strcmp(low, rx_mods[k].name) == 0)
+                code = rx_mods[k].code;
+        if (code < 0 && low[0] && !low[1]) {
+            static const char row1[] = "1234567890", r2[] = "qwertyuiop",
+                              r3[] = "asdfghjkl", r4[] = "zxcvbnm";
+            const char *f;
+            if ((f = strchr(row1, low[0]))) code = 0x01 + (f - row1);
+            else if ((f = strchr(r2, low[0]))) code = 0x10 + (f - r2);
+            else if ((f = strchr(r3, low[0]))) code = 0x20 + (f - r3);
+            else if ((f = strchr(r4, low[0]))) code = 0x31 + (f - r4);
+        }
+    }
+    if (code < 0 || *n + (nm * 2 + 2) * 4 > cap)
+        return FALSE;
+#define RX_EV(c, q) do { out[(*n)++] = 0; out[(*n)++] = (UBYTE)(c); \
+                         out[(*n)++] = (UBYTE)((q) >> 8); \
+                         out[(*n)++] = (UBYTE)(q); } while (0)
+    for (i = 0; i < nm; i++) {
+        qual |= rx_mods[mods[i]].qual;
+        RX_EV(rx_mods[mods[i]].code, qual);
+    }
+    RX_EV(code, qual);
+    RX_EV(code | 0x80, qual);
+    for (i = nm - 1; i >= 0; i--) {
+        qual &= ~rx_mods[mods[i]].qual;
+        RX_EV(rx_mods[mods[i]].code | 0x80, qual);
+    }
+#undef RX_EV
+    return TRUE;
+}
+
+/* TYPE: text through the keymap, with <key> tokens; "<<" is a '<'. */
+static LONG rx_type(const char *s)
+{
+    static UBYTE text[KEY_MAX_TEXT], ev[256];
+    LONG tn = 0, en;
+    const char *why;
+
+    while (*s) {
+        if (s[0] == '<' && s[1] == '<') {
+            if (tn < KEY_MAX_TEXT) text[tn++] = '<';
+            s += 2;
+            continue;
+        }
+        if (*s == '<' && strchr(s, '>')) {
+            char name[32];
+            LONG nn = 0;
+            if (tn && (why = do_key(KEY_TEXT, text, tn)))
+                return rx_fail(10, why);
+            tn = 0;
+            for (s++; *s != '>' && nn < (LONG)sizeof(name) - 1; s++)
+                name[nn++] = *s;
+            name[nn] = '\0';
+            while (*s && *s != '>')
+                s++;
+            if (*s)
+                s++;
+            en = 0;
+            if (!rx_combo(name, ev, &en, sizeof(ev)))
+                return rx_fail(10, "unknown key name in <...>");
+            if ((why = do_key(KEY_RAW, ev, en)))
+                return rx_fail(10, why);
+            continue;
+        }
+        if (tn < KEY_MAX_TEXT)
+            text[tn++] = (UBYTE)*s;
+        s++;
+    }
+    if (tn && (why = do_key(KEY_TEXT, text, tn)))
+        return rx_fail(10, why);
+    return 0;
+}
+
+/* The window's options after the main argument: WINDOW pat, NTH n,
+ * DOUBLE, RIGHT, MIDDLE. */
+struct RxOpts {
+    char window[128];
+    BOOL has_window, dbl;
+    LONG nth, button;
+};
+
+static void rx_opts(char *p, struct RxOpts *o)
+{
+    char w[128], low[16];
+    memset(o, 0, sizeof(*o));
+    while (rx_word(&p, w, sizeof(w))) {
+        rx_norm(w, low, sizeof(low));
+        if (strcmp(low, "window") == 0 && rx_word(&p, o->window,
+                                                  sizeof(o->window)))
+            o->has_window = TRUE;
+        else if (strcmp(low, "nth") == 0 && rx_word(&p, w, sizeof(w)))
+            o->nth = atol(w);
+        else if (strcmp(low, "double") == 0)
+            o->dbl = TRUE;
+        else if (strcmp(low, "right") == 0)
+            o->button = 1;
+        else if (strcmp(low, "middle") == 0)
+            o->button = 2;
+    }
+}
+
+#define RX_MAX_ITEMS 128
+static struct UiItem g_rx_items[RX_MAX_ITEMS];
+static LONG g_rx_n;
+
+static BOOL rx_collect(struct UiItem *it, void *ctx)
+{
+    if (g_rx_n < RX_MAX_ITEMS)
+        g_rx_items[g_rx_n++] = *it;
+    return TRUE;
+}
+
+/* The same list `wasabi ui` sees - Intuition, GadTools, ReAction, MUI -
+ * matched like the PC matches: exact, then start, then part of a label;
+ * a label of plain text is never the thing clicked. */
+static LONG rx_clickgadget(const char *label, struct RxOpts *o)
+{
+    static char want[120], nlab[120];
+    struct Window *w;
+    struct UiItem *hit = NULL;
+    LONG best = 3, count = 0, idx = 0, k = 1, i, wx = 0, wy = 0;
+    BOOL active;
+    const char *why;
+    ULONG ib;
+
+    rx_norm(label, want, sizeof(want));
+    ib = LockIBase(0);
+    w = rx_find_window(o->has_window ? o->window : NULL);
+    if (!w) {
+        UnlockIBase(ib);
+        return rx_fail(5, "no such window");
+    }
+    g_rx_n = 0;
+    ui_items(w, o->has_window, rx_collect, NULL);
+    for (i = 0; i < g_rx_n; i++) {
+        struct UiItem *it = &g_rx_items[i];
+        int t;
+        if (strcmp(it->kind, "label") == 0)
+            continue;
+        rx_norm(it->label[0] ? it->label : it->kind, nlab, sizeof(nlab));
+        t = rx_tier(nlab, want);
+        if (t >= 0 && t < best)
+            best = t;
+    }
+    for (i = 0; i < g_rx_n && best < 3; i++) {
+        struct UiItem *it = &g_rx_items[i];
+        if (strcmp(it->kind, "label") == 0)
+            continue;
+        rx_norm(it->label[0] ? it->label : it->kind, nlab, sizeof(nlab));
+        if (rx_tier(nlab, want) != best)
+            continue;
+        count++;
+        if (++idx == (o->nth > 0 ? o->nth : 1))
+            hit = it;
+    }
+    active = (w == IntuitionBase->ActiveWindow &&
+              w->WScreen == IntuitionBase->FirstScreen);
+    k = rx_row_scale(w->WScreen);
+    wx = w->LeftEdge;
+    wy = w->TopEdge;
+    UnlockIBase(ib);
+
+    if (!hit)
+        return rx_fail(5, count ? "NTH is past the matches" : "no such gadget");
+    if (count > 1 && o->nth <= 0)
+        return rx_fail(10, "several gadgets match - add NTH n");
+    if (hit->disabled)
+        return rx_fail(10, "that gadget is disabled");
+    if (!active) {
+        if ((why = window_front(w)))
+            return rx_fail(10, why);
+        Delay(10);                       /* Intuition does it in its time */
+    }
+    if ((why = do_mouse(1, (ULONG)o->button, o->dbl ? 2 : 1,
+                        (WORD)(wx + hit->x + hit->w / 2),
+                        (WORD)((wy + hit->y + hit->h / 2) * k))))
+        return rx_fail(10, why);
+    return 0;
+}
+
+static LONG rx_menu(const char *path, struct RxOpts *o)
+{
+    static char want[200], seg[8][64], item[200], nitem[200];
+    struct Window *w;
+    struct Menu *m;
+    struct MenuItem *it, *sub;
+    LONG nseg = 0, best = 99, count = 0, mn, in, sn;
+    ULONG code = 0;
+    const char *p = path, *why;
+    ULONG ib;
+
+    while (*p && nseg < 8) {             /* "Project/Save As" -> segments */
+        LONG n = 0;
+        char raw[64];
+        while (*p && *p != '/' && n < 63)
+            raw[n++] = *p++;
+        raw[n] = '\0';
+        if (*p == '/')
+            p++;
+        rx_norm(raw, seg[nseg], sizeof(seg[0]));
+        if (seg[nseg][0])
+            nseg++;
+    }
+    if (!nseg)
+        return rx_fail(10, "MENU needs a path, e.g. \"Project/Quit\"");
+    (void)want;
+
+    ib = LockIBase(0);
+    w = rx_find_window(o->has_window ? o->window : NULL);
+    if (!w || !w->MenuStrip) {
+        UnlockIBase(ib);
+        return rx_fail(5, w ? "that window has no menus" : "no such window");
+    }
+    /* Score each pickable item: the sum of its segments' tiers, the
+     * path compared from the end when fewer segments were given. */
+    for (m = w->MenuStrip, mn = 0; m && mn < 31; m = m->NextMenu, mn++)
+        for (it = m->FirstItem, in = 0; it && in < 63;
+             it = it->NextItem, in++)
+            for (sub = it->SubItem, sn = 0; ; sub = sub->NextItem, sn++) {
+                struct MenuItem *x = it->SubItem ? sub : it;
+                char parts[3][64];
+                LONG np = 0, n, score = 0, j;
+                if (it->SubItem && !sub)
+                    break;
+                n = 0; parts[np][0] = '\0';
+                ui_put(parts[np], &n, 64, (UBYTE *)m->MenuName);
+                np++;
+                n = 0; parts[np][0] = '\0';
+                ui_item_text(it, parts[np], &n, 64);
+                np++;
+                if (it->SubItem) {
+                    n = 0; parts[np][0] = '\0';
+                    ui_item_text(sub, parts[np], &n, 64);
+                    np++;
+                }
+                if (nseg > np || !(x->Flags & ITEMTEXT))
+                    goto next;
+                for (j = 0; j < nseg; j++) {
+                    int t;
+                    rx_norm(parts[np - nseg + j], nitem, sizeof(nitem));
+                    t = rx_tier(nitem, seg[j]);
+                    if (t < 0)
+                        goto next;
+                    score += t;
+                }
+                if (score < best) {
+                    best = score;
+                    count = 0;
+                }
+                if (score == best) {
+                    count++;
+                    code = mn | (in << 5) |
+                           ((it->SubItem ? (ULONG)sn : 31UL) << 11);
+                }
+            next:
+                if (!it->SubItem || sn >= 30)
+                    break;
+            }
+    UnlockIBase(ib);
+    (void)item;
+
+    if (!count)
+        return rx_fail(5, "no such menu item");
+    if (count > 1)
+        return rx_fail(10, "several menu items match - give more of the path");
+    if ((why = menu_pick(w, code)))
+        return rx_fail(10, why);
+    return 0;
+}
+
+/* One command. rc as ARexx has it; res gets the RESULT text. */
+static LONG rx_command(char *line, char *res, LONG ressz)
+{
+    static char cmd[32], arg[KEY_MAX_TEXT + 1];
+    char lowcmd[32];
+    struct RxOpts o;
+    char *p = line;
+    ULONG ib;
+
+    res[0] = '\0';
+    if (!rx_word(&p, cmd, sizeof(cmd)))
+        return rx_fail(20, "empty command");
+    rx_norm(cmd, lowcmd, sizeof(lowcmd));
+
+    if (strcmp(lowcmd, "version") == 0) {
+        copystr(res, ressz, VERSION_STR);
+        return 0;
+    }
+    if (strcmp(lowcmd, "lasterror") == 0) {
+        copystr(res, ressz, g_rx_error[0] ? g_rx_error : "no error");
+        return 0;
+    }
+    g_rx_error[0] = '\0';               /* every other command starts clean */
+    if (strcmp(lowcmd, "help") == 0) {
+        copystr(res, ressz, "VERSION WINDOWS ACTIVATEWINDOW TYPE KEY CLICK "
+                "CLICKGADGET MENU LASTERROR HELP");
+        return 0;
+    }
+    if (strcmp(lowcmd, "windows") == 0) {
+        struct Screen *sc;
+        struct Window *w;
+        LONG n = 0;
+        ib = LockIBase(0);
+        for (sc = IntuitionBase->FirstScreen; sc; sc = sc->NextScreen)
+            for (w = sc->FirstWindow; w; w = w->NextWindow)
+                if (w->Title && n < ressz - 2) {
+                    ui_put(res, &n, ressz - 1, (UBYTE *)w->Title);
+                    res[n++] = '\n';
+                    res[n] = '\0';
+                }
+        UnlockIBase(ib);
+        if (n)
+            res[n - 1] = '\0';
+        return 0;
+    }
+    if (strcmp(lowcmd, "activatewindow") == 0) {
+        struct Window *w;
+        const char *why;
+        if (!rx_word(&p, arg, sizeof(arg)))
+            return rx_fail(10, "ACTIVATEWINDOW needs a title pattern");
+        ib = LockIBase(0);
+        w = rx_find_window(arg);
+        if (w)
+            copystr(res, ressz, w->Title ? (char *)w->Title : "");
+        UnlockIBase(ib);
+        if (!w)
+            return rx_fail(5, "no window matches");
+        if ((why = window_front(w)))
+            return rx_fail(10, why);
+        return 0;
+    }
+    if (strcmp(lowcmd, "type") == 0 || strcmp(lowcmd, "entertext") == 0) {
+        while (*p == ' ')
+            p++;
+        if (*p == '"' || *p == '\'') {
+            if (!rx_word(&p, arg, sizeof(arg)))
+                arg[0] = '\0';
+        } else
+            copystr(arg, sizeof(arg), p);
+        return rx_type(arg);
+    }
+    if (strcmp(lowcmd, "key") == 0) {
+        static UBYTE ev[256];
+        LONG en = 0;
+        const char *why;
+        while (rx_word(&p, arg, sizeof(arg)))
+            if (!rx_combo(arg, ev, &en, sizeof(ev)))
+                return rx_fail(10, "unknown key name");
+        if (!en)
+            return rx_fail(10, "KEY needs a key name, e.g. return");
+        if ((why = do_key(KEY_RAW, ev, en)))
+            return rx_fail(10, why);
+        return 0;
+    }
+    if (strcmp(lowcmd, "click") == 0) {
+        char xs[16], ys[16];
+        LONG k;
+        const char *why;
+        if (!rx_word(&p, xs, sizeof(xs)) || !rx_word(&p, ys, sizeof(ys)))
+            return rx_fail(10, "CLICK needs X and Y on the front screen");
+        rx_opts(p, &o);
+        ib = LockIBase(0);
+        k = rx_row_scale(IntuitionBase->FirstScreen);
+        UnlockIBase(ib);
+        if ((why = do_mouse(1, (ULONG)o.button, o.dbl ? 2 : 1,
+                            (WORD)atol(xs), (WORD)(atol(ys) * k))))
+            return rx_fail(10, why);
+        return 0;
+    }
+    if (strcmp(lowcmd, "clickgadget") == 0) {
+        if (!rx_word(&p, arg, sizeof(arg)))
+            return rx_fail(10, "CLICKGADGET needs a label");
+        rx_opts(p, &o);
+        return rx_clickgadget(arg, &o);
+    }
+    if (strcmp(lowcmd, "menu") == 0) {
+        if (!rx_word(&p, arg, sizeof(arg)))
+            return rx_fail(10, "MENU needs a path");
+        rx_opts(p, &o);
+        return rx_menu(arg, &o);
+    }
+    return rx_fail(20, "not a WASABI command - HELP lists them");
+}
+
+static void rexxport_pump(void)
+{
+    static char line[KEY_MAX_TEXT + 64], res[4096];
+    struct RexxMsg *rm;
+
+    if (!g_rexx_port)
+        return;
+    while ((rm = (struct RexxMsg *)GetMsg(g_rexx_port))) {
+        LONG rc;
+        rm->rm_Result1 = 20;
+        rm->rm_Result2 = 0;
+        if (rm->rm_Args[0]) {
+            copystr(line, sizeof(line), (const char *)rm->rm_Args[0]);
+            rc = rx_command(line, res, sizeof(res));
+            rm->rm_Result1 = rc;
+            if (rc == 0 && (rm->rm_Action & RXFF_RESULT) && res[0])
+                rm->rm_Result2 = (LONG)CreateArgstring(res,
+                                                       (ULONG)strlen(res));
+        }
+        ReplyMsg((struct Message *)rm);
+    }
 }
 
 /*
@@ -4858,6 +5916,8 @@ int main(int argc, char **argv)
                "until it is; trying again every %ld s\n",
                (LONG)g_tls_why, (LONG)TLS_RETRY_SECS);
 
+    rexxport_open();                     /* the WASABI ARexx port */
+
     Printf("%s listening on port %ld%s. Break C to stop.\n",
            (LONG)VERSION_STR, (long)port,
            (LONG)(g_key[0] ? "" : " (NO KEY SET - see ENV:wasabi.key)"));
@@ -4870,7 +5930,8 @@ int main(int argc, char **argv)
     while (!g_quit) {
         fd_set rd;
         struct timeval tv;
-        ULONG sigs = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_F | posted_sigmask();
+        ULONG sigs = SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_F | posted_sigmask() |
+                     rexxport_sigmask();
         int nfds = listen_fd;
         LONG n;
         BOOL pend;
@@ -4954,6 +6015,7 @@ int main(int argc, char **argv)
             drop(g_snoop_client);
 
         pump_posted();
+        rexxport_pump();
 
         {
             char line[200];
@@ -5211,6 +6273,7 @@ out:
     FreeMem(payload, MAX_PAYLOAD);
     if (g_cgfx) CloseLibrary(g_cgfx);
     if (g_keymap) CloseLibrary(g_keymap);
+    rexxport_close();
     posted_shutdown();
     /* A rexx message left with a slow host still needs the library to
      * be freed one day; keep it open in that case. */

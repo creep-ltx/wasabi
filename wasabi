@@ -1157,7 +1157,7 @@ def cmd_update(conn, args):
         # The new build is proven the way it will be used: over TLS
         # whenever the network is in between - even while this update
         # itself goes over --plain to an older daemon.
-        probe = Conn(conn.host, testport, args.key, timeout=5.0,
+        probe = Conn(conn.host, testport, args.key, timeout=20.0,
                      tls=want_tls(conn.sock.getpeername()[0]))
     except (OSError, WasabiError) as exc:
         abort("it did not come up as a daemon on port %d (%s)"
@@ -2578,7 +2578,9 @@ def find_gadget(screens, label, window=None, kind=None, nth=None):
         raise WasabiError("no window titled %r" % window if window
                           else "no windows on the front screen")
     for sc, w in pairs:
-        gads = [g for g in w["gadgets"] if not kind or g["kind"] == kind]
+        # Plain text (an MUI label) is never what is meant by a click.
+        gads = [g for g in w["gadgets"] if (g["kind"] == kind if kind
+                                            else g["kind"] != "label")]
         if not label and kind:          # "the string gadget"
             hits = gads
         elif ui_norm(label) in SYSTEM_KINDS:
@@ -2747,7 +2749,7 @@ def cmd_ui(conn, args):
                               "wasabi ui set NAME TEXT")
         w, g = ui_click(conn, args.name, args.window,
                         args.kind, args.nth)
-        if g["kind"] not in ("string", "integer", "custom"):
+        if g["kind"] not in ("string", "integer", "custom", "cycle"):
             raise WasabiError('"%s" is a %s, not a text field'
                               % (g["label"], g["kind"]))
         # Right Amiga+X clears a string gadget; then type, then Return
