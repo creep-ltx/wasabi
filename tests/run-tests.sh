@@ -1154,16 +1154,21 @@ check "clip set with no text reads stdin" "from stdin" "$($W clip get 2>/dev/nul
 # --- serve: history and alerts (the monitor), against a fake ntfy ---
 NPORT=$((PORT+9))
 python3 - "$NPORT" "$ROOT/ntfy.log" <<'PY' &
-import http.server, sys
+import http.server, socketserver, sys
+class S(http.server.HTTPServer):
+    def server_bind(self):          # no getfqdn(): it hangs on a Mac
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         open(sys.argv[2], "ab").write(body + b"\n")
         self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
     def log_message(self, *a): pass
-http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+S(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
 NTFY_PID=$!
+wait_up "$NPORT"
 mkdir -p "$ROOT/mon-cfg/wasabi"
 cat > "$ROOT/mon-cfg/wasabi/alerts.json" <<J
 {"ntfy_url": "http://127.0.0.1:$NPORT", "topic": "wasabi-test", "temp_c": 50}
@@ -1236,7 +1241,7 @@ mv "$ROOT/bk-files/Backups/Amiga/$TODAY" "$ROOT/bk-files/Backups/Amiga/2000-01-0
 out=$(bk_run)
 check "backup: a later night stores nothing that did not change" "0" "$out"
 check "backup: it links last night's copy instead" "2" \
-      "$(stat -c %h "$ROOT/bk-files/Backups/Amiga/$TODAY/S/User-Startup" 2>/dev/null)"
+      "$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_nlink)' "$ROOT/bk-files/Backups/Amiga/$TODAY/S/User-Startup" 2>/dev/null)"
 # --- audit 4: what a broken or hostile request must not do ---
 raw_req() { # raw HTTP request text -> status code
   python3 - "$VPORT" "$1" <<'PY'
@@ -1276,7 +1281,7 @@ out=$(curl -s -o /dev/null -w "%{http_code}" -b "$ROOT/bkjar" "${J[@]}" -X POST 
       -d '{"items":[{"path":"S:Startup-Sequence","dir":false}],"dir":"/out-link"}' "$A/api/copy/to-pc")
 check "audit4: nor through a link in it" "403" "$out"
 rm -f "$ROOT/bk-files/out-link"
-out=$(stat -c %a "$ROOT/bk-cfg/wasabi/view-password" 2>/dev/null || find "$ROOT/bk-cfg" -name view-password -exec stat -c %a {} \;)
+out=$(find "$ROOT/bk-cfg" -name view-password -exec python3 -c 'import os, sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' {} \; | head -1)
 check "audit4: the password file is private" "600" "$out"
 out=$(python3 - <<'PY'
 import sys; sys.path.insert(0, ".")
