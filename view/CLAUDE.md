@@ -1,7 +1,7 @@
 # wasabi view / desktop - the web app
 
 The app `wasabi desktop` serves (and `wasabi view`, which is the same app with `?mode=view`:
-the Screen page alone). `../wasabi_view.py` is the bridge, `../wasabi_api.py` the API.
+the Screen page alone). `../app/wasabi_view.py` is the bridge, `../app/wasabi_api.py` the API.
 Pages: `src/pages/` (Overview, Screen, Files, Shots); `src/App.tsx` is the shell and the
 `#hash` routing; `src/api.ts` sends `X-Wasabi` on every change (the bridge refuses
 changes without it).

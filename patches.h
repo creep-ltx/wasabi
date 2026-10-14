@@ -75,6 +75,7 @@ void  guru_retry_note(void);         /* the deferred write, if T: balked */
  * unloading, and if the answer is TRUE, do not.
  */
 BOOL  patches_stuck(void);
+LONG  patches_report(char *out, LONG max, BOOL dbg_watched);  /* for INFO */
 
 /* Release icon.library/diskfont.library. Call LAST, after waiting for
  * callers to leave the stubs: closing them earlier can let one be

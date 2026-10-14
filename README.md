@@ -1262,7 +1262,7 @@ name (`127.0.0.1` or `localhost`, stopping DNS rebinding), anything that
 changes something must carry an `X-Wasabi` header (which another web
 site cannot send), and the live screen's connection must come from the
 app's own origin. It serves this PC only. The service behind the pages
-is `wasabi_api.py`; the pages are in `view/src/pages/`.
+is `app/wasabi_api.py`; the pages are in `view/src/pages/`.
 
 ## Wasabi phone
 
@@ -1369,7 +1369,7 @@ Things a browser keeps for itself: the desktop may take the Super keys
 before the page sees them, and a few Ctrl shortcuts (Ctrl+W, Ctrl+T)
 belong to the browser - **Full screen** lets the page keep more.
 
-**How it works.** A small bridge in `wasabi_view.py` serves the page
+**How it works.** A small bridge in `app/wasabi_view.py` serves the page
 (built from `view/src` into `view/dist`, which is committed, so no Node
 is needed to run it) and talks to the daemon over one connection per
 page: first every input the page sent, then one `LIVE` frame. The daemon
@@ -1702,6 +1702,6 @@ it patches, the daemon can only be replaced through `update`, no
 blocking read or write is unbounded, and a patch that cannot be removed
 keeps the binary resident rather than unloading into a guru.
 
-`audit.md`, `audit2.md` and `audit3.md` are the defect ledgers, one per
+`docs/audits/audit*.md` are the defect ledgers, one per
 line of development. `PROTOCOL.md` is the wire format, and the contract
 between the two halves.

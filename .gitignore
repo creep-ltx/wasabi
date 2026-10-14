@@ -14,3 +14,5 @@ view/node_modules/
 tests/ignorebreak
 third_party/AmiSSL*
 tls.o
+wasabid.020
+tls.020.o

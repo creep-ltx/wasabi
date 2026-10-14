@@ -58,10 +58,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.8"
+#define VERSION_STR "wasabid 0.9b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.8 (14.10.2026)";
+    "$VER: wasabid 0.9b1 (14.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -1257,7 +1257,7 @@ static struct PsEnt g_ps[PS_MAX];
  * Headroom, which is the number that predicts a crash - capacity only
  * tells you what the task was given, not what it has left. This daemon
  * has been bitten four times by a large automatic on an 8 KB stack
- * (audit2.md), and every one of those was found by reading source on
+ * (docs/audits/audit2.md), and every one of those was found by reading source on
  * the Linux box, because nothing on the wire could show it.
  *
  * Two ways to be wrong, both handled:
@@ -1540,11 +1540,14 @@ static BOOL cmd_info(int fd)
     LONG n = sprintf(text,
         "%s, protocol v%d\n"
         "exec.library %ld.%ld\n"
-        "chip free %ld KB, fast free %ld KB\n"
-        "volumes:\n",
+        "chip free %ld KB, fast free %ld KB\n",
         VERSION_STR, PROTO_VERSION,
         (long)SysBase->LibNode.lib_Version, (long)SysBase->LibNode.lib_Revision,
         (long)(AvailMem(MEMF_CHIP) >> 10), (long)(AvailMem(MEMF_FAST) >> 10));
+    if (!send_frame(fd, T_DATA, text, n))
+        return FALSE;
+    n = patches_report(text, sizeof(text), g_dbg_client >= 0);
+    n += sprintf(text + n, "volumes:\n");
     if (!send_frame(fd, T_DATA, text, n))
         return FALSE;
     if (!info_volumes(fd))

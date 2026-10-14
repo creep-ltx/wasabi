@@ -1699,3 +1699,41 @@ void patches_set_daemon_task(struct Task *t)
 {
     g_daemon_task = t;
 }
+
+/*
+ * What is patched right now, for `wasabi info`: the patches are this
+ * daemon's whole risk to other programs, so say plainly which ones are
+ * in place - and which are only idling because something patched over
+ * them and they could not be removed.
+ */
+LONG patches_report(char *out, LONG max, BOOL dbg_watched)
+{
+    LONG i, n = 0, sn = 0;
+    const char *pad = "patches: ";
+
+    if (max < 320)
+        return 0;
+    for (i = 0; i < SN_NFN; i++)
+        if (snoop_fns[i]->installed)
+            sn++;
+    if (g_alert_patched) {
+        n += sprintf(out + n, "%sAlert() - the crash report, for as long "
+                     "as wasabid runs\n", pad);
+        pad = "         ";
+    }
+    if (g_dbg_patched) {
+        n += sprintf(out + n, "%sRawPutChar - the debug stream%s\n", pad,
+                     dbg_watched ? ", being watched" :
+                     " - idle, left in place: something patched on top");
+        pad = "         ";
+    }
+    if (sn) {
+        n += sprintf(out + n, "%s%ld call-trace patches%s\n", pad, (long)sn,
+                     wasabi_snoop_on ? ", tracing now" :
+                     " - idle, left in place: something patched on top");
+        pad = "         ";
+    }
+    if (!n)
+        n += sprintf(out + n, "patches: none\n");
+    return n;
+}

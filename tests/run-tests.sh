@@ -1308,7 +1308,7 @@ rm -f "$ROOT/bk-files/out-link"
 out=$(find "$ROOT/bk-cfg" -name view-password -exec python3 -c 'import os, sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' {} \; | head -1)
 check "audit4: the password file is private" "600" "$out"
 out=$(python3 - <<'PY'
-import sys; sys.path.insert(0, ".")
+import sys; sys.path.insert(0, "app")
 from wasabi_api import amiga_split
 print(amiga_split("Startup"), amiga_split("S:a/b"))
 PY

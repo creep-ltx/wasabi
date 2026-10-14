@@ -2295,8 +2295,8 @@ def cmd_health(conn, args):
 
 def cmd_view(args):
     """The Amiga's screen in a window, with its mouse and keyboard.
-    The bridge lives in wasabi_view.py next to this script."""
-    here = os.path.dirname(os.path.realpath(__file__))
+    The bridge lives in app/wasabi_view.py next to this script."""
+    here = os.path.join(os.path.dirname(os.path.realpath(__file__)), "app")
     if here not in sys.path:
         sys.path.insert(0, here)
     import wasabi_view

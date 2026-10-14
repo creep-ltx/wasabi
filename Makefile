@@ -34,6 +34,15 @@ tls.o: tls.c tls.h $(SSL)
 wasabid: $(SRCS) patches.h health.h tls.h tls.o
 	$(CC) $(CFLAGS) $(SRCS) tls.o $(SSLLIB) -o wasabid
 
+# The same daemon for a 68020 or better (a stock A1200, any accelerator):
+# the compiler may use the 020's instructions. wasabid itself runs on
+# every 68k; this one is a little smaller and faster where it can run.
+wasabid.020: $(SRCS) patches.h health.h tls.h tls.c $(SSL)
+	$(CC) $(CFLAGS) -m68020 $(SSLINC) -c tls.c -o tls.020.o
+	$(CC) $(CFLAGS) -m68020 $(SRCS) tls.020.o $(SSLLIB) -o wasabid.020
+
+both: wasabid wasabid.020
+
 $(SSL):
 	third_party/fetch.sh
 
@@ -45,7 +54,7 @@ deploy: wasabid
 	cp wasabid "$(DEPLOY)/"
 
 clean:
-	rm -f wasabid tls.o
+	rm -f wasabid wasabid.020 tls.o tls.020.o
 
 # The launcher entry and icon, for this user: `wasabi desktop` from the
 # app menu. Exec gets the full path - a launcher's PATH may lack ~/.local/bin.

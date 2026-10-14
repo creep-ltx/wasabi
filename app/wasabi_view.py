@@ -33,7 +33,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.realpath(__file__))
-DIST = os.path.join(HERE, "view", "dist")
+ROOT = os.path.dirname(HERE)            # the repository: view/, .deployed
+DIST = os.path.join(ROOT, "view", "dist")
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 # Qualifier bit of each Amiga modifier's raw key, so a key pressed with
@@ -901,7 +902,7 @@ def app_window(url, title, kiosk):
     return True
 
 
-STAMP = os.path.join(HERE, ".deployed")
+STAMP = os.path.join(ROOT, ".deployed")
 
 
 def read_stamp():
@@ -939,7 +940,7 @@ def serve(w, args, target):
     if not os.path.isfile(os.path.join(DIST, "index.html")):
         raise w.WasabiError(
             "the view's page is not built - run: cd %s/view && npm install "
-            "&& npm run build" % HERE)
+            "&& npm run build" % ROOT)
     state = ServerState()
     from wasabi_api import Api, Auth
     server = getattr(args, "mode", "") == "server"
