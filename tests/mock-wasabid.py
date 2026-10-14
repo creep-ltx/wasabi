@@ -22,6 +22,7 @@ import argparse
 import collections
 import os
 import platform
+import shutil
 import re
 import select
 import socket
@@ -249,9 +250,9 @@ class Handler(socketserver.BaseRequestHandler):
         if tag == PING:
             self.send(PONG)
         elif tag == INFO:
-            st = os.statvfs(ROOT)
-            total = st.f_blocks * st.f_frsize // (1 << 20)
-            free = st.f_bavail * st.f_frsize // (1 << 20)
+            du = shutil.disk_usage(ROOT)    # Windows has no statvfs
+            total = du.total // (1 << 20)
+            free = du.free // (1 << 20)
             pct = 100 - (free * 100 // total) if total else 0
             self.send_data(
                 ("mock-wasabid, protocol v%d\nroot: %s\nhost: %s\n"
