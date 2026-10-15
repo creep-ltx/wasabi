@@ -5,7 +5,12 @@ What changed in each version, newest first. Betas (`0.10b4`) are on the
 files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 `wasabi ping` shows which daemon an Amiga runs.
 
-## 0.10 (betas, not released yet)
+## 0.10 - 15 October 2026
+
+The four betas below, released together: timed input, gadgets by id,
+ARexx programs, the Python API, MUI 3.8 windows, and OS 3.0/3.1 fixes.
+Tested on the A1200 (PiStorm32-lite/Emu68, OS 3.2.3) and in FS-UAE
+(OS 3.2.1 + MUI 5, 3.1 + MUI 3.8, Workbench 2.05 on an A600).
 
 ### 0.10b4 - 15 October 2026
 

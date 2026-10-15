@@ -12,7 +12,7 @@ import this module, not the script.
 import wasabi_client
 
 with wasabi_client.connect() as amiga:
-    print(amiga.banner)                          # wasabid 0.10b4
+    print(amiga.banner)                          # wasabid 0.10
     r = amiga.run("Version FULL")
     print(r.rc, r.stdout)
     amiga.key_type("dir\n")
@@ -46,7 +46,7 @@ timeout=None)` returns an `Amiga`. Use it in a `with` block, or call
 One `Amiga` is one connection: one call at a time. For parallel work
 (a `run` in one thread, clicks in another) open a second one.
 
-Properties: `host`, `port`, `banner` (`'wasabid 0.10b4'`), `caps` (a set
+Properties: `host`, `port`, `banner` (`'wasabid 0.10'`), `caps` (a set
 of what the daemon can do, see [PROTOCOL.md](../PROTOCOL.md)),
 `encrypted`.
 
@@ -122,7 +122,7 @@ amiga.input(["type hello world"], gap=0)         # a burst
 ```
 
 Up to 1024 events and 5 s of waits per call; it returns when the last
-event is done. Needs wasabid 0.10b4 (`'inputs' in amiga.caps`).
+event is done. Needs wasabid 0.10 (`'inputs' in amiga.caps`).
 
 ### The screen
 
@@ -157,7 +157,7 @@ A gadget: `kind`, `label`, `value`, `id`, `class`, `x`, `y`, `width`,
 `disabled`, `checkable`, `checked`, `bar`.
 
 **By id:** `id` is the gadget's `GadgetID` (GadTools, ReAction,
-Intuition) or an MUI object's `MUIA_ObjectID` (wasabid 0.10b4+). It
+Intuition) or an MUI object's `MUIA_ObjectID` (wasabid 0.10+). It
 stays the same when the window is laid out differently, where `nth`
 does not: `ui_click(id=12, window="Prefs")`. Several gadgets with the
 same id (border gadgets are usually 0) need `nth`.

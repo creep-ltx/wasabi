@@ -271,7 +271,12 @@ down  105.02 MB/s   256.0 MB in 2.44 s
 
 ## What's next
 
-**0.9 is the fourth non-beta build**: ready-made clients for Linux,
+**0.10 is the fifth non-beta build** (15 October 2026): the 0.10
+betas below - timed input batches, gadgets by id, `wasabi rexx`, the
+Python API (`wasabi_client.py`), MUI 3.8 windows and the OS 3.0/3.1
+fixes. CHANGELOG.md has every version.
+
+**0.9 was the fourth non-beta build**: ready-made clients for Linux,
 macOS and Windows, list rows, transfers that do not block, a 68020
 build, more keys, region grabs, `--native` coordinates and 26 MCP tools.
 Updated the same day (15 October 2026, at the user's wish, under the
@@ -303,8 +308,8 @@ gadgets by id (`GadgetID`, MUI's `MUIA_ObjectID`; `ui click --id`);
 `wasabi rexx` runs ARexx programs through `RX` with output and rc;
 `wasabi_client.py`, the stable Python API (docs/api.md, API 1.0);
 clearer "make it plain again" errors; menus no longer show plain items
-as checked. Tested in FS-UAE (OS 3.2.1 + MUI 5, Workbench 2.05); not
-yet on the A1200.
+as checked. Tested in FS-UAE (OS 3.2.1 + MUI 5, Workbench 2.05) and on
+the A1200.
 
 Open: MUI lists' columns after the first,
 and several listeners on the debug and snoop streams at once.
