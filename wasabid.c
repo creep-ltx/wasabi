@@ -6457,11 +6457,14 @@ int main(int argc, char **argv)
         guru_arm();
 
     /*
-     * Every connection is TLS; there is no plain fallback. If it cannot
-     * start - AmiSSL missing, its assign not made yet at boot, the keys
-     * not copied over - the daemon still runs: it refuses connections,
-     * tells discovery why, and tries again every half minute. Exiting
-     * instead would leave a machine nobody can reach to fix it.
+     * Encryption is optional (the user's decision, 14 October 2026: not
+     * everyone has AmiSSL). With AmiSSL and keys, connections from the
+     * network must be TLS - plain ones are let in only from 127.x or
+     * with the 'plain' option. Without them - AmiSSL missing, its
+     * assign not made yet at boot, the keys not copied over - the
+     * daemon runs plain and tries TLS again every half minute; the
+     * client still refuses to go plain to a host it has reached
+     * encrypted before (its pins).
      */
     g_tls_why = tls_open();
     g_tls_tried = now_secs();
