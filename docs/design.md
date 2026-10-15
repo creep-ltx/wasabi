@@ -22,7 +22,7 @@
 | `health` | **working on the real A1200** — Pi temperature, voltage, clocks and its power/overheat history since boot; Emu68 uptime, a live 68k CPU meter (0.3 MIPS idle, 1287 MIPS busy, measured), JIT cache; free memory; the last guru |
 | `slots` / `free` | **working on the real A1200 (0.4b2)** — four commands at once (one per connection); `wasabi slots` lists them, `wasabi free N` Ctrl-Cs one and lets go of the slot if it will not stop; `run --max-time` stops exactly its own slot |
 | TLS (`keys`) | **working on the real A1200 and the NAS; optional since 0.8** — Ed25519 certificates from your own CA; an Amiga with AmiSSL and keys accepts only TLS, one without works plain; a client never silently goes plain to an Amiga it reached encrypted |
-| `ui` (gadgets and menus by name) / `arexx` | **working on the real A1200; ReAction and MUI tested in FS-UAE (OS 3.2.3, MUI 5)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. Intuition, GadTools, ReAction and MUI 4/5 windows (0.7b1) |
+| `ui` (gadgets and menus by name) / `arexx` | **working on the real A1200; ReAction and MUI tested in FS-UAE (OS 3.2.3, MUI 5)** — list a window's gadgets and menus; click a button, fill a text field, pick "Project/Quit" by name; send ARexx commands and get RESULT. Intuition, GadTools, ReAction and MUI 4/5 windows (0.7b1), MUI 3.8 (0.10b3, FS-UAE OS 3.1) |
 | list rows in `ui` | **working on the real A1200** (GadTools and MUI 5); DCTelnet's Address Book in FS-UAE — each row by its text, selected or not, clickable when in view |
 | transfers that do not block | **working on the real A1200** — during a 200 MB upload, ping 0.16 s and a 1280x960 screenshot 0.5 s |
 | `wasabid.020` | **working on the real A1200 (it runs that build) and in FS-UAE as a stock A1200** (68EC020, 8 MB) — the same daemon built for 68020+; `make both` |
@@ -294,8 +294,11 @@ Since 0.8 (0.9 betas): list rows; uploads and downloads that no longer
 make other clients wait; a 68020 build; `wasabi info` names the patches
 in place.
 
-Open: seeing into MUI 3.8 windows (finding their objects would need a
-search of all memory per window), MUI lists' columns after the first,
+Since 0.10 (betas): MUI 3.8 windows are read (0.10b3); the daemon runs
+on a 16 KB stack of its own when the Shell gave it less (OS 3.1 gives
+4 KB, which crashed `ui` there); GadTools list rows on OS 3.0/3.1 too.
+
+Open: MUI lists' columns after the first,
 and several listeners on the debug and snoop streams at once.
 
 The hardening list is done — snoop self-tests its own trampoline before

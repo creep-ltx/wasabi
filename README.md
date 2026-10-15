@@ -188,11 +188,11 @@ wasabi update wasabid                replace the daemon, checked first
 
 | | |
 |---|---|
-| **Amiga** | AmigaOS 2.04 or later (2.05 and 3.2 tested), any 68000 or better, and a TCP/IP stack with `bsdsocket.library`. AmiSSL 5 only for encryption; MUI only to read MUI windows; list rows in GadTools windows need OS 3. |
+| **Amiga** | AmigaOS 2.04 or later (2.05, 3.1 and 3.2 tested), any 68000 or better, and a TCP/IP stack with `bsdsocket.library`. AmiSSL 5 only for encryption; MUI (3.8, 4 or 5) only to read MUI windows; list rows in GadTools windows need OS 3. |
 | **Memory** | about 350 KB for the daemon; AmiSSL adds about 3.5 MB when encryption is on. A screenshot, the live view and the DOS call trace borrow more while they run. |
 | **PC** | Linux, macOS or Windows - the one-file downloads need nothing else; the script needs Python 3. OpenSSL 3 to make encryption keys. |
 | **Phone app** | any Docker host on the Amiga's network ([`tools/docker-compose.yml`](tools/docker-compose.yml)). |
-| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030, as a stock 68020, and as a stock A600 (68000, Workbench 2.05). 271 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
+| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030, as a stock 68020 (OS 3.1 and 3.2), and as a stock A600 (68000, Workbench 2.05). 271 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
 
 ## Documentation
 

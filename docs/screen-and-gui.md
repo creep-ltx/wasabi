@@ -358,8 +358,14 @@ Disabled items are refused.
   several columns shows its first column (the code that draws the
   others is the program's own and not reachable from outside).
 
-Not seen: MUI 3.8 windows (nothing tells them apart without searching
-all memory for every window), custom-drawn content (games, paint
+MUI 3.8 windows (0.10b3) leave no mark and their classes have no
+names, so the daemon asks muimaster for its classes once and finds each
+new window's object in one pass over the used memory, before Intuition
+is locked: about a second on a stock A1200 the first time, then
+remembered. Buttons and checkmarks are told apart from where MUI 3.8
+keeps their input mode (it will not give it back).
+
+Not seen: custom-drawn content (games, paint
 areas), and a GadTools checkbox whose label is a picture. For those,
 `grab` and `mouse` as before. GadTools keeps a button's text in its own
 memory; the daemon reads it there, carefully.

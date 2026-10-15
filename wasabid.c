@@ -38,6 +38,7 @@
 #define __NOLIBBASE__            /* opened on the first list in UI */
 #define GADTOOLS_BASE_NAME g_gadtools
 #include <proto/gadtools.h>
+#include <inline/macros.h>              /* LP1: MUI_GetClass, below */
 #undef __NOLIBBASE__
 #include <rexx/storage.h>
 #define __NOLIBBASE__            /* opened on the first AREXX */
@@ -60,10 +61,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.10b2"
+#define VERSION_STR "wasabid 0.10b3"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.10b2 (15.10.2026)";
+    "$VER: wasabid 0.10b3 (15.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -2739,13 +2740,80 @@ static BOOL ui_obj_ok(const void *o)
     return ui_readable(c) && ui_readable(c->cl_Dispatcher.h_Entry);
 }
 
+/*
+ * MUI 3.x's built-in classes have no cl_ID (MUI 4/5 name theirs), so
+ * they are known by address: muimaster.library's MUI_GetClass() (V8,
+ * obsolete but there) hands each one over, once, while nothing is
+ * locked. Only when an MUI older than 20 is already in memory - then
+ * MUI 3.x windows may be open, and nothing is loaded for a system that
+ * has MUI installed but is not using it.
+ */
+#define MUI_GetClass(id) \
+    LP1(0x4e, struct IClass *, MUI_GetClass, CONST_STRPTR, id, a0, \
+        , g_muimaster)
+#define MUI_FreeClass(cl) \
+    LP1NR(0x54, MUI_FreeClass, struct IClass *, cl, a0, , g_muimaster)
+
+static struct Library *g_muimaster;      /* MUI 3.x only, see above */
+static const char *const g_mui3_names[] = {
+    "Window.mui", "Area.mui", "Group.mui", "Text.mui", "String.mui",
+    "Cycle.mui", "List.mui", "Numeric.mui"
+};
+#define MUI3_CLASSES (sizeof(g_mui3_names) / sizeof(g_mui3_names[0]))
+static struct IClass *g_mui3_class[MUI3_CLASSES];
+
+static void mui3_open(void)
+{
+    struct Library *lib;
+    ULONG i;
+
+    if (g_muimaster)
+        return;
+    Forbid();
+    lib = (struct Library *)FindName(&SysBase->LibList, "muimaster.library");
+    if (lib && lib->lib_Version >= 20)
+        lib = NULL;                      /* MUI 4/5: classes have names */
+    Permit();
+    if (!lib || !(g_muimaster = OpenLibrary("muimaster.library", 0)))
+        return;
+    for (i = 0; i < MUI3_CLASSES; i++)
+        g_mui3_class[i] = MUI_GetClass((CONST_STRPTR)g_mui3_names[i]);
+}
+
+static void mui3_close(void)
+{
+    ULONG i;
+
+    if (!g_muimaster)
+        return;
+    for (i = 0; i < MUI3_CLASSES; i++)
+        if (g_mui3_class[i])
+            MUI_FreeClass(g_mui3_class[i]);
+    CloseLibrary(g_muimaster);
+    g_muimaster = NULL;
+}
+
+/* A class's name: its cl_ID, or the MUI 3.x name it is known by. */
+static const char *ui_cl_name(struct IClass *c)
+{
+    ULONG i;
+
+    if (c->cl_ID && ui_readable(c->cl_ID))
+        return (const char *)c->cl_ID;
+    if (g_muimaster)
+        for (i = 0; i < MUI3_CLASSES; i++)
+            if (c == g_mui3_class[i])
+                return g_mui3_names[i];
+    return NULL;
+}
+
 static BOOL ui_class_is(const void *o, const char *name)
 {
     struct IClass *c;
+    const char *id;
     int k = 0;
     for (c = OCLASS(o); ui_readable(c) && k < 16; c = c->cl_Super, k++)
-        if (c->cl_ID && ui_readable(c->cl_ID) &&
-            strcmp((const char *)c->cl_ID, name) == 0)
+        if ((id = ui_cl_name(c)) && strcmp(id, name) == 0)
             return TRUE;
     return FALSE;
 }
@@ -2758,8 +2826,8 @@ static void ui_class_name(const void *o, char *out, LONG sz)
     LONG n = 0;
     out[0] = '\0';
     for (c = OCLASS(o); ui_readable(c) && k < 16; c = c->cl_Super, k++)
-        if (c->cl_ID && ui_readable(c->cl_ID)) {
-            ui_put(out, &n, sz, c->cl_ID);
+        if (ui_cl_name(c)) {
+            ui_put(out, &n, sz, (const UBYTE *)ui_cl_name(c));
             return;
         }
 }
@@ -3007,8 +3075,10 @@ static void ui_mui_text(const UBYTE *s, char *out, LONG sz)
  * which MUI then confirms (MUIA_Window_Window). Found once per window,
  * then kept; a kept answer is checked again before it is used.
  */
-#define MUI_CACHE 16
-static struct { struct Window *w; Object *o; } g_mui[MUI_CACHE];
+#define MUI_CACHE 32
+/* o NULL: known not to be an MUI 3.x window (mui3_prescan), as long as
+ * the window at that address still has the same IDCMP port. */
+static struct { struct Window *w; struct MsgPort *port; Object *o; } g_mui[MUI_CACHE];
 static LONG g_mui_next;
 
 static BOOL ui_mui_is(Object *o, struct Window *w)
@@ -3045,12 +3115,113 @@ static Object *ui_mui_window(struct Window *w)
             if (*p == (ULONG)w && p[-3] == (ULONG)w->WScreen &&
                 ui_mui_cheap((Object *)p[-4])) {
                 g_mui[g_mui_next].w = w;
+                g_mui[g_mui_next].port = w->UserPort;
                 g_mui[g_mui_next].o = (Object *)p[-4];
                 g_mui_next = (g_mui_next + 1) % MUI_CACHE;
                 return (Object *)p[-4];
             }
     }
     return NULL;
+}
+
+/*
+ * MUI 3.x leaves no mark on its windows, so with an MUI 3.x in memory
+ * every window not seen before is looked for in one pass over memory
+ * for all of them, before Intuition is locked (a pass under LockIBase
+ * would freeze the machine for its length); the answers, yes or no, are
+ * kept per window. 2 MB on a stock A1200: well under a second.
+ */
+static LONG mui3_slot(struct Window *w)
+{
+    LONG i;
+    for (i = 0; i < MUI_CACHE; i++)
+        if (g_mui[i].w == w && g_mui[i].port == w->UserPort)
+            return i;
+    return -1;
+}
+
+#define MUI3_SKIPS 256                /* free chunks skipped per region */
+static void mui3_prescan(void)
+{
+    struct Window *want[MUI_CACHE];
+    struct Screen *scr[MUI_CACHE];
+    Object *found[MUI_CACHE];
+    struct MemHeader *mh;
+    struct Screen *sc;
+    struct Window *w;
+    static ULONG skip_lo[MUI3_SKIPS], skip_hi[MUI3_SKIPS];
+    ULONG ib, lo = ~0UL, hi = 0;
+    LONG n = 0, i, left;
+
+    mui3_open();
+    if (!g_muimaster || !g_mui3_class[0])
+        return;
+    ib = LockIBase(0);
+    for (sc = IntuitionBase->FirstScreen; sc; sc = sc->NextScreen)
+        for (w = sc->FirstWindow; w && n < MUI_CACHE / 2; w = w->NextWindow)
+            if (mui3_slot(w) < 0) {
+                want[n] = w;
+                scr[n] = w->WScreen;
+                found[n] = NULL;
+                if ((ULONG)w < lo) lo = (ULONG)w;
+                if ((ULONG)w > hi) hi = (ULONG)w;
+                n++;
+            }
+    UnlockIBase(ib);
+    left = n;
+    if (!n)
+        return;
+    /* Free memory cannot hold the RenderInfo of a window that is open
+     * now, so the big free chunks (most of a machine's RAM) are noted
+     * under Forbid and skipped; exec keeps them in address order. */
+    for (mh = (struct MemHeader *)SysBase->MemList.lh_Head;
+         mh->mh_Node.ln_Succ && left > 0;
+         mh = (struct MemHeader *)mh->mh_Node.ln_Succ) {
+        struct MemChunk *mc;
+        ULONG *p = (ULONG *)(((ULONG)mh->mh_Lower + 19) & ~3UL);
+        ULONG *e = (ULONG *)((ULONG)mh->mh_Upper & ~3UL);
+        LONG f = 0, k;
+        Forbid();
+        for (mc = mh->mh_First; mc && f < MUI3_SKIPS; mc = mc->mc_Next)
+            if (mc->mc_Bytes >= 4096) {
+                skip_lo[f] = (ULONG)mc;
+                skip_hi[f++] = (ULONG)mc + mc->mc_Bytes;
+            }
+        Permit();
+        for (k = 0; k <= f && left > 0; k++) {
+            ULONG *end = k < f ? (ULONG *)skip_lo[k] : e;
+            for (; p < end; p++) {
+                if (*p < lo || *p > hi)
+                    continue;
+                for (i = 0; i < n; i++)
+                    if (*p == (ULONG)want[i] && !found[i] &&
+                        p[-3] == (ULONG)scr[i] &&
+                        ui_mui_cheap((Object *)p[-4])) {
+                        found[i] = (Object *)p[-4];
+                        left--;          /* all found: stop early */
+                    }
+            }
+            if (k < f && (ULONG *)(((skip_hi[k] + 3) & ~3UL) + 16) > p)
+                p = (ULONG *)(((skip_hi[k] + 3) & ~3UL) + 16);
+        }
+    }
+    /* The windows may have changed meanwhile: what is kept is checked
+     * again where it is used (ui_mui_window, ui_mui_is). */
+    ib = LockIBase(0);
+    for (i = 0; i < n; i++) {
+        g_mui[g_mui_next].w = want[i];
+        g_mui[g_mui_next].port = want[i]->UserPort;
+        g_mui[g_mui_next].o = found[i];
+        g_mui_next = (g_mui_next + 1) % MUI_CACHE;
+    }
+    UnlockIBase(ib);
+}
+
+/* An MUI 3.x window found by mui3_prescan. */
+static BOOL mui3_known(struct Window *w)
+{
+    LONG i = mui3_slot(w);
+    return i >= 0 && g_mui[i].o != NULL;
 }
 
 /* MUI 4/5 put their own gadgets in the title bar, drawn with an image
@@ -3073,28 +3244,47 @@ struct MuiWalk {
     int count;
     char pending[120];               /* the last label, for the next
                                       * unlabelled control */
+    LONG px, py, pw, ph;             /* where that label is */
     struct UiItem held;              /* an unlabelled control, waiting to
                                       * see if a label comes after it */
+    char fallback[120];              /* the label before it, if no
+                                      * label comes after */
+    char next_fallback[120];         /* the same for the item being
+                                      * emitted, until it is held */
     BOOL has_held;
 };
+
+/* b starts on a's row (their boxes overlap in height), right of a. */
+static BOOL mw_right_of(LONG ax, LONG ay, LONG aw, LONG ah, struct UiItem *b)
+{
+    return b->x >= ax + aw && b->y < ay + ah && b->y + b->h > ay;
+}
 
 static BOOL mw_flush(struct MuiWalk *mw)
 {
     if (!mw->has_held)
         return TRUE;
     mw->has_held = FALSE;
+    if (!mw->held.label[0])
+        copystr(mw->held.label, sizeof(mw->held.label), mw->fallback);
     return mw->sink(&mw->held, mw->ctx);
 }
 
 /* MUI lays a label out before its control or after it (a checkmark,
  * then "Editable"): an unlabelled control waits for the next item, and
- * takes it as its label if that is plain text. */
+ * takes it as its label if that is plain text on the same row to its
+ * right and not itself a "Name:" for what follows; otherwise it keeps
+ * the label that came before it ("Show: [x] Icon [ ] Menu" is Icon and
+ * Menu, "Pop to front: [x]" is Pop to front). */
 static BOOL mw_emit(struct MuiWalk *mw, struct UiItem *it)
 {
     BOOL holdable = !it->label[0] &&
         (strcmp(it->kind, "toggle") == 0 || strcmp(it->kind, "string") == 0 ||
          strcmp(it->kind, "cycle") == 0 || strcmp(it->kind, "slider") == 0);
-    if (strcmp(it->kind, "label") == 0 && mw->has_held) {
+    LONG ln = strlen(it->label);
+    if (strcmp(it->kind, "label") == 0 && mw->has_held &&
+        ln && it->label[ln - 1] != ':' &&
+        mw_right_of(mw->held.x, mw->held.y, mw->held.w, mw->held.h, it)) {
         copystr(mw->held.label, sizeof(mw->held.label), it->label);
         if (!mw_flush(mw))
             return FALSE;
@@ -3104,6 +3294,7 @@ static BOOL mw_emit(struct MuiWalk *mw, struct UiItem *it)
         return FALSE;
     if (holdable) {
         mw->held = *it;
+        copystr(mw->fallback, sizeof(mw->fallback), mw->next_fallback);
         mw->has_held = TRUE;
         return TRUE;
     }
@@ -3195,6 +3386,24 @@ static BOOL ui_mui_rows(Object *o, struct UiItem *list, struct MuiWalk *mw)
     return TRUE;
 }
 
+/*
+ * MUI 3.x will not give MUIA_InputMode back (it is init-only there), so
+ * it is read from where the object keeps it, found by comparing buttons,
+ * checkmarks and labels in MUI 3.8's own windows (muimaster 19.31):
+ * after the documented MUI_AreaData (mad_Flags at +64 from the object)
+ * comes the IDCMP the object asked for - IDCMP_MOUSEBUTTONS for anything
+ * that is clicked - and a toggle is the one of those with bit 16 of
+ * mad_Flags clear (set on buttons and on everything else alike).
+ * Answers 0 (none), 1 (button) or 3 (toggle), as MUIA_InputMode would.
+ */
+static ULONG mui3_input_mode(Object *o)
+{
+    const ULONG *ad = (const ULONG *)((const UBYTE *)o + 64);
+    if (!ui_readable(ad + 3) || !(ad[3] & IDCMP_MOUSEBUTTONS))
+        return 0;
+    return (ad[0] & 0x10000) ? 1 : 3;
+}
+
 static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
 {
     struct UiItem it;
@@ -3239,6 +3448,10 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
         struct List *l = NULL;
         struct Node *n;
         int k = 0;
+        if (it.w <= 0 || it.h <= 0)
+            return TRUE;                 /* a page not shown: nor are its
+                                          * children, and they would use
+                                          * up the 400 */
         if (!GetAttr(MUIA_Group_ChildList, o, (ULONG *)&l) ||
             !ui_readable(l))
             return TRUE;
@@ -3250,7 +3463,10 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
         return TRUE;
     } else {
         ULONG mode = 0;
-        GetAttr(MUIA_InputMode, o, &mode);
+        if (g_muimaster)
+            mode = mui3_input_mode(o);
+        else
+            GetAttr(MUIA_InputMode, o, &mode);
         if (ui_class_is(o, "Text.mui") &&
             GetAttr(MUIA_Text_Contents, o, &v))
             ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
@@ -3259,8 +3475,10 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
         if (mode && GetAttr(MUIA_Selected, o, &v) && v)
             it.selected = TRUE;
         if (!mode) {                     /* a label: remember it */
-            if (it.label[0])
+            if (it.label[0]) {
                 copystr(mw->pending, sizeof(mw->pending), it.label);
+                mw->px = it.x; mw->py = it.y; mw->pw = it.w; mw->ph = it.h;
+            }
             if (!it.label[0] || it.w <= 0 || it.h <= 0)
                 return TRUE;
             return mw_emit(mw, &it);
@@ -3270,9 +3488,12 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
         return TRUE;                     /* hidden: a page not shown */
     /* A control MUI lays out after its Label: string, cycle, slider,
      * checkmark. A button has its own text, a list its own title. */
-    if (!it.label[0] && mw->pending[0] &&
+    mw->next_fallback[0] = '\0';
+    if (!it.label[0] && mw->pending[0] && strcmp(it.kind, "toggle") == 0)
+        copystr(mw->next_fallback, sizeof(mw->next_fallback), mw->pending);
+    else if (!it.label[0] && mw->pending[0] &&
         (strcmp(it.kind, "string") == 0 || strcmp(it.kind, "cycle") == 0 ||
-         strcmp(it.kind, "slider") == 0 || strcmp(it.kind, "toggle") == 0))
+         strcmp(it.kind, "slider") == 0))
         copystr(it.label, sizeof(it.label), mw->pending);
     mw->pending[0] = '\0';
     return mw_emit(mw, &it);
@@ -3280,10 +3501,8 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
 
 /* --- all of it --------------------------------------------------------- */
 
-/* MUI windows are read when MUI 4/5 marked their title bar. Without
- * the mark (MUI 3.8) finding the object would take a search of all
- * memory per window - 20 s on a 68030/50, with Intuition held - so
- * such a window shows only its Intuition gadgets. `deep` is kept for
+/* MUI windows are read when MUI 4/5 marked their title bar, or when
+ * mui3_prescan found them (MUI 3.x leaves no mark). `deep` is kept for
  * the protocol (UI flag 2) and does nothing more. */
 static BOOL ui_items(struct Window *w, BOOL deep, UiSink sink, void *ctx)
 {
@@ -3335,7 +3554,7 @@ static BOOL ui_items(struct Window *w, BOOL deep, UiSink sink, void *ctx)
         }
     }
     (void)deep;
-    if (ui_mui_marked(w)) {
+    if (ui_mui_marked(w) || mui3_known(w)) {
         Object *mo = ui_mui_window(w), *root = NULL;
         Forbid();                        /* the app must not free them
                                           * while they are read */
@@ -3418,6 +3637,7 @@ static BOOL cmd_ui(int fd, ULONG flags)
     if (!buf)
         return send_perr(fd, "out of memory");
 
+    mui3_prescan();                      /* before the lock: see there */
     ib = LockIBase(0);
     active = IntuitionBase->ActiveWindow;
     for (sc = IntuitionBase->FirstScreen; sc && !full; sc = sc->NextScreen) {
@@ -4215,6 +4435,7 @@ static LONG rx_clickgadget(const char *label, struct RxOpts *o)
         !(g_rx_items = AllocMem(sizeof(struct UiItem) * RX_MAX_ITEMS,
                                 MEMF_ANY)))
         return rx_fail(20, "out of memory");
+    mui3_prescan();
     ib = LockIBase(0);
     w = rx_find_window(o->has_window ? o->window : NULL);
     if (!w) {
@@ -6849,6 +7070,7 @@ out:
     if (g_cgfx) CloseLibrary(g_cgfx);
     if (g_keymap) CloseLibrary(g_keymap);
     if (g_gadtools) CloseLibrary(g_gadtools);
+    mui3_close();
     rexxport_close();
     posted_shutdown();
     /* A rexx message left with a slow host still needs the library to
