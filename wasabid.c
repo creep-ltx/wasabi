@@ -60,10 +60,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.9"
+#define VERSION_STR "wasabid 0.10b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.9 (15.10.2026)";
+    "$VER: wasabid 0.10b1 (15.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -2842,7 +2842,11 @@ static BOOL ui_gt_rows(struct Window *w, struct Gadget *g, struct UiItem *box,
         return TRUE;
     if (!g_gadtools)
         g_gadtools = OpenLibrary("gadtools.library", 39);
-    if (!g_gadtools)
+    /* GadTools 39/40 (OS 3.0/3.1) reads private data that its listview's
+     * own scroller and arrow gadgets do not have: GT_GetGadgetAttrs() on
+     * one of them crashed wasabid on the first GadTools window (Input
+     * prefs, 3.1). OS 3.2's gadtools 47 is safe; older ones list no rows. */
+    if (!g_gadtools || g_gadtools->lib_Version < 47)
         return TRUE;
     if (GT_GetGadgetAttrs(g, w, NULL, GTLV_Labels, (ULONG)&labels,
                           GTLV_Top, (ULONG)&top, GTLV_Selected, (ULONG)&sel,
