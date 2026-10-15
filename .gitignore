@@ -18,3 +18,6 @@ wasabid.020
 tls.020.o
 build/
 dist/
+tests/gtwin
+tests/rprobe
+tests/mprobe
