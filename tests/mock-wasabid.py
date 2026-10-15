@@ -55,6 +55,7 @@ KEYIN, WINDOWS, HEALTH, LIVE, CLIP = 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
 MOUSE = 0x4A
 UI, UIACT, AREXX, PORTS = 0x53, 0x54, 0x55, 0x56
 SUM = 0x57
+INPUTS = 0x58
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -68,7 +69,7 @@ BANNER = None
 CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
         "hb,guru,snoopentry,psfree,key,windows,health,live,clip,detach,"
-        "slots,ui,arexx,mouse,sum")
+        "slots,ui,arexx,mouse,sum,inputs")
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -303,6 +304,8 @@ class Handler(socketserver.BaseRequestHandler):
             self.send_data(b"REXX\nWORKBENCH\nAREXX\n")
         elif tag == SUM:
             self.do_sum(payload)
+        elif tag == INPUTS:
+            self.do_inputs(payload)
         elif tag == HEALTH:
             self.do_health()
         elif tag == LIVE:
@@ -449,6 +452,20 @@ class Handler(socketserver.BaseRequestHandler):
             self.send(STDOUT, ("wasabid-selftest-ok %s %s\n"
                                % (nonce, ver)).encode("latin-1"))
             return self.send(EXIT, struct.pack(">II", 0, 0))
+
+        if len(word) == 2 and word[0] == "SYS:Rexxc/RX":
+            # RX on an uploaded program: 'say' lines are printed, 'exit N'
+            # is the rc - enough to prove the round trip.
+            rc = 0
+            with open(self.safe_path(word[1]), encoding="latin-1") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.lower().startswith("say "):
+                        self.send(STDOUT, (line[4:].strip("'\"") + "\n")
+                                  .encode("latin-1"))
+                    elif line.lower().startswith("exit "):
+                        rc = int(line[5:])
+            return self.send(EXIT, struct.pack(">II", rc, 0))
 
         if word[:2] == ["Run", ">NIL:"] and len(word) >= 4:
             # A trial daemon on a spare port: spawn a real second mock,
@@ -625,6 +642,20 @@ class Handler(socketserver.BaseRequestHandler):
         if want and want.lower() not in (t.lower() for t in titles):
             return self.err("no screen with that title")
         self.send(END)
+
+    def do_inputs(self, payload):
+        """INPUTS as wasabid 0.10b4 checks it; each record logged as
+        'kind button wait a b x y', one line per batch."""
+        if not payload or len(payload) % 12 or len(payload) > 12 * 1024:
+            return self.err("bad INPUTS list")
+        recs = [struct.unpack_from(">BBHHHhh", payload, i)
+                for i in range(0, len(payload), 12)]
+        if sum(r[2] for r in recs) > 250:
+            return self.err("INPUTS waits add up to more than 5 s")
+        with open(os.path.join(ROOT, "inputs.log"), "a") as f:
+            f.write(";".join(" ".join(str(v) for v in r) for r in recs)
+                    + "\n")
+        self.send(OK)
 
     def do_key(self, payload):
         """Log what would have been typed, as hex, one line per KEY -

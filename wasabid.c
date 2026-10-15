@@ -61,10 +61,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.10b3"
+#define VERSION_STR "wasabid 0.10b4"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.10b3 (15.10.2026)";
+    "$VER: wasabid 0.10b4 (15.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -86,14 +86,14 @@ static const char *verstag __attribute__((used)) =
 #define CAPS_STR "ping,info,ls,put,get,run,del,mkdir,debug,snoop," \
                  "reboot,restart,ps,kill,speed,speedfile,quit,install," \
                  "grab,screen,hb,guru,snoopentry,psfree,mouse," \
-                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport,plainopt,pointer,sum"
+                 "key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport,plainopt,pointer,sum,inputs"
 
-/* WELCOME is built in a UBYTE[256]: u16 version, counted banner, counted
+/* WELCOME is built in a UBYTE[320]: u16 version, counted banner, counted
  * caps, u32 refused. Growing CAPS_STR past what fits must fail the build
  * here, not scribble past a stack buffer on a machine with no MMU. */
 typedef char welcome_fits_its_buffer[
     (2 + 2 + sizeof(VERSION_STR) - 1 +
-     2 + sizeof(CAPS_STR) - 1 + 4 <= 256) ? 1 : -1];
+     2 + sizeof(CAPS_STR) - 1 + 4 <= 320) ? 1 : -1];
 
 #define DEF_PORT        1234
 #define MAX_PAYLOAD     65536
@@ -146,6 +146,7 @@ typedef char welcome_fits_its_buffer[
 #define T_AREXX   0x55   /* send a command to an ARexx port */
 #define T_PORTS   0x56   /* list the public message ports */
 #define T_SUM     0x57   /* a checksum of a screen region */
+#define T_INPUTS  0x58   /* key and mouse events, timed by the Amiga */
 
 struct Library *SocketBase;
 /*
@@ -2061,10 +2062,11 @@ static void close_input(struct IOStdReq *io)
     DeleteMsgPort(mp);
 }
 
-static const char *do_mouse(ULONG action, ULONG button, ULONG count,
-                            WORD x, WORD y)
+/* The mouse events for one MOUSE command, on an open input.device.
+ * The caller has checked the parameters. */
+static BOOL mouse_events(struct IOStdReq *io, ULONG action, ULONG button,
+                         ULONG count, WORD x, WORD y)
 {
-    struct IOStdReq *io;
     struct InputEvent ie;
     BOOL ok = TRUE;
     static const UWORD codes[3] = {
@@ -2074,12 +2076,6 @@ static const char *do_mouse(ULONG action, ULONG button, ULONG count,
         IEQUALIFIER_LEFTBUTTON, IEQUALIFIER_RBUTTON, IEQUALIFIER_MIDBUTTON
     };
     ULONG i;
-
-    if (button > 2 || count > 3 || action > 3)
-        return "bad INPUT parameters";
-
-    if (!(io = open_input()))
-        return "cannot open input.device";
 
     if (x != INPUT_NOPOS) {
         memset(&ie, 0, sizeof(ie));
@@ -2124,7 +2120,21 @@ static const char *do_mouse(ULONG action, ULONG button, ULONG count,
         ie.ie_Qualifier = g_mouse_held;
         ok = write_input_event(io, &ie);
     }
+    return ok;
+}
 
+static const char *do_mouse(ULONG action, ULONG button, ULONG count,
+                            WORD x, WORD y)
+{
+    struct IOStdReq *io;
+    BOOL ok;
+
+    if (button > 2 || count > 3 || action > 3)
+        return "bad INPUT parameters";
+
+    if (!(io = open_input()))
+        return "cannot open input.device";
+    ok = mouse_events(io, action, button, count, x, y);
     close_input(io);
 
     return ok ? NULL : "input event write failed";
@@ -2184,11 +2194,41 @@ static BOOL key_event(struct IOStdReq *io, UWORD code, UWORD qual,
     return write_input_event(io, &ie);
 }
 
+/* Can the current keymap make character c? (keymap.library is open.) */
+static BOOL can_type(UBYTE c)
+{
+    UBYTE pairs[6];
+    return MapANSI((STRPTR)&c, 1, (STRPTR)pairs, 3, NULL) > 0;
+}
+
+static const char *cannot_type(UBYTE c)
+{
+    static char msg[64];
+    sprintf(msg, "the keymap cannot type character %u (0x%02x)",
+            (unsigned)c, (unsigned)c);
+    return msg;
+}
+
+/* Press and release the keys that make character c, dead keys and all. */
+static BOOL type_char(struct IOStdReq *io, UBYTE c)
+{
+    UBYTE pairs[6];                     /* up to two dead keys + the key */
+    UWORD code, qual;
+    LONG n = MapANSI((STRPTR)&c, 1, (STRPTR)pairs, 3, NULL);
+
+    if (n <= 0 || n > 3)
+        return TRUE;                    /* checked before anything went */
+    code = pairs[(n - 1) * 2];
+    qual = pairs[(n - 1) * 2 + 1];
+    if (!key_event(io, code, qual, pairs, n - 1))
+        return FALSE;
+    return key_event(io, code | IECODE_UP_PREFIX, qual, NULL, 0);
+}
+
 static const char *do_key(ULONG mode, const UBYTE *p, LONG len)
 {
     struct IOStdReq *io;
-    UBYTE pairs[6];                     /* up to two dead keys + the key */
-    LONG i, n;
+    LONG i;
     BOOL ok = TRUE;
 
     if (mode == KEY_RAW && (len % 4) != 0)
@@ -2206,15 +2246,9 @@ static const char *do_key(ULONG mode, const UBYTE *p, LONG len)
     /* Map everything before the first event goes out: a character the
      * keymap cannot make must fail the command, not leave half a line
      * typed into somebody's window. */
-    for (i = 0; mode == KEY_TEXT && i < len; i++) {
-        n = MapANSI((STRPTR)(p + i), 1, (STRPTR)pairs, 3, NULL);
-        if (n <= 0) {
-            static char msg[64];
-            sprintf(msg, "the keymap cannot type character %u (0x%02x)",
-                    (unsigned)p[i], (unsigned)p[i]);
-            return msg;
-        }
-    }
+    for (i = 0; mode == KEY_TEXT && i < len; i++)
+        if (!can_type(p[i]))
+            return cannot_type(p[i]);
 
     if (!(io = open_input()))
         return "cannot open input.device";
@@ -2224,17 +2258,8 @@ static const char *do_key(ULONG mode, const UBYTE *p, LONG len)
             ok = key_event(io, (UWORD)((p[i] << 8) | p[i + 1]),
                            (UWORD)((p[i + 2] << 8) | p[i + 3]), NULL, 0);
     } else {
-        for (i = 0; ok && i < len; i++) {
-            UWORD code, qual;
-            n = MapANSI((STRPTR)(p + i), 1, (STRPTR)pairs, 3, NULL);
-            if (n <= 0 || n > 3)
-                break;                  /* mapped a moment ago */
-            code = pairs[(n - 1) * 2];
-            qual = pairs[(n - 1) * 2 + 1];
-            ok = key_event(io, code, qual, pairs, n - 1);
-            if (ok)
-                ok = key_event(io, code | IECODE_UP_PREFIX, qual, NULL, 0);
-        }
+        for (i = 0; ok && i < len; i++)
+            ok = type_char(io, p[i]);
     }
 
     close_input(io);
@@ -2246,6 +2271,94 @@ static BOOL cmd_key(int fd, ULONG mode, const UBYTE *p, LONG len)
 {
     const char *why = do_key(mode, p, len);
     return why ? send_perr(fd, why) : send_frame(fd, T_OK, NULL, 0);
+}
+
+/* --- INPUTS: a batch of key and mouse events, timed by the Amiga --- */
+
+/*
+ * Separate KEY and MOUSE commands are a network round trip each, so
+ * the gaps between them are whatever the PC and the network make them.
+ * INPUTS sends the whole gesture at once - a drag, a chord, a burst of
+ * typing - and the daemon plays it with Delay() between events, so the
+ * gaps are the Amiga's own ticks (1/50 s), the same every time.
+ *
+ * Payload: 12-byte records, big-endian:
+ *   u8 kind, u8 button, u16 wait, u16 a, u16 b, i16 x, i16 y
+ * kind 0  raw key: a = code (bit 7 = up), b = qualifier
+ * kind 1  character (Latin-1) in a, typed through the keymap as KEY
+ *         text is: the keys that make it, pressed and released
+ * kind 2  mouse: a = action (0 move, 1 click, 2 down, 3 up),
+ *         b = click count, button 0 left 1 right 2 middle, x/y as MOUSE
+ * wait    ticks to Delay() after this event, before the next.
+ *
+ * Every record is checked before the first event goes out, as KEY
+ * text is: a bad one must fail the batch, not leave half a drag done.
+ * The daemon does nothing else while it plays, so the waits are capped
+ * (INPUTS_MAX_TICKS) - a batch is a gesture, not a script.
+ */
+#define INPUTS_REC        12
+#define INPUTS_MAX        1024
+#define INPUTS_MAX_TICKS  250           /* 5 s */
+
+static BOOL cmd_inputs(int fd, const UBYTE *p, LONG len)
+{
+    struct IOStdReq *io;
+    LONG n = len / INPUTS_REC, i;
+    ULONG ticks = 0;
+    BOOL ok = TRUE, chars = FALSE;
+    static char msg[80];
+
+    if (len <= 0 || len % INPUTS_REC || n > INPUTS_MAX)
+        return send_perr(fd, "bad INPUTS list");
+    for (i = 0; i < n; i++) {
+        const UBYTE *r = p + i * INPUTS_REC;
+        UWORD a = (UWORD)((r[4] << 8) | r[5]);
+        UWORD b = (UWORD)((r[6] << 8) | r[7]);
+        ticks += (ULONG)((r[2] << 8) | r[3]);
+        if (r[0] == 1)
+            chars = TRUE;
+        if (r[0] > 2 || (r[0] == 1 && a > 255) ||
+            (r[0] == 2 && (r[1] > 2 || a > 3 || b > 3))) {
+            sprintf(msg, "bad INPUTS event %ld", (long)i + 1);
+            return send_perr(fd, msg);
+        }
+    }
+    if (ticks > INPUTS_MAX_TICKS)
+        return send_perr(fd, "INPUTS waits add up to more than 5 s");
+    if (chars && !g_keymap)
+        g_keymap = OpenLibrary("keymap.library", 37);
+    if (chars && !g_keymap)
+        return send_perr(fd, "cannot open keymap.library");
+    for (i = 0; chars && i < n; i++) {
+        const UBYTE *r = p + i * INPUTS_REC;
+        if (r[0] == 1 && !can_type(r[5]))
+            return send_perr(fd, cannot_type(r[5]));
+    }
+
+    if (!(io = open_input()))
+        return send_perr(fd, "cannot open input.device");
+    for (i = 0; ok && i < n; i++) {
+        const UBYTE *r = p + i * INPUTS_REC;
+        UWORD wait = (UWORD)((r[2] << 8) | r[3]);
+        UWORD a = (UWORD)((r[4] << 8) | r[5]);
+        UWORD b = (UWORD)((r[6] << 8) | r[7]);
+        WORD x = (WORD)((r[8] << 8) | r[9]);
+        WORD y = (WORD)((r[10] << 8) | r[11]);
+        if (r[0] == 0)
+            ok = key_event(io, a, b, NULL, 0);
+        else if (r[0] == 1)
+            ok = type_char(io, (UBYTE)a);
+        else
+            ok = mouse_events(io, a, r[1], b, x, y);
+        if (ok && wait)
+            Delay(wait);
+    }
+    close_input(io);
+    if (!ok) {
+        sprintf(msg, "input event write failed at event %ld", (long)i);
+        return send_perr(fd, msg);
+    }
+    return send_frame(fd, T_OK, NULL, 0);
 }
 
 /* --- every screen and window, as text ------------------------------ */
@@ -2636,7 +2749,9 @@ static LONG ui_menu_line(char *buf, LONG used, struct Menu *m,
         (parent && !(parent->Flags & ITEMENABLED)))
         fl[f++] = 'd';
     if (x->Flags & CHECKIT) fl[f++] = 'c';
-    if (x->Flags & CHECKED) fl[f++] = 'x';
+    /* CHECKED means nothing without CHECKIT (Intuition ignores it), and
+     * some programs leave it set on plain items. */
+    if ((x->Flags & CHECKIT) && (x->Flags & CHECKED)) fl[f++] = 'x';
     if (!(x->Flags & ITEMTEXT)) fl[f++] = 'b';
     if (!f) fl[f++] = '-';
     fl[f] = '\0';
@@ -3025,6 +3140,7 @@ static BOOL ui_reaction(struct Window *w, const void *lay, int depth,
 #define MUIA_List_Visible      0x8042191f
 #define MUIA_List_Active       0x8042391c
 #define MUIA_List_DisplayHook  0x8042b4d5
+#define MUIA_ObjectID          0x8042d76e
 #define MUIM_List_GetEntry     0x804280ec
 #define MUIM_List_TestPos      0x80425f48
 
@@ -3496,6 +3612,10 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
          strcmp(it.kind, "slider") == 0))
         copystr(it.label, sizeof(it.label), mw->pending);
     mw->pending[0] = '\0';
+    /* MUI objects are not gadgets and have no GadgetID; the program's
+     * own MUIA_ObjectID (often set, for its settings) stands in. */
+    if (GetAttr(MUIA_ObjectID, o, &v))
+        it.id = v;
     return mw_emit(mw, &it);
 }
 
@@ -6142,7 +6262,7 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
             return send_perr(fd, "bad key"), FALSE;
         g_clients[cl].hello = TRUE;
         {
-            UBYTE w[256];
+            UBYTE w[320];
             LONG bl = (LONG)strlen(VERSION_STR);
             LONG kl = (LONG)strlen(CAPS_STR);
             LONG n = 0;
@@ -6271,6 +6391,9 @@ static BOOL serve(int cl, UBYTE tag, UBYTE *p, LONG len)
         if (len < 2)
             return send_perr(fd, "bad KEY header");
         return cmd_key(fd, (p[0] << 8) | p[1], p + 2, len - 2);
+
+    case T_INPUTS:
+        return cmd_inputs(fd, p, len);
 
     case T_WINDOWS:
         return cmd_windows(fd);

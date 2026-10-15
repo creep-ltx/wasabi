@@ -40,6 +40,7 @@ KEY, WINDOWS, HEALTH, LIVE, CLIP = 0x4B, 0x4C, 0x4D, 0x4E, 0x4F
 SLOTS, FREE, SLOT = 0x50, 0x51, 0x52
 UI, UIACT, AREXX, PORTS = 0x53, 0x54, 0x55, 0x56   # daemon 0.5+
 SUM = 0x57                       # daemon 0.9 (updated 15.10.2026)+
+INPUTS = 0x58                    # daemon 0.10b4+
 FREE_BREAK_ONLY = 1
 RUN_SLOT = 4            # RUN flag: tell me which slot (daemon 0.4+)
 
@@ -336,7 +337,10 @@ class Conn:
                     raise WasabiError(
                         "%s was reached encrypted before, but this computer "
                         "has no Wasabi keys (%s) - copy the keys folder from "
-                        "the computer that has them" % (peer, keys_dir()))
+                        "the computer that has them. If that Amiga has no "
+                        "encryption now on purpose: 'wasabi keys forget %s' "
+                        "(or --plain for one command)"
+                        % (peer, keys_dir(), peer))
                 tls = False
             else:
                 tls = True
@@ -356,8 +360,10 @@ class Conn:
                         "%s:%d was reached encrypted before and now offers "
                         "no encryption - its AmiSSL or keys are gone, or "
                         "something is pretending to be it. Refusing plain. "
-                        "If you turned it off on purpose: 'wasabi keys "
-                        "forget %s'" % (peer, port, peer))
+                        "If it has no encryption on purpose (no AmiSSL, "
+                        "or another Amiga now answers there): 'wasabi keys "
+                        "forget %s' makes it plain again (or --plain for "
+                        "one command)" % (peer, port, peer))
                 plain_warning(peer)
                 self.sock = self._open(host, port, timeout)
                 self.tls = False
@@ -865,8 +871,10 @@ def cmd_info(conn, args):
         print("refused: %d connection(s) from off the LAN" % conn.refused)
 
 
-def cmd_ls(conn, args):
-    conn.send(LS, pack_str(args.path))
+def ls_entries(conn, path):
+    """(kind 'd'/'f', size, protection bits, date text, name) for each
+    entry in PATH, drawers first, then by name."""
+    conn.send(LS, pack_str(path))
     text = []
     drain_to_end(conn, lambda b: text.append(b))
     entries = []
@@ -880,6 +888,11 @@ def cmd_ls(conn, args):
         entries.append((kind, int(size), int(bits), amiga_date(
             int(days), int(mins), int(ticks)), name))
     entries.sort(key=lambda e: (e[0] != "d", e[4].lower()))
+    return entries
+
+
+def cmd_ls(conn, args):
+    entries = ls_entries(conn, args.path)
     if args.json:
         emit_json([{"name": name, "dir": kind == "d",
                     "size": None if kind == "d" else size,
@@ -1056,7 +1069,7 @@ def stop_command(conn, command, slot=None):
 
 
 def do_run(conn, command, merge=False, detach=False, sink=None,
-           max_time=None):
+           max_time=None, err_sink=None):
     # The daemon holds a command in a 512-byte buffer and strncpy would
     # truncate silently - running half a command is worse than refusing.
     nbytes = len(command.encode("latin-1", "replace"))
@@ -1078,12 +1091,13 @@ def do_run(conn, command, merge=False, detach=False, sink=None,
     old_timeout = conn.sock.gettimeout()
     deadline = time.time() + max_time if max_time else None
     try:
-        return _run_loop(conn, sink, command, deadline, max_time)
+        return _run_loop(conn, sink, command, deadline, max_time,
+                         err_sink or sink)
     finally:
         conn.sock.settimeout(old_timeout)
 
 
-def _run_loop(conn, sink, command, deadline, max_time):
+def _run_loop(conn, sink, command, deadline, max_time, err_sink=None):
     stopping = None                     # when the Ctrl-C went out
     slot = None                         # which run slot, if the daemon says
     while True:
@@ -1140,8 +1154,8 @@ def _run_loop(conn, sink, command, deadline, max_time):
                 sys.stdout.write(payload.decode("latin-1"))
                 sys.stdout.flush()
         elif tag == STDERR:
-            if sink is not None:
-                sink(payload.decode("latin-1"))
+            if err_sink is not None:
+                err_sink(payload.decode("latin-1"))
             else:
                 sys.stderr.write(payload.decode("latin-1"))
                 sys.stderr.flush()
@@ -2460,6 +2474,45 @@ def cmd_clip(conn, args):
           file=sys.stderr)
 
 
+NOPOS = -32768                  # MOUSE x/y: "where the pointer is"
+MOUSE_ACTIONS = {"move": 0, "click": 1, "doubleclick": 1, "down": 2, "up": 3}
+BUTTONS = {"left": 0, "right": 1, "middle": 2}
+
+
+def send_mouse(conn, action, x=None, y=None, button=0, count=1):
+    """One MOUSE command: action 0 move, 1 click (count times), 2 press
+    and hold, 3 release. x/y None: where the pointer already is."""
+    conn.send(MOUSE, struct.pack(">HHHhh", action, button,
+                                 count if action == 1 else 0,
+                                 NOPOS if x is None else x,
+                                 NOPOS if y is None else y))
+    conn.expect_ok()
+
+
+def send_keys(conn, events):
+    """Raw (code, qualifier) key events, in one KEY command."""
+    conn.send(KEY, struct.pack(">H", 0) +
+              b"".join(struct.pack(">HH", c, q) for c, q in events))
+    conn.expect_ok()
+
+
+def latin1(text):
+    try:
+        return text.encode("latin-1")
+    except UnicodeEncodeError as e:
+        raise WasabiError("the Amiga cannot type %r (not Latin-1)"
+                          % text[e.start])
+
+
+def send_text(conn, text):
+    """Type TEXT through the Amiga's own keymap ("\n" is Return)."""
+    data = latin1(text.replace("\r\n", "\n").replace("\n", "\r"))
+    if len(data) > 2048:
+        raise WasabiError("at most 2048 characters per 'key type'")
+    conn.send(KEY, struct.pack(">H", 1) + data)
+    conn.expect_ok()
+
+
 def cmd_mouse(conn, args):
     """Move the pointer and click - drive GUIs remotely.
 
@@ -2469,7 +2522,6 @@ def cmd_mouse(conn, args):
     event timestamps. Coordinates are absolute screen pixels in the
     same space `grab` delivers - grab, look, click.
     """
-    NOPOS = -32768
     if args.action == "wheel":
         return mouse_wheel(conn, args)
     if args.action == "where":
@@ -2493,22 +2545,11 @@ def cmd_mouse(conn, args):
             args.y *= screens[0]["row_scale"]
     if isinstance(args.x, str) or isinstance(args.y, str):
         raise WasabiError("up and down are for 'mouse wheel'")
-    if args.action == "move":
-        if args.x is None or args.y is None:
-            raise WasabiError("mouse move needs X and Y")
-        action, count = 0, 0
-    elif args.action == "down":
-        action, count = 2, 0
-    elif args.action == "up":
-        action, count = 3, 0
-    else:
-        action = 1
-        count = 2 if args.action == "doubleclick" else 1
-    x = NOPOS if args.x is None else args.x
-    y = NOPOS if args.y is None else args.y
+    if args.action == "move" and (args.x is None or args.y is None):
+        raise WasabiError("mouse move needs X and Y")
     button = 1 if args.right else (2 if args.middle else 0)
-    conn.send(MOUSE, struct.pack(">HHHhh", action, button, count, x, y))
-    conn.expect_ok()
+    send_mouse(conn, MOUSE_ACTIONS[args.action], args.x, args.y, button,
+               2 if args.action == "doubleclick" else 1)
 
 
 def mouse_arg(v):
@@ -2536,10 +2577,7 @@ def mouse_wheel(conn, args):
         raise WasabiError(
             "this daemon (%s) has no keyboard, so no wheel - update it "
             "with 'wasabi update wasabid'" % conn.banner)
-    events = key_combo_events("wheel" + args.x) * n
-    conn.send(KEY, struct.pack(">H", 0) +
-              b"".join(struct.pack(">HH", c, q) for c, q in events))
-    conn.expect_ok()
+    send_keys(conn, key_combo_events("wheel" + args.x) * n)
 
 
 # Amiga raw key codes - key *positions*, the same on every Amiga
@@ -2625,24 +2663,12 @@ def cmd_key(conn, args):
             "this daemon (%s) has no keyboard - update it with "
             "'wasabi update wasabid'" % conn.banner)
     if args.action == "type":
-        text = " ".join(args.keys).replace("\r\n", "\n").replace("\n", "\r")
-        if args.enter:
-            text += "\r"
-        try:
-            data = text.encode("latin-1")
-        except UnicodeEncodeError as e:
-            raise WasabiError("the Amiga cannot type %r (not Latin-1)"
-                              % text[e.start])
-        if len(data) > 2048:
-            raise WasabiError("at most 2048 characters per 'key type'")
-        conn.send(KEY, struct.pack(">H", 1) + data)
+        send_text(conn, " ".join(args.keys) + ("\r" if args.enter else ""))
     else:
         events = []
         for combo in args.keys:
             events += key_combo_events(combo)
-        conn.send(KEY, struct.pack(">H", 0) +
-                  b"".join(struct.pack(">HH", c, q) for c, q in events))
-    conn.expect_ok()
+        send_keys(conn, events)
 
 
 def row_scale(w, h):
@@ -2704,10 +2730,10 @@ def find_window(screens, title):
     return None, None
 
 
-def native_out(screens):
+def native_out(screens, native=None):
     """With --native: the screen's own pixels in what is shown - undo
     the picture's row doubling in every y and height."""
-    if not NATIVE:
+    if not (NATIVE if native is None else native):
         return screens
     for sc in screens:
         k = sc["row_scale"]
@@ -2853,9 +2879,10 @@ def ui_match(name, items, key):
     return []
 
 
-def find_gadget(screens, label, window=None, kind=None, nth=None):
+def find_gadget(screens, label, window=None, kind=None, nth=None, gid=None):
     """(screen, window, gadget) for LABEL. A system kind name (close,
-    depth, zoom, size, drag) finds that border gadget. The frontmost
+    depth, zoom, size, drag) finds that border gadget. gid: the gadget
+    whose GadgetID is that (with or without a label). The frontmost
     window with a match wins; two matches there need --nth."""
     pairs = ui_windows(screens, window)
     if not pairs:
@@ -2865,7 +2892,9 @@ def find_gadget(screens, label, window=None, kind=None, nth=None):
         # Plain text (an MUI label) is never what is meant by a click.
         gads = [g for g in w["gadgets"] if (g["kind"] == kind if kind
                                             else g["kind"] != "label")]
-        if not label and kind:          # "the string gadget"
+        if gid is not None:
+            gads = [g for g in gads if g["id"] == gid and g["kind"] != "row"]
+        if not label and (kind or gid is not None):  # "the string gadget"
             hits = gads
         elif ui_norm(label) in SYSTEM_KINDS:
             hits = [g for g in gads if g["kind"] == ui_norm(label)]
@@ -2886,8 +2915,10 @@ def find_gadget(screens, label, window=None, kind=None, nth=None):
                                                      g["x"], g["y"])
                              for g in hits[:8])))
         return sc, w, hits[0]
-    raise WasabiError("no gadget %r%s - 'wasabi ui list' shows what there is"
-                      % (label or kind, " in a window titled %r" % window
+    what = "id %d" % gid if gid is not None and not label else \
+        repr(label or kind)
+    raise WasabiError("no gadget %s%s - 'wasabi ui list' shows what there is"
+                      % (what, " in a window titled %r" % window
                          if window else " on the front screen"))
 
 
@@ -2908,11 +2939,13 @@ def ui_front(conn, w):
     time.sleep(0.3)                     # Intuition does it in its own time
 
 
-def ui_click(conn, label, window=None, kind=None, nth=None, double=False):
-    """Click a gadget by name. Brings its window (and screen) to the
-    front first when something would be in the way. Returns the gadget."""
+def ui_click(conn, label, window=None, kind=None, nth=None, double=False,
+             gid=None):
+    """Click a gadget by name (or GadgetID). Brings its window (and
+    screen) to the front first when something would be in the way.
+    Returns (window, gadget)."""
     screens = read_ui(conn, every_screen=window is not None)
-    sc, w, g = find_gadget(screens, label, window, kind, nth)
+    sc, w, g = find_gadget(screens, label, window, kind, nth, gid)
     if g["disabled"]:
         raise WasabiError("\"%s\" is disabled (ghosted)" % g["label"])
     if g["kind"] == "row" and not g["height"]:
@@ -2921,8 +2954,20 @@ def ui_click(conn, label, window=None, kind=None, nth=None, double=False):
     x, y = g["x"] + g["width"] // 2, g["y"] + g["height"] // 2
     if not sc["front"] or covered(sc, w, x, y):
         ui_front(conn, w)
-    conn.send(MOUSE, struct.pack(">HHHhh", 1, 0, 2 if double else 1, x, y))
-    conn.expect_ok()
+    send_mouse(conn, 1, x, y, 0, 2 if double else 1)
+    return w, g
+
+
+def ui_set(conn, label, text, window=None, kind=None, nth=None, gid=None,
+           enter=True):
+    """Fill a text field: click it, clear it (Right Amiga+X), type, and
+    Return so the program hears GADGETUP, as from a person."""
+    w, g = ui_click(conn, label, window, kind, nth, gid=gid)
+    if g["kind"] not in ("string", "integer", "custom", "cycle"):
+        raise WasabiError('"%s" is a %s, not a text field'
+                          % (g["label"], g["kind"]))
+    send_keys(conn, key_combo_events("ramiga+x"))
+    send_text(conn, text + ("\r" if enter else ""))
     return w, g
 
 
@@ -3006,9 +3051,9 @@ def cmd_ui(conn, args):
                                  "  [selected]" if g["selected"] else ""))
                         continue
                     flags = [n for n in ("disabled", "selected") if g[n]]
-                    print('  %-8s %-24s at %d,%d %dx%d%s%s%s'
+                    print('  %-8s %-24s id %-4d at %d,%d %dx%d%s%s%s'
                           % (g["kind"], '"%s"' % g["label"] if g["label"]
-                             else "-", g["x"], g["y"], g["width"],
+                             else "-", g["id"], g["x"], g["y"], g["width"],
                              g["height"],
                              "  (%s)" % g["class"] if g["class"] else "",
                              '  value "%s"' % g["value"] if g["value"] and
@@ -3032,35 +3077,23 @@ def cmd_ui(conn, args):
         ui_front(conn, pairs[0][1])
         print('"%s" is in front and active' % pairs[0][1]["title"])
         return
-    if not args.name and not (args.kind and args.action in ("click", "set")):
+    by_kind = (args.kind or args.id is not None) and \
+        args.action in ("click", "set")
+    if args.id is not None and args.action == "set" and args.text is None:
+        args.name, args.text = None, args.name   # ui set --id 4 TEXT
+    if not args.name and not by_kind:
         raise WasabiError("ui %s needs a name" % args.action)
     if args.action == "click":
         w, g = ui_click(conn, args.name, args.window, args.kind, args.nth,
-                        args.double)
+                        args.double, gid=args.id)
         print('clicked %s "%s" in "%s"' % (g["kind"], g["label"] or "-",
                                            w["title"]))
     elif args.action == "set":
         if args.text is None:
             raise WasabiError("ui set needs the text: "
                               "wasabi ui set NAME TEXT")
-        w, g = ui_click(conn, args.name, args.window,
-                        args.kind, args.nth)
-        if g["kind"] not in ("string", "integer", "custom", "cycle"):
-            raise WasabiError('"%s" is a %s, not a text field'
-                              % (g["label"], g["kind"]))
-        # Right Amiga+X clears a string gadget; then type, then Return
-        # so the program hears GADGETUP, as it would from a person.
-        conn.send(KEY, struct.pack(">H", 0) + b"".join(
-            struct.pack(">HH", c, q) for c, q in key_combo_events("ramiga+x")))
-        conn.expect_ok()
-        text = args.text + ("" if args.no_enter else "\r")
-        try:
-            data = text.encode("latin-1")
-        except UnicodeEncodeError as e:
-            raise WasabiError("the Amiga cannot type %r (not Latin-1)"
-                              % text[e.start])
-        conn.send(KEY, struct.pack(">H", 1) + data)
-        conn.expect_ok()
+        w, g = ui_set(conn, args.name, args.text, args.window, args.kind,
+                      args.nth, args.id, enter=not args.no_enter)
         print('set "%s" in "%s"' % (g["label"] or g["kind"], w["title"]))
     elif args.action == "menu":
         w, m = ui_menu(conn, args.name, args.window)
@@ -3127,6 +3160,17 @@ def cmd_arexx(conn, args):
         return 0
     if not args.command:
         raise WasabiError("wasabi arexx PORT COMMAND - what to send?")
+    if args.rexxport in ("REXX", "AREXX"):
+        # ARexx's own ports take a macro *name*, not a program, and
+        # AREXX does not even wait for it: run the text with RX instead,
+        # so its output and its rc come back.
+        out = [] if args.json else None
+        rc = rexx_program(conn, " ".join(args.command),
+                          sink=out.append if out is not None else None,
+                          max_time=args.timeout)
+        if args.json:
+            emit_json({"rc": rc, "rc2": 0, "result": "".join(out)})
+        return rc if 0 <= rc < 256 else 1
     rc, rc2, result = arexx(conn, args.rexxport, " ".join(args.command),
                             args.timeout)
     if args.json:
@@ -3137,6 +3181,186 @@ def cmd_arexx(conn, args):
     else:
         print("wasabi: %s answered rc %d (%d)" % (args.rexxport, rc, rc2),
               file=sys.stderr)
+    return rc if 0 <= rc < 256 else 1
+
+
+# --- input batches: a gesture timed by the Amiga ------------------------
+
+INPUTS_MAX_TICKS = 250                   # what the daemon allows (5 s)
+
+
+def input_events(steps, gap=1):
+    """Turn steps into INPUTS records [kind, button, wait, a, b, x, y].
+
+    A step is a string (or a list of words):
+      key COMBO...      raw keys by name: 'key ramiga+w', 'key a b c'
+      type TEXT         characters through the Amiga's keymap
+      move X Y          the pointer
+      click|double|down|up [X Y] [left|right|middle]
+      wait N            N more ticks (1/50 s) after the event before it
+    gap: ticks between one event and the next (0 = back to back)."""
+    out = []
+    for step in steps:
+        words = step.split() if isinstance(step, str) else list(step)
+        if not words:
+            continue
+        verb, rest = words[0].lower(), words[1:]
+        if verb == "wait":
+            if len(rest) != 1 or not rest[0].isdigit():
+                raise WasabiError("wait N - a number of ticks (1/50 s)")
+            if not out:
+                raise WasabiError("a batch cannot start with wait")
+            out[-1][2] += int(rest[0])
+        elif verb == "key":
+            if not rest:
+                raise WasabiError("key needs a key name, e.g. key ramiga+w")
+            for combo in rest:
+                for code, qual in key_combo_events(combo):
+                    out.append([0, 0, gap, code, qual, 0, 0])
+        elif verb == "type":
+            text = step.split(None, 1)[1] if isinstance(step, str) and \
+                len(words) > 1 else " ".join(rest)
+            for c in latin1(text.replace("\n", "\r")):
+                out.append([1, 0, gap, c, 0, 0, 0])
+        elif verb in ("move", "click", "double", "doubleclick", "down",
+                      "up"):
+            button = 0
+            if rest and rest[-1].lower() in BUTTONS:
+                button = BUTTONS[rest.pop().lower()]
+            if len(rest) not in (0, 2):
+                raise WasabiError("%s [X Y] - two numbers or none" % verb)
+            try:
+                x, y = (int(rest[0]), int(rest[1])) if rest else \
+                    (NOPOS, NOPOS)
+            except ValueError:
+                raise WasabiError("%s X Y - numbers, not %r"
+                                  % (verb, " ".join(rest)))
+            if verb == "move" and not rest:
+                raise WasabiError("move needs X and Y")
+            action = MOUSE_ACTIONS["doubleclick" if verb == "double"
+                                   else verb]
+            count = 2 if verb.startswith("double") else \
+                1 if action == 1 else 0
+            out.append([2, button, gap, action, count, x, y])
+        else:
+            raise WasabiError(
+                "unknown step %r - key, type, move, click, double, down, "
+                "up or wait" % verb)
+    if not out:
+        raise WasabiError("nothing to send")
+    out[-1][2] = max(0, out[-1][2] - gap)  # no gap after the last event
+    return out
+
+
+def send_inputs(conn, records, native_scale=1):
+    """Play INPUTS records on the Amiga; returns when the last is done.
+    native_scale: the row doubling to apply to mouse y (--native)."""
+    if conn.caps and "inputs" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) cannot play a timed batch - update it with "
+            "'wasabi update wasabid' (0.10b4 or newer)" % conn.banner)
+    if len(records) > 1024:
+        raise WasabiError("at most 1024 events per batch (this has %d)"
+                          % len(records))
+    ticks = sum(r[2] for r in records)
+    if ticks > INPUTS_MAX_TICKS:
+        raise WasabiError("the waits add up to %d ticks (%.1f s); a batch "
+                          "may take 5 s - split it" % (ticks, ticks / 50.0))
+    blob = b""
+    for kind, button, wait, a, b, x, y in records:
+        if kind == 2 and native_scale != 1 and y != NOPOS:
+            y *= native_scale
+        blob += struct.pack(">BBHHHhh", kind, button, wait, a, b, x, y)
+    conn.send(INPUTS, blob)
+    old = conn.sock.gettimeout()
+    conn.sock.settimeout(max(SILENCE, ticks / 50.0 + 10))
+    try:
+        conn.expect_ok()
+    finally:
+        conn.sock.settimeout(old)
+
+
+def cmd_input(conn, args):
+    """A batch of key and mouse events in one request, played by the
+    Amiga with fixed gaps (ticks of 1/50 s) between them."""
+    steps = list(args.steps)
+    if args.file:
+        fh = sys.stdin if args.file == "-" else open(args.file)
+        with fh:
+            steps += [l.split("#", 1)[0].strip() if not
+                      l.lstrip().lower().startswith("type ") else
+                      l.rstrip("\n") for l in fh]
+        steps = [l for l in steps if l.strip()]
+    records = input_events(steps, args.gap)
+    k = 1
+    if NATIVE and any(r[0] == 2 and r[6] != NOPOS for r in records):
+        screens, _ = list_windows(conn)
+        k = screens[0]["row_scale"] if screens else 1
+    send_inputs(conn, records, k)
+    ticks = sum(r[2] for r in records)
+    print("played %d event(s) over %.2f s" % (len(records), ticks / 50.0),
+          file=sys.stderr)
+
+
+# --- ARexx programs -------------------------------------------------------
+
+def rexx_program(conn, program, sink=None, max_time=None):
+    """Run an ARexx program (its text) with RX and return its rc; what it
+    SAYs streams to sink (or stdout). The program goes to T: and is
+    deleted again."""
+    name = "T:wasabi-%08x.rexx" % random.getrandbits(32)
+    if not program.lstrip().startswith("/*"):
+        program = "/* wasabi */\n" + program   # ARexx wants the comment
+    put_bytes(conn, latin1(program.replace("\r\n", "\n")), name)
+    out = sink or (lambda t: (sys.stdout.write(t), sys.stdout.flush()))
+    held = {"line": None, "part": ""}    # the last whole line waits
+
+    def lines(text):
+        *done, held["part"] = (held["part"] + text).split("\n")
+        for line in done:
+            if held["line"] is not None:
+                out(held["line"] + "\n")
+            held["line"] = line
+    try:
+        rc = do_run(conn, "SYS:Rexxc/RX " + name, merge=True, sink=lines,
+                    max_time=max_time)
+        # RX itself says "Command returned N" after a program that
+        # returns non-zero; the rc says it already.
+        last = held["line"]
+        if last is not None and not re.fullmatch(r"Command returned -?\d+",
+                                                 last.strip()):
+            out(last + "\n")
+        if held["part"]:
+            out(held["part"])
+        return rc
+    finally:
+        try:
+            conn.send(DEL, pack_str(name))
+            conn.expect_ok()
+        except (OSError, WasabiError):
+            pass
+
+
+def cmd_rexx(conn, args):
+    """Run an ARexx program: its output comes back, the exit code is
+    its rc. The program is the arguments, a file, or - for stdin."""
+    if args.file:
+        if args.file == "-":
+            program = sys.stdin.read()
+        else:
+            with open(args.file, encoding="latin-1") as fh:
+                program = fh.read()
+        if args.program:
+            raise WasabiError("a program, or --file, not both")
+    elif args.program:
+        program = " ".join(args.program)
+    else:
+        raise WasabiError("wasabi rexx 'say 1+1' - which program?")
+    out = [] if args.json else None
+    rc = rexx_program(conn, program, sink=out.append if out is not None
+                      else None, max_time=args.max_time)
+    if args.json:
+        emit_json({"rc": rc, "output": "".join(out)})
     return rc if 0 <= rc < 256 else 1
 
 
@@ -3750,7 +3974,7 @@ def load_config():
 
 
 JSON_COMMANDS = ("ls", "ps", "screen", "windows", "ping", "run", "wait",
-                 "grab", "health", "slots", "ui", "arexx", "mouse")
+                 "grab", "health", "slots", "ui", "arexx", "mouse", "rexx")
 
 
 def main(argv=None):
@@ -4106,6 +4330,9 @@ def main(argv=None):
     s.add_argument("--kind", help="only gadgets of this kind (button, "
                    "string, toggle, prop, custom, ...)")
     s.add_argument("--nth", type=int, help="the Nth of several matches")
+    s.add_argument("--id", type=int, metavar="N",
+                   help="click/set: the gadget whose GadgetID is N (the id "
+                        "'ui list' shows; stays put when the layout moves)")
     s.add_argument("--double", action="store_true", help="double-click")
     s.add_argument("--no-enter", action="store_true",
                    help="set: do not press Return after the text")
@@ -4138,6 +4365,29 @@ def main(argv=None):
     s.add_argument("--timeout", type=float, default=30,
                    help="seconds to wait for the answer (default 30)")
     s.set_defaults(fn=cmd_arexx)
+
+    s = sub.add_parser("rexx", help="run an ARexx program; its output "
+                       "comes back, the exit code is its rc")
+    s.add_argument("program", nargs="*",
+                   help="the program text, e.g. 'say 1+1'")
+    s.add_argument("--file", "-f", metavar="FILE",
+                   help="the program from a file on this computer (- for "
+                        "stdin)")
+    s.add_argument("--max-time", type=float, metavar="S",
+                   help="stop it with Ctrl-C after S seconds")
+    s.set_defaults(fn=cmd_rexx)
+
+    s = sub.add_parser("input", help="a batch of key and mouse events, "
+                       "played by the Amiga with fixed gaps")
+    s.add_argument("steps", nargs="*",
+                   help="steps: 'key ramiga+w', 'type hello', 'move X Y', "
+                        "'click [X Y]', 'double', 'down [X Y]', 'up [X Y]' "
+                        "(+ right/middle), 'wait N'")
+    s.add_argument("--gap", type=int, default=1, metavar="TICKS",
+                   help="ticks (1/50 s) between events (default 1)")
+    s.add_argument("--file", "-f", metavar="FILE",
+                   help="steps from a file, one per line (- for stdin)")
+    s.set_defaults(fn=cmd_input)
 
     s = sub.add_parser("screen", help="list screens; flip between them")
     s.add_argument("--list", action="store_true",
@@ -4234,7 +4484,8 @@ def main(argv=None):
              "mouse": "mouse", "key": "key",
              "windows": "windows", "health": "health",
              "clip": "clip", "slots": "slots", "free": "slots",
-             "ui": "ui", "arexx": "arexx", "sum": "sum"}.get(args.cmd)
+             "ui": "ui", "arexx": "arexx", "sum": "sum",
+             "input": "inputs"}.get(args.cmd)
     if args.cmd == "wait":
         needs = {"window": "windows", "change": "grab",
                  "still": "grab"}.get(args.what)

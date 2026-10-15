@@ -63,12 +63,19 @@ wasabi key type TEXT [--enter]
 wasabi key press KEY...      press keys by name: return, esc, f1-f12, up,
                              home, end, pageup, pagedown, insert, kp0-kp9,
                              kpenter, ramiga+w, ctrl+c, or a code: 0x45
+wasabi input STEP... [--gap TICKS] [--file F]
+                             a batch of key and mouse events in one
+                             request, played by the Amiga with fixed gaps
+                             (ticks of 1/50 s): 'down 10 20' 'move 200 20'
+                             'wait 5' 'up' 'key ramiga+w' 'type hello'
 wasabi ui list|menus [--window T] [--all-screens]
-                             gadgets and menu items by name
+                             gadgets (with their GadgetID) and menu items
 wasabi ui click NAME [--window T] [--kind K] [--nth N] [--double]
                              click a gadget by its label (or close,
                              depth, zoom, size, drag)
-wasabi ui set NAME TEXT [--no-enter]   fill a text field
+wasabi ui click --id N       click the gadget with that GadgetID - stays
+                             right when the layout moves
+wasabi ui set NAME TEXT [--no-enter]   fill a text field (or --id N TEXT)
 wasabi ui menu PATH [--window T]       pick 'Project/Save As' or 'Quit'
 wasabi ui front TITLE        bring a window to the front, activate it
 wasabi keys init|amiga NAME|drive DIR NAME|show|forget HOST
@@ -78,6 +85,29 @@ wasabi mcp                   the MCP server on stdin/stdout, for AI
 wasabi arexx PORT COMMAND [--timeout S]
                              send an ARexx command, print RESULT; exit
                              code = its rc. No PORT: list the ports
+wasabi rexx 'PROGRAM' | --file F [--max-time S]
+                             run an ARexx program: what it SAYs comes
+                             back, the exit code is its rc ('arexx REXX'
+                             and 'arexx AREXX' do the same)
+```
+
+### `wasabi input` steps
+
+```
+key COMBO...                 keys by name, as 'key press': ramiga+w esc
+type TEXT                    characters, through the Amiga's keymap
+move X Y                     the pointer
+click|double|down|up [X Y]   a button (left; add right or middle)
+wait N                       N more ticks after the step before it
+```
+
+Each step is one argument (quote it), or one line of `--file` (`-` is
+stdin; `#` starts a comment). `--gap` is the wait between every two
+events (default 1 tick; 0 = back to back). The waits may add up to
+5 s per batch. A drag that Intuition sees as a drag:
+
+```
+wasabi input "down 100 50" "move 140 50" "move 180 50" "wait 5" "up"
 ```
 
 `--native` (or `coords = native` in the config, or

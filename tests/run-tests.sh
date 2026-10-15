@@ -1387,6 +1387,75 @@ kill -0 $VIEW_PID 2>/dev/null; check "update: a new version stamp ends the serve
 rm -f .deployed
 kill $VIEW_PID 2>/dev/null
 
+# --- spotUP's gaps (0.10b4): gadget ids, input batches, rexx, the API ---
+rm -f "$ROOT/ui.log"
+$W ui click No >/dev/null 2>&1; bylabel=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+$W ui click --id 2 >/dev/null 2>&1; byid=$(tail -1 "$ROOT/ui.log" 2>/dev/null)
+check "ui click --id clicks the same gadget as its label" "$bylabel" "$byid"
+out=$($W ui list 2>&1 | grep -c '"No" *id 2 ')
+check "ui list shows each gadget's id" "1" "$out"
+out=$($W ui click --id 99 2>&1 | grep -c "no gadget id 99")
+check "an unknown id is named in the error" "1" "$out"
+
+rm -f "$ROOT/inputs.log"
+$W input "down 10 20" "move 200 20" "wait 5" "up" "key ramiga+w" "type hi" >/dev/null 2>&1
+out=$(tail -1 "$ROOT/inputs.log" 2>/dev/null)
+check "input: one batch, gaps in ticks, waits added, none after the last" \
+  "2 0 1 2 0 10 20;2 0 6 0 0 200 20;2 0 1 3 0 -32768 -32768;0 0 1 103 128 0 0;0 0 1 17 128 0 0;0 0 1 145 128 0 0;0 0 1 231 0 0 0;1 0 1 104 0 0 0;1 0 0 105 0 0 0" "$out"
+printf 'click 5 6 right\n# a comment\nwait 2\ntype a b\n' > "$ROOT/steps.txt"
+$W input --gap 0 --file "$ROOT/steps.txt" >/dev/null 2>&1
+out=$(tail -1 "$ROOT/inputs.log" 2>/dev/null)
+check "input --file: right button, comments, typed spaces kept" \
+  "2 1 2 1 1 5 6;1 0 0 97 0 0 0;1 0 0 32 0 0 0;1 0 0 98 0 0 0" "$out"
+out=$($W input "click" "wait 300" 2>&1 | grep -c "split it")
+check "input: more than 5 s of waits is refused here" "1" "$out"
+out=$($W input "jump 3" 2>&1 | grep -c "unknown step")
+check "input: an unknown step is named" "1" "$out"
+
+mkdir -p "$ROOT/T"
+out=$($W rexx "say 'hello from rexx'" 2>&1)
+check "rexx: what the program says comes back" "hello from rexx" "$out"
+$W rexx "exit 7" >/dev/null 2>&1; rc=$?
+check "rexx: the exit code is its rc" "7" "$rc"
+out=$($W arexx REXX "say 'via the port'" 2>&1)
+check "arexx REXX runs the text as a program" "via the port" "$out"
+out=$(ls "$ROOT/T" | grep -c rexx)
+check "rexx: the program in T: is deleted again" "0" "$out"
+
+cat > "$ROOT/api.py" <<'PYAPI'
+import sys; sys.path.insert(0, ".")
+import wasabi_client as wc
+with wc.connect() as a:
+    r = a.run("echo hi; echo oops >&2; exit 3")
+    print(wc.API_VERSION, a.banner.startswith("mock"), "inputs" in a.caps)
+    print(r.rc, repr(r.stdout), repr(r.stderr))
+    print(a.rexx("say 'x'\nexit 2"))
+    a.input(["click 1 2"])
+    g = a.ui_click(id=2)
+    print(g["label"], a.ui(window="Question")[0]["title"])
+    img = a.grab()
+    print(img.width > 0, len(img.rgb) == img.width * img.height * 3)
+    print(len(a.windows()) >= 1, a.pointer())
+    a.write("T:api.txt", "abc"); print(a.read("T:api.txt"))
+    print([e.name for e in a.ls("T:") if e.name.startswith("api")])
+    a.delete("T:api.txt")
+    try:
+        a.ui_click("Nothing like this")
+    except wc.WasabiError as e:
+        print("error ok")
+PYAPI
+out=$(WASABI_HOST=127.0.0.1 WASABI_PORT=$PORT WASABI_KEY=$KEY python3 "$ROOT/api.py" 2>&1)
+check "the Python API: run, rexx, input, ui, grab, files, errors" \
+"1.0 True True
+3 'hi\n' 'oops\n'
+RunResult(rc=2, stdout='x\n', stderr='')
+No Question
+True True
+True (320, 200)
+b'abc'
+['api.txt']
+error ok" "$out"
+
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")
 if [ "$out" -ge 1 ]; then ok "a missing file reports an error"

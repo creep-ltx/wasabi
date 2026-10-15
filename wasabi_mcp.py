@@ -139,6 +139,8 @@ def _where(a, args):
         args += ["--kind", a["kind"]]
     if a.get("nth"):
         args += ["--nth", a["nth"]]
+    if a.get("id") is not None:
+        args += ["--id", int(a["id"])]
     return args
 
 
@@ -243,6 +245,21 @@ def t_arexx(a):
     return text("rc %d (secondary %d)%s" % (r["rc"], r["rc2"],
                                             ("\n" + r["result"]) if
                                             r["result"] else ""))
+
+
+def t_rexx(a):
+    args = ["rexx"]
+    if a.get("max_time"):
+        args += ["--max-time", a["max_time"]]
+    rc, out, err = wasabi(*args, "--", a["program"],
+                          timeout=float(a.get("max_time") or 600) + 30)
+    body = out + (("\n" + err) if err.strip() else "")
+    return text("%s\n[rc %d]" % (body.rstrip(), rc))
+
+
+def t_input(a):
+    ok("input", "--gap", int(a.get("gap", 1)), "--", *a["steps"], timeout=30)
+    return text("played")
 
 
 def t_arexx_ports(a):
@@ -396,12 +413,15 @@ TOOLS = [
      S(name=STR("the gadget's label"), window=STR("part of the window title"),
        kind=STR("button, string, toggle, custom, ..."),
        nth=NUM("which of several matches, from 1"),
+       id=NUM("the gadget's id from amiga_ui_list (GadgetID); stays right "
+              "when the layout moves"),
        double=BOOL("double-click"))),
     ("amiga_ui_set", t_ui_set, "Fill a text field: click it, clear it, type "
      "the text, press Return.",
      S(name=STR("the field's label"), text=STR("what to type", True),
        window=STR("part of the window title"), kind=STR("e.g. string"),
        nth=NUM("which of several matches"),
+       id=NUM("the field's id from amiga_ui_list"),
        no_enter=BOOL("do not press Return"))),
     ("amiga_ui_menu", t_ui_menu, "Pick a menu item by name, e.g. "
      "'Project/Save As' or just 'Quit'. Works without moving the mouse.",
@@ -420,6 +440,21 @@ TOOLS = [
      {"type": "object", "required": ["keys"], "properties": {
          "keys": {"type": "array", "items": {"type": "string"},
                   "description": "one or more key names"}}}),
+    ("amiga_input", t_input, "Play a gesture in one request, timed by the "
+     "Amiga (ticks of 1/50 s between events): a drag, a key chord, a burst "
+     "of typing. Steps: 'key ramiga+w', 'type hello', 'move X Y', "
+     "'click [X Y]', 'double [X Y]', 'down [X Y]', 'up [X Y]' (add 'right' "
+     "or 'middle'), 'wait N' (more ticks). At most 5 s of waits.",
+     {"type": "object", "required": ["steps"], "properties": {
+         "steps": {"type": "array", "items": {"type": "string"},
+                   "description": "the steps, in order"},
+         "gap": {"type": "integer",
+                 "description": "ticks between events (default 1)"}}}),
+    ("amiga_rexx", t_rexx, "Run an ARexx program (its text): what it SAYs "
+     "comes back, with its rc. For ARexx itself - amiga_arexx is for "
+     "other programs' ports.",
+     S(program=STR("the ARexx program, e.g. say 1+1", True),
+       max_time=NUM("stop it after this many seconds"))),
     ("amiga_arexx", t_arexx, "Send a command to a program's ARexx port and "
      "get its RESULT. amiga_arexx_ports lists the ports.",
      S(port=STR("port name, case sensitive (e.g. WORKBENCH)", True),

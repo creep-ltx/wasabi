@@ -45,6 +45,7 @@ and its DOS calls, live, while your code runs on real hardware.
 | **Windows and screens** | every screen and window as text: title, place, size, owner; bring one to the front |
 | **Wait** | for a window, a task or a file to appear or go, or for the screen (a window, a region) to change or settle |
 | **Has it changed?** | a checksum of the screen, a window or a region, worked out on the Amiga - eight bytes instead of a picture |
+| **Timed input** | a drag, a key chord or a burst of typing in one request, played by the Amiga with exact gaps of 1/50 s |
 | **Coordinates** | the picture's pixels, or with `--native` the screen's own |
 
 [More: The screen and the GUI](docs/screen-and-gui.md)
@@ -61,7 +62,7 @@ $ wasabi ui menu "Project/Quit"
 ```
 
 - **Gadgets** - buttons, text fields, checkboxes, choosers, sliders, by
-  their label; fill a text field in one step.
+  their label or their GadgetID; fill a text field in one step.
 - **Menus** - pick an item by its path or name, without the mouse.
 - **List rows** - the entries of a list, clickable by their text.
 - **Where it works** - Intuition, GadTools, ReAction, MUI 4 and 5, and
@@ -91,6 +92,8 @@ $ wasabi ui menu "Project/Quit"
 
 - **`wasabi arexx PORT COMMAND`** - send to any program's ARexx port and
   get its RESULT; list the ports.
+- **`wasabi rexx 'say 1+1'`** - run an ARexx program; its output comes
+  back and its rc is the exit code.
 - **The `WASABI` ARexx port** - Amiga scripts and programs can type,
   press keys, click, click gadgets by name and pick menus, with no PC
   involved.
@@ -99,7 +102,10 @@ $ wasabi ui menu "Project/Quit"
 
 - **For scripts** - `--json` on everything that lists, clear exit codes,
   time limits, `wait` instead of sleeping.
-- **MCP server** (`wasabi mcp`) - 26 tools for Claude Code, Claude
+- **Python API** (`wasabi_client.py`) - `import wasabi_client`: connect,
+  run, files, keys, mouse, timed input, grab, windows, gadgets and menus,
+  ARexx, as a documented, versioned API.
+- **MCP server** (`wasabi mcp`) - 28 tools for Claude Code, Claude
   Desktop, Codex, Gemini CLI, Cursor and other MCP clients: run, files,
   screenshots, "has this changed?" checksums, mouse, keyboard, gadgets
   and menus by name, ARexx, waiting, running commands and stopping them.
@@ -134,6 +140,7 @@ From the [latest release](https://github.com/creep-ltx/wasabi/releases/latest):
 | `wasabi-macos-arm64`, `wasabi-macos-x86_64` | Macs with Apple Silicon or Intel |
 | `wasabi-windows-x64.exe` | Windows |
 | `wasabi` | the client as a Python script, for any system with Python 3 |
+| `wasabi_client.py` | the Python API, for your own scripts and test rigs (beside `wasabi`) |
 
 The one-file clients carry everything: the command line, the desktop
 app (it opens in your browser), the phone server and the MCP server
@@ -192,7 +199,7 @@ wasabi update wasabid                replace the daemon, checked first
 | **Memory** | about 350 KB for the daemon; AmiSSL adds about 3.5 MB when encryption is on. A screenshot, the live view and the DOS call trace borrow more while they run. |
 | **PC** | Linux, macOS or Windows - the one-file downloads need nothing else; the script needs Python 3. OpenSSL 3 to make encryption keys. |
 | **Phone app** | any Docker host on the Amiga's network ([`tools/docker-compose.yml`](tools/docker-compose.yml)). |
-| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030, as a stock 68020 (OS 3.1 and 3.2), and as a stock A600 (68000, Workbench 2.05). 271 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
+| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030, as a stock 68020 (OS 3.1 and 3.2), and as a stock A600 (68000, Workbench 2.05). 283 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
 
 ## Documentation
 
@@ -200,6 +207,7 @@ wasabi update wasabid                replace the daemon, checked first
 |---|---|
 | [Installing and updating](docs/install.md) | the daemon, the client, self-update, building |
 | [Commands](docs/commands.md) | every command and option |
+| [Python API](docs/api.md) | `import wasabi_client`: every call, with examples |
 | [The screen and the GUI](docs/screen-and-gui.md) | screenshots, the live view, mouse and keys, coordinates, gadgets, menus and lists by name, ARexx |
 | [Apps](docs/apps.md) | the desktop app, Wasabi phone, health, the clipboard |
 | [Debugging](docs/debugging.md) | debug output, the DOS call trace, crash reports, stack headroom |

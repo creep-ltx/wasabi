@@ -141,6 +141,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x55 | AREXX    | C→S | `u32 timeout`, `str port`, `str command` |
 | 0x56 | PORTS    | C→S | (empty) |
 | 0x57 | SUM      | C→S | `i16 x`, `i16 y`, `i16 w`, `i16 h` (0x0: the whole screen) |
+| 0x58 | INPUTS   | C→S | 12-byte records: `u8 kind`, `u8 button`, `u16 wait`, `u16 a`, `u16 b`, `i16 x`, `i16 y` |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -169,7 +170,13 @@ assuming silence means yes.
 `caps` is a comma-separated list of what the daemon can actually do —
 `ping,info,ls,put,get,run,del,mkdir,debug,snoop,reboot,restart,ps,kill,`
 `speed,speedfile,quit,install,grab,screen,hb,guru,snoopentry,psfree,`
-`mouse,key,windows,health,live,clip,detach` for a current build. Self-update makes version skew
+`mouse,key,windows,health,live,clip,detach,slots,ui,arexx,tls,rexxport,`
+`plainopt,pointer,sum,inputs` for a current build. The later ones:
+`slots` (0.4, several runs at once), `ui` and `arexx` (0.5), `tls`
+(0.6, the daemon has TLS ready), `rexxport` (0.7, its own ARexx port
+`WASABI`), `plainopt` (0.8, encryption is optional), `pointer` (0.9b3,
+the `S` line of `WINDOWS` and `UI` carries the pointer position), `sum`
+(0.9), `inputs` (0.10b4, `INPUTS`). Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -721,9 +728,14 @@ come from `CurrentTime()`, as for the mouse.
 because titles contain spaces:
 
 ```
-S  addr  left  top  width  height  depth  title
+S  addr  left  top  width  height  depth  title  mousex  mousey
 W  addr  left  top  width  height  bleft  btop  bright  bbottom  flags  task  title
 ```
+
+`mousex`/`mousey` (capability `pointer`, wasabid 0.9b3+) are where the
+pointer is on that screen (`Screen->MouseX/MouseY`), in the screen's
+own pixels; older daemons end the `S` line at the title. Every screen
+has them; the front screen's are the ones that matter.
 
 Screens come front first, each followed by its windows front first.
 Screen `left`/`top` say where the screen sits on the display (a screen
@@ -767,6 +779,12 @@ IntuiText (known draw mode, a `TextAttr` naming a `.font`, printable
 text, every pointer checked with `TypeOfMem()`). `value`: a string
 gadget's contents, a prop's pot (0–65535), a GadTools cycle gadget's
 current choice.
+
+`id` is the gadget's `GadgetID` (GadTools, ReAction and plain Intuition
+gadgets all have one; border gadgets are usually 0). An MUI object has
+no `GadgetID`, so 0.10b4+ sends its `MUIA_ObjectID` there (0 when the
+program set none). Unlike a position or an `--nth`, it stays the same
+when the window is laid out differently.
 
 `M code` is the FULLMENUNUM (`menu | item << 5 | sub << 11`, 31 = no
 sub-item) — what Intuition puts in a MENUPICK and what `UIACT` op 1
@@ -841,6 +859,12 @@ the message stays the host's until it replies and is freed then. At
 exit, messages still out leave the reply port behind with `PA_IGNORE`,
 so a late reply writes into nothing that was freed.
 
+Ports of ARexx itself (`REXX`, `AREXX`) take a macro *name*, not a
+program, and `AREXX` replies at once without a result, by ARexx's
+design. The client does not send to them: `wasabi rexx` (and `wasabi
+arexx REXX ...`) uploads the program to `T:`, runs it with `RX` as an
+ordinary `RUN`, and deletes it, so its output and rc come back.
+
 ### PORTS — every public message port
 
 One name per line in `DATA` frames, then `END`. ARexx ports are public
@@ -858,6 +882,30 @@ same screen: a deep screen is read with `ReadPixelArray` and folded with
 FNV-1a; a native screen sums its palette and then its bitplanes directly
 (rotate-and-xor, bits outside the region masked off), falling back to
 `ReadPixelArray8` pens when the planes are not in chip RAM.
+
+### INPUTS — key and mouse events, timed by the Amiga (0.10b4+, caps `inputs`)
+
+A gesture in one request, played with `Delay()` between events, so the
+gaps are the Amiga's ticks (1/50 s) and not the network's. The payload
+is 1 to 1024 records of 12 bytes:
+
+```
+u8 kind  u8 button  u16 wait  u16 a  u16 b  i16 x  i16 y
+```
+
+| kind | event | a | b | button, x, y |
+|---|---|---|---|---|
+| 0 | raw key, as `KEY` raw | code (bit 7 = up) | qualifier | unused |
+| 1 | a character, as `KEY` text (dead keys and all) | Latin-1 code | unused | unused |
+| 2 | mouse, as `MOUSE` | action: 0 move, 1 click, 2 down, 3 up | click count (0–3) | 0 left, 1 right, 2 middle; x/y, -32768 = where the pointer is |
+
+`wait` is the ticks to wait after the event, before the next. The waits
+may add up to 250 ticks (5 s): the daemon does nothing else while it
+plays, so a batch is a gesture, not a script. Every record is checked
+first (kind, ranges, whether the keymap can type each character), so a
+bad batch fails before anything happens. Answer: `OK` after the last
+event, or `ERR` (`input event write failed at event N`). Held mouse
+buttons are remembered across commands as for `MOUSE`.
 
 ### LIVE — the front screen for a live view: only what changed
 

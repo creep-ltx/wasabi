@@ -297,6 +297,14 @@ in place.
 Since 0.10 (betas): MUI 3.8 windows are read (0.10b3); the daemon runs
 on a 16 KB stack of its own when the Shell gave it less (OS 3.1 gives
 4 KB, which crashed `ui` there); GadTools list rows on OS 3.0/3.1 too.
+0.10b4, from spotUP's list (UP-Term's test rig): `INPUTS`, a timed
+batch of key and mouse events played by the Amiga (`wasabi input`);
+gadgets by id (`GadgetID`, MUI's `MUIA_ObjectID`; `ui click --id`);
+`wasabi rexx` runs ARexx programs through `RX` with output and rc;
+`wasabi_client.py`, the stable Python API (docs/api.md, API 1.0);
+clearer "make it plain again" errors; menus no longer show plain items
+as checked. Tested in FS-UAE (OS 3.2.1 + MUI 5, Workbench 2.05); not
+yet on the A1200.
 
 Open: MUI lists' columns after the first,
 and several listeners on the debug and snoop streams at once.

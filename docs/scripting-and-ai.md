@@ -7,6 +7,10 @@
 Wasabi is meant to be a tool a script — or Claude — can reach for
 without a person watching. That needs four promises.
 
+(Writing the script in Python? [The Python API](api.md) —
+`import wasabi_client` — gives you the same things as calls, with a
+documented API that does not change under you.)
+
 **Nothing hangs.** Every reply has a deadline: if the Amiga takes a
 connection and then says nothing for `--silence` seconds (default 15),
 the command stops with *"the Amiga stopped answering"* and exit code

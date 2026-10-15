@@ -70,6 +70,28 @@ because a new CA would lock out every Amiga that has the old one.
   On the A1200 (Emu68): handshake 0.07 s, 11.7 MB/s up and 13 MB/s
   down, a 1280x960 grab in 0.3 s (plain was 42 MB/s into RAM:).
 
+#### An Amiga without AmiSSL
+
+Nothing to set up: an Amiga without AmiSSL (or without keys) answers
+plain, and a client with keys prints one warning and goes plain.
+
+The one case that stops you is an address that **was** reached
+encrypted before - you removed AmiSSL or its keys, or another Amiga or
+emulator now answers on the same address and port. The client refuses
+plain there, because that is exactly what something pretending to be
+your Amiga would look like, and the error says so. To make it plain
+again:
+
+```
+wasabi keys forget 192.168.1.20     that address, every port, from now on
+wasabi --plain ping                 just this one command
+```
+
+The remembered addresses are `~/.config/wasabi/tls-hosts`, one
+`ADDRESS:PORT` per line; deleting a line is the same as `keys forget`.
+From Python: `wasabi_client.connect(..., tls=False)` (see
+[the Python API](api.md)).
+
 **It answers only addresses that cannot be routed in from the
 internet** — RFC1918 (`10/8`, `172.16/12`, `192.168/16`) plus loopback
 and link-local. Anything else is closed before it can send `HELLO`. This
