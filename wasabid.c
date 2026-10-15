@@ -60,10 +60,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.10b1"
+#define VERSION_STR "wasabid 0.10b2"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.10b1 (15.10.2026)";
+    "$VER: wasabid 0.10b2 (15.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -2842,11 +2842,7 @@ static BOOL ui_gt_rows(struct Window *w, struct Gadget *g, struct UiItem *box,
         return TRUE;
     if (!g_gadtools)
         g_gadtools = OpenLibrary("gadtools.library", 39);
-    /* GadTools 39/40 (OS 3.0/3.1) reads private data that its listview's
-     * own scroller and arrow gadgets do not have: GT_GetGadgetAttrs() on
-     * one of them crashed wasabid on the first GadTools window (Input
-     * prefs, 3.1). OS 3.2's gadtools 47 is safe; older ones list no rows. */
-    if (!g_gadtools || g_gadtools->lib_Version < 47)
+    if (!g_gadtools)
         return TRUE;
     if (GT_GetGadgetAttrs(g, w, NULL, GTLV_Labels, (ULONG)&labels,
                           GTLV_Top, (ULONG)&top, GTLV_Selected, (ULONG)&sel,
@@ -6278,7 +6274,7 @@ static int selftest(const char *nonce)
     return RETURN_OK;
 }
 
-int main(int argc, char **argv)
+static int daemon_main(int argc, char **argv)
 {
     int listen_fd = -1, disco_fd = -1, port = DEF_PORT, i;
     int dbg_was = -1, snoop_was = -1;    /* stream clients at teardown */
@@ -6885,4 +6881,45 @@ out:
             Delay(250);
 
     return RETURN_OK;
+}
+
+/*
+ * The daemon's code is budgeted for an 8 KB stack, but it gets whatever
+ * the Shell that ran it had: 4 KB from OS 3.1's startup-sequence. On
+ * that, listing a GadTools window (Input prefs, 3.1) went over the edge
+ * and took the machine with it. So when the stack we were given is
+ * smaller than STACK_MIN, run on one of our own. Everything that lives
+ * across StackSwap() is static: locals on the old stack are not
+ * reachable from the new one.
+ */
+#define STACK_MIN 16384
+static struct StackSwapStruct g_sss;
+static int g_argc, g_rc;
+static char **g_argv;
+
+/* No arguments and no result, so the compiler leaves nothing of its own
+ * on the new stack for after the swap back. */
+static void __attribute__((noinline)) daemon_on_own_stack(void)
+{
+    g_rc = daemon_main(g_argc, g_argv);
+}
+
+int main(int argc, char **argv)
+{
+    struct Task *me = FindTask(NULL);
+
+    if ((ULONG)((UBYTE *)me->tc_SPUpper - (UBYTE *)me->tc_SPLower) >= STACK_MIN)
+        return daemon_main(argc, argv);
+    g_sss.stk_Lower = AllocMem(STACK_MIN, MEMF_ANY);
+    if (!g_sss.stk_Lower)
+        return daemon_main(argc, argv);  /* as before, on the small one */
+    g_sss.stk_Upper = (ULONG)g_sss.stk_Lower + STACK_MIN;
+    g_sss.stk_Pointer = (APTR)g_sss.stk_Upper;
+    g_argc = argc;
+    g_argv = argv;
+    StackSwap(&g_sss);
+    daemon_on_own_stack();
+    StackSwap(&g_sss);
+    FreeMem(g_sss.stk_Lower, STACK_MIN);
+    return g_rc;
 }
