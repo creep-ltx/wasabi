@@ -206,6 +206,7 @@ wasabi update wasabid                replace the daemon, checked first
 | | |
 |---|---|
 | [Installing and updating](docs/install.md) | the daemon, the client, self-update, building |
+| [Change log](CHANGELOG.md) | what changed in each version, betas included |
 | [Commands](docs/commands.md) | every command and option |
 | [Python API](docs/api.md) | `import wasabi_client`: every call, with examples |
 | [The screen and the GUI](docs/screen-and-gui.md) | screenshots, the live view, mouse and keys, coordinates, gadgets, menus and lists by name, ARexx |
