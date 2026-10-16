@@ -31,6 +31,7 @@ void  debug_inject(const char *s);
 
 void  debug_start(void);             /* install the patch, empty the ring */
 void  debug_stop(void);              /* remove it, best effort */
+void  debug_free(void);              /* at exit: the ring back, if the patch is gone */
 LONG  debug_drain(UBYTE *buf, LONG max);   /* bytes waiting; 0 when dry */
 ULONG debug_take_lost(void);         /* bytes dropped, and forgets them */
 

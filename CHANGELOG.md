@@ -5,6 +5,17 @@ What changed in each version, newest first. Betas (`0.10b4`) are on the
 files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 `wasabi ping` shows which daemon an Amiga runs.
 
+## 0.11b1 - 17 October 2026
+
+- **Less memory:** wasabid took about 520 KB, half of a stock A600; now
+  about 330 KB there (measured on an A600 with Kickstart 3.1 and 1 MB
+  in FS-UAE: 240 KB free with 0.10, 474 KB with 0.11b1). The C library
+  gave its text input and output 64 KB buffers each, which wasabid never
+  uses: now 1 KB. The 64 KB buffer for encrypted connections is taken on
+  the first encrypted connection, the 32 KB debug ring when a debug
+  stream first starts, and the 15 KB process list only while `ps`,
+  `kill` or a forced stop needs it. Nothing else changed.
+
 ## 0.10 - 15 October 2026
 
 The four betas below, released together: timed input, gadgets by id,

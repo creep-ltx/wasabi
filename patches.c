@@ -65,7 +65,10 @@ extern struct ExecBase *SysBase;
  */
 #define DBG_RING  32768              /* power of two, for the & mask */
 
-static volatile UBYTE g_ring[DBG_RING];
+/* Taken when a debug stream first starts (debug_start), not at load:
+ * 32 KB a stock A600 should not pay for a stream it never opens. Kept
+ * till exit, as the patch may outlive its removal and still write. */
+static volatile UBYTE *g_ring;
 static volatile ULONG g_ring_head;   /* producer (patch) advances */
 static volatile ULONG g_ring_tail;   /* consumer (daemon) advances */
 static volatile ULONG g_ring_lost;   /* bytes dropped on a full ring */
@@ -106,6 +109,8 @@ void wasabi_store(UBYTE c)
     ULONG next;
     if (c == '\0')
         return;                      /* KPrintF pads with NULs; skip them */
+    if (!g_ring)
+        return;                      /* no stream yet: nothing to keep it for */
     Disable();
     next = (g_ring_head + 1) & (DBG_RING - 1);
     if (next == g_ring_tail)
@@ -175,6 +180,8 @@ static LONG ring_drain(UBYTE *buf, LONG max)
 void debug_start(void)
 {
     g_ring_head = g_ring_tail = g_ring_lost = 0;
+    if (!g_ring)
+        g_ring = AllocMem(DBG_RING, MEMF_ANY);
     debug_install();
 }
 
@@ -199,6 +206,17 @@ ULONG debug_take_lost(void)
 void debug_stop(void)
 {
     debug_uninstall();
+}
+
+/* At exit, after debug_stop: give the ring back, unless the patch could
+ * not be removed (then it may still write here, and the process parks
+ * rather than unload, so it keeps its memory as it keeps its code). */
+void debug_free(void)
+{
+    if (g_ring && !g_dbg_patched) {
+        FreeMem((APTR)g_ring, DBG_RING);
+        g_ring = NULL;
+    }
 }
 
 /* --- the snoop stream ---------------------------------------------- */

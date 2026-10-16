@@ -61,10 +61,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.10"
+#define VERSION_STR "wasabid 0.11b1"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.10 (15.10.2026)";
+    "$VER: wasabid 0.11b1 (17.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -633,6 +633,8 @@ static BOOL send_all(int fd, const UBYTE *buf, LONG len)
     return TRUE;
 }
 
+static UBYTE *g_tlsframe;            /* send_frame's TLS buffer, once used */
+
 static BOOL send_frame(int fd, UBYTE tag, const void *payload, LONG len)
 {
     UBYTE hdr[5];
@@ -640,9 +642,13 @@ static BOOL send_frame(int fd, UBYTE tag, const void *payload, LONG len)
     if (t) {
         /* One record for header and body: two would double the TLS
          * overhead on every small frame, and the live view and streams
-         * send a great many. Static: 64 KB is no stack's business. */
-        static UBYTE frame[5 + MAX_PAYLOAD];
+         * send a great many. 64 KB is no stack's business, and taken on
+         * the first encrypted frame, not at start: a plain-text daemon
+         * (no AmiSSL, a stock A600) never needs it. Kept till exit. */
+        UBYTE *frame = g_tlsframe;
         if (len < 0 || len > MAX_PAYLOAD)
+            return FALSE;
+        if (!frame && !(frame = g_tlsframe = AllocMem(5 + MAX_PAYLOAD, MEMF_ANY)))
             return FALSE;
         frame[0] = tag;
         put_be32(frame + 1, (ULONG)len);
@@ -1268,7 +1274,9 @@ struct PsEnt {
 
 #define PS_MAX 128
 
-static struct PsEnt g_ps[PS_MAX];
+/* Taken by ps_collect, given back by ps_release when the daemon next
+ * waits: 15 KB that only ps, kill and a forced stop need. */
+static struct PsEnt *g_ps;
 
 /*
  * Headroom, which is the number that predicts a crash - capacity only
@@ -1336,6 +1344,8 @@ static LONG ps_collect(void)
     struct Task *t;
     char here;                       /* its address is this task's sp */
 
+    if (!g_ps && !(g_ps = AllocMem(sizeof(struct PsEnt) * PS_MAX, MEMF_ANY)))
+        return 0;                    /* out of memory: no tasks seen */
     Disable();
     /* ThisTask is always us - we are the one serving the request - and
      * our own tc_SPReg is stale, so measure the stack we are standing
@@ -1350,6 +1360,13 @@ static LONG ps_collect(void)
         ps_add(&n, t, 2, NULL);
     Enable();
     return n;
+}
+
+static void ps_release(void)
+{
+    if (g_ps)
+        FreeMem(g_ps, sizeof(struct PsEnt) * PS_MAX);
+    g_ps = NULL;
 }
 
 /*
@@ -6883,6 +6900,7 @@ static int daemon_main(int argc, char **argv)
             tv.tv_micro = 0;
         }
 
+        ps_release();                    /* the process list, until next asked */
         n = WaitSelect(nfds + 1, &rd, NULL, NULL, &tv, &sigs);
         if (n < 0)
             FD_ZERO(&rd);
@@ -7112,6 +7130,7 @@ out:
     dbg_was = g_dbg_client;              /* the stops below clear these */
     snoop_was = g_snoop_client;
     debug_stop();                        /* removes the patch */
+    debug_free();
     g_dbg_client = -1;
     snoop_stop();
     g_snoop_client = -1;
@@ -7190,6 +7209,9 @@ out:
     if (disco_fd >= 0) CloseSocket(disco_fd);
     if (listen_fd >= 0) CloseSocket(listen_fd);
     FreeMem(payload, MAX_PAYLOAD);
+    if (g_tlsframe)
+        FreeMem(g_tlsframe, 5 + MAX_PAYLOAD);
+    ps_release();
     if (g_cgfx) CloseLibrary(g_cgfx);
     if (g_keymap) CloseLibrary(g_keymap);
     if (g_gadtools) CloseLibrary(g_gadtools);
@@ -7248,6 +7270,16 @@ static void __attribute__((noinline)) daemon_on_own_stack(void)
 {
     g_rc = daemon_main(g_argc, g_argv);
 }
+
+/*
+ * libnix gives stdin, stdout and stderr a BUFSIZ buffer each before
+ * main() runs, and its BUFSIZ is 64 KB: about 160 KB gone at start,
+ * a sixth of a stock A600. wasabid does all its I/O through dos.library
+ * and sockets, never through stdio, so 1 KB is plenty. Both symbols, so
+ * libnix's own __bufsiz.o is not linked in.
+ */
+unsigned __BUFSIZ__data = 1024;
+unsigned *__BUFSIZE = &__BUFSIZ__data;
 
 int main(int argc, char **argv)
 {
