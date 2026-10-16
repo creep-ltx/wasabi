@@ -29,7 +29,7 @@ one reader, no delegation. Test suite: 87/87 green. Build: clean, zero
 warnings at `-O2 -Wall`. Stack figures below are `-fstack-usage` output
 from this tree, not estimates.*
 
-*Findings were then taken to the A1200 (192.168.68.109, `wasabid 0.2b10`,
+*Findings were then taken to the A1200 (192.168.1.20, `wasabid 0.2b10`,
 `C:wasabid` 53,344 bytes — the same size as the HEAD build, so the
 machine is running the guru-PC-capture code). What the hardware said is
 in **Measured on the hardware** below, and it did not agree with this

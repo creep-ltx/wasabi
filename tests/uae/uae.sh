@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # uae.sh start|stop|put|reset - a private FS-UAE for testing wasabid itself,
-# on the shared clean test Amigas (~/UAE/TestMachines, `amiga-test`): its
+# on the shared clean test Amigas (`amiga-test`): its
 # own copy (instance "wasabi"), its wasabid on port 1241 (WASABI_PORT=1241),
 # so the shared A1200 and other sessions' emulators are never touched.
 #   CONF=      A1200, Workbench 3.2.1 + MUI 5, as a 68030/50 (the default)

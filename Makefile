@@ -1,8 +1,8 @@
 # wasabid - cross-built with Bebbo's m68k-amigaos-gcc.
-# The toolchain lives under $(HOME)/opt/amiga on this box, not
-# /opt/amiga; override CC if yours is elsewhere.
-
-CC      = $(HOME)/opt/amiga/bin/m68k-amigaos-gcc
+# Bebbo's m68k-amigaos-gcc: set AMIGA to where it is installed, otherwise it is
+# looked for in the usual places (/opt/amiga, its own default, then ~/opt/amiga).
+AMIGA   ?= $(firstword $(wildcard /opt/amiga $(HOME)/opt/amiga))
+CC      = $(if $(AMIGA),$(AMIGA)/bin/)m68k-amigaos-gcc
 # -Wno-pointer-sign: every string in the NDK is 'unsigned char *', so
 # passing an ordinary C literal to Printf/SystemTags warns on every call.
 # It is noise, not a finding, and it drowns real warnings if left on.
@@ -12,7 +12,9 @@ CC      = $(HOME)/opt/amiga/bin/m68k-amigaos-gcc
 # posted_forget() step 18 bytes through 14-byte entries and write -1 over
 # the rexxsyslib base; the first AREXX then crashed the machine.
 CFLAGS  = -O2 -fbbb=- -noixemul -fomit-frame-pointer -Wall -Wno-pointer-sign -Iinclude
-DEPLOY  = /home/creep/Documents/FS-UAE/Hard Drives/Dump/Code
+# Where `make deploy` copies wasabid (a folder the Amiga or emulator sees,
+# e.g. an FS-UAE hard drive folder): make deploy DEPLOY=/path/to/folder
+DEPLOY  ?=
 
 all: wasabid
 
@@ -51,6 +53,7 @@ test:
 	./tests/run-tests.sh
 
 deploy: wasabid
+	@test -n "$(DEPLOY)" || { echo "Set DEPLOY: make deploy DEPLOY=/path/to/amiga/folder"; exit 1; }
 	cp wasabid "$(DEPLOY)/"
 
 clean:

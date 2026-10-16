@@ -2,7 +2,7 @@
 # Web editor, name: wasabi). The program comes from
 # /volume2/docker/wasabi/app (tools/deploy-nas.sh copies it there);
 # the Amiga's key and the login live in /volume2/docker/wasabi/config.
-# Phone: http://bytebandit:8077 over Tailscale (home: 192.168.68.118:8077).
+# Phone: http://bytebandit:8077 over Tailscale (at home: the NAS address, port 8077).
 services:
   wasabi:
     image: python:3.13-alpine

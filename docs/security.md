@@ -156,7 +156,7 @@ is actually talking to my Amiga" is answerable by watching rather than
 inferring:
 
 ```
-[wasabi: 192.168.68.117 connected]
+[wasabi: 192.168.1.10 connected]
 [wasabi: refused 203.0.113.44 - not on the LAN]
 ```
 

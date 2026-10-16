@@ -56,7 +56,7 @@ every loss and reconnect, and how it ended — so a log read weeks later
 says for itself what was subscribed and when:
 
 ```
-2026-08-13 09:14:20.101 client | debug+snoop stream open to 192.168.68.109:1234 (wasabid 0.2) - Ctrl-C to stop
+2026-08-13 09:14:20.101 client | debug+snoop stream open to 192.168.1.20:1234 (wasabid 0.2) - Ctrl-C to stop
 ```
 
 ## The guru report
