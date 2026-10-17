@@ -311,6 +311,15 @@ clearer "make it plain again" errors; menus no longer show plain items
 as checked. Tested in FS-UAE (OS 3.2.1 + MUI 5, Workbench 2.05) and on
 the A1200.
 
+Since 0.10 (0.11 betas, 17 October 2026): less memory, nothing else
+changed. 0.11b1 gave back the C library's two unused 64 KB text
+buffers and takes the TLS buffer, the debug ring and the process list
+only when needed (about 520 KB down to about 330 KB on an A600);
+0.11b2 takes the 64 KB message buffer only for big messages, sends TLS
+from 16 KB, gives the live view's, ARexx's and the palette's buffers
+back when done, and is built for size except the grab, live view and
+SUM loops (about 200 KB). Tested on the A1200 over TLS and in FS-UAE.
+
 Open: MUI lists' columns after the first,
 and several listeners on the debug and snoop streams at once.
 
