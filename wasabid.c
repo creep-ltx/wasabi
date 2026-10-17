@@ -61,10 +61,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.11b1"
+#define VERSION_STR "wasabid 0.11b2"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.11b1 (17.10.2026)";
+    "$VER: wasabid 0.11b2 (17.10.2026)";
 
 #define PROTO_VERSION   1
 
@@ -97,6 +97,9 @@ typedef char welcome_fits_its_buffer[
 
 #define DEF_PORT        1234
 #define MAX_PAYLOAD     65536
+/* wasabid is built for size (-Os); the pixel loops - GRAB, LIVE, SUM -
+ * keep -O2, where speed is the point. */
+#define HOT __attribute__((optimize("O2")))
 #define MAX_CLIENTS     8
 #define RUNBUF          4096
 
@@ -634,27 +637,35 @@ static BOOL send_all(int fd, const UBYTE *buf, LONG len)
 }
 
 static UBYTE *g_tlsframe;            /* send_frame's TLS buffer, once used */
+#define TLS_REC 16384                /* the most one TLS record holds */
 
 static BOOL send_frame(int fd, UBYTE tag, const void *payload, LONG len)
 {
     UBYTE hdr[5];
     void *t = tls_of(fd);
     if (t) {
-        /* One record for header and body: two would double the TLS
-         * overhead on every small frame, and the live view and streams
-         * send a great many. 64 KB is no stack's business, and taken on
-         * the first encrypted frame, not at start: a plain-text daemon
-         * (no AmiSSL, a stock A600) never needs it. Kept till exit. */
+        /* Header and the start of the body in one record: two would
+         * double the TLS overhead on every small frame, and the live
+         * view and streams send a great many. A record holds 16 KB, so
+         * a bigger body goes on from where it is, in whole records -
+         * as many as a 64 KB buffer made. Taken on the first encrypted
+         * frame, not at start: a plain-text daemon (no AmiSSL, a stock
+         * A600) never needs it. Kept till exit. */
         UBYTE *frame = g_tlsframe;
+        LONG first;
         if (len < 0 || len > MAX_PAYLOAD)
             return FALSE;
-        if (!frame && !(frame = g_tlsframe = AllocMem(5 + MAX_PAYLOAD, MEMF_ANY)))
+        if (!frame && !(frame = g_tlsframe = AllocMem(TLS_REC, MEMF_ANY)))
             return FALSE;
+        first = len > TLS_REC - 5 ? TLS_REC - 5 : len;
         frame[0] = tag;
         put_be32(frame + 1, (ULONG)len);
-        if (len)
-            memcpy(frame + 5, payload, len);
-        return tls_send_all(fd, t, frame, 5 + len);
+        if (first)
+            memcpy(frame + 5, payload, first);
+        if (!tls_send_all(fd, t, frame, 5 + first))
+            return FALSE;
+        return first == len ? TRUE :
+               tls_send_all(fd, t, (const UBYTE *)payload + first, len - first);
     }
     hdr[0] = tag;
     put_be32(hdr + 1, (ULONG)len);
@@ -704,6 +715,57 @@ static BOOL recv_frame(int fd, UBYTE *tag, UBYTE *payload, LONG *len)
     if (n && !recv_all(fd, payload, (LONG)n))
         return FALSE;
     *tag = hdr[0];
+    *len = (LONG)n;
+    return TRUE;
+}
+
+/*
+ * Where the main loop's frames land. Nearly every frame is a few hundred
+ * bytes and goes into g_insmall; a bigger one (an upload's DATA, a long
+ * ARexx program, a clip) gets the 64 KB buffer, which a download also
+ * reads its file into. That one is given back when no transfer is going
+ * on, so an idle daemon holds 2 KB here, not 64.
+ */
+#define IN_SMALL 2048
+static UBYTE  g_insmall[IN_SMALL];
+static UBYTE *g_inbig;
+
+static UBYTE *big_buf(void)
+{
+    if (!g_inbig)
+        g_inbig = AllocMem(MAX_PAYLOAD, MEMF_ANY);
+    return g_inbig;
+}
+
+static void big_release(void)
+{
+    LONG i;
+    if (!g_inbig)
+        return;
+    for (i = 0; i < MAX_CLIENTS; i++)
+        if (g_clients[i].fd >= 0 && g_clients[i].xfer != XF_NONE)
+            return;
+    FreeMem(g_inbig, MAX_PAYLOAD);
+    g_inbig = NULL;
+}
+
+/* recv_frame for the main loop: *buf is g_insmall or the big buffer. */
+static BOOL recv_client_frame(int fd, UBYTE *tag, UBYTE **buf, LONG *len)
+{
+    UBYTE hdr[5], *b = g_insmall;
+    ULONG n;
+
+    if (!recv_all(fd, hdr, 5))
+        return FALSE;
+    n = get_be32(hdr + 1);
+    if (n > MAX_PAYLOAD)
+        return FALSE;
+    if (n > IN_SMALL && !(b = big_buf()))
+        return FALSE;            /* no 64 KB free: drop, as any read error */
+    if (n && !recv_all(fd, b, (LONG)n))
+        return FALSE;
+    *tag = hdr[0];
+    *buf = b;
     *len = (LONG)n;
     return TRUE;
 }
@@ -1816,13 +1878,22 @@ static BOOL gets_pending(void)
 }
 
 /* One chunk of every GET in progress; END and close when it is all out. */
-static void pump_gets(UBYTE *buf)
+static void pump_gets(void)
 {
     LONG i, n;
+    UBYTE *buf;
     for (i = 0; i < MAX_CLIENTS; i++) {
         struct Client *c = &g_clients[i];
         if (c->fd < 0 || c->xfer != XF_GET)
             continue;
+        if (!(buf = big_buf())) {
+            Close(c->xfer_fh);
+            c->xfer_fh = 0;
+            c->xfer = XF_NONE;
+            if (!send_err(c->fd, "out of memory"))
+                drop((int)i);
+            continue;
+        }
         n = Read(c->xfer_fh, buf, MAX_PAYLOAD);
         if (n > 0) {
             if (!send_frame(c->fd, T_DATA, buf, n))
@@ -2451,6 +2522,25 @@ static LONG bm_depth(struct BitMap *bm)
 
 /* GetRGB32's table (three 32-bit components a colour), from the 12-bit
  * colours GetRGB4 gives on OS 2.x. */
+/* A screen's palette as GetRGB32 gives it, 3 KB: for the command that
+ * reads one, given back by the main loop once that command is done. */
+static ULONG *g_pal;
+
+static ULONG *pal_buf(void)
+{
+    if (!g_pal)
+        g_pal = AllocMem(256 * 3 * sizeof(ULONG), MEMF_ANY);
+    return g_pal;
+}
+
+static void pal_release(void)
+{
+    if (g_pal) {
+        FreeMem(g_pal, 256 * 3 * sizeof(ULONG));
+        g_pal = NULL;
+    }
+}
+
 static void get_rgb32(struct ColorMap *cm, ULONG n, ULONG *table)
 {
     ULONG i;
@@ -4473,10 +4563,23 @@ static BOOL rx_combo(const char *combo, UBYTE *out, LONG *n, LONG cap)
     return TRUE;
 }
 
+/*
+ * The ARexx port's working space, about 8 KB: taken when a message
+ * arrives, given back when they are all answered, so a daemon nobody
+ * scripts does not carry it.
+ */
+struct RxScratch {
+    char  line[KEY_MAX_TEXT + 64], res[4096];
+    char  arg[KEY_MAX_TEXT + 1];
+    UBYTE text[KEY_MAX_TEXT], ev[256];
+};
+static struct RxScratch *g_rxs;
+
 /* TYPE: text through the keymap, with <key> tokens; "<<" is a '<'. */
 static LONG rx_type(const char *s)
 {
-    static UBYTE text[KEY_MAX_TEXT], ev[256];
+#define text (g_rxs->text)
+#define ev   (g_rxs->ev)
     LONG tn = 0, en;
     const char *why;
 
@@ -4513,6 +4616,8 @@ static LONG rx_type(const char *s)
     if (tn && (why = do_key(KEY_TEXT, text, tn)))
         return rx_fail(10, why);
     return 0;
+#undef text
+#undef ev
 }
 
 /* The window's options after the main argument: WINDOW pat, NTH n,
@@ -4720,7 +4825,8 @@ static LONG rx_menu(const char *path, struct RxOpts *o)
 /* One command. rc as ARexx has it; res gets the RESULT text. */
 static LONG rx_command(char *line, char *res, LONG ressz)
 {
-    static char cmd[32], arg[KEY_MAX_TEXT + 1];
+    static char cmd[32];
+#define arg (g_rxs->arg)
     char lowcmd[32];
     struct RxOpts o;
     char *p = line;
@@ -4829,11 +4935,11 @@ static LONG rx_command(char *line, char *res, LONG ressz)
         return rx_menu(arg, &o);
     }
     return rx_fail(20, "not a WASABI command - HELP lists them");
+#undef arg
 }
 
 static void rexxport_pump(void)
 {
-    static char line[KEY_MAX_TEXT + 64], res[4096];
     struct RexxMsg *rm;
 
     if (!g_rexx_port)
@@ -4842,15 +4948,21 @@ static void rexxport_pump(void)
         LONG rc;
         rm->rm_Result1 = 20;
         rm->rm_Result2 = 0;
-        if (rm->rm_Args[0]) {
-            copystr(line, sizeof(line), (const char *)rm->rm_Args[0]);
-            rc = rx_command(line, res, sizeof(res));
+        if (rm->rm_Args[0] && (g_rxs || (g_rxs = AllocMem(sizeof(*g_rxs),
+                                                         MEMF_ANY)))) {
+            char *line = g_rxs->line, *res = g_rxs->res;
+            copystr(line, sizeof(g_rxs->line), (const char *)rm->rm_Args[0]);
+            rc = rx_command(line, res, sizeof(g_rxs->res));
             rm->rm_Result1 = rc;
             if (rc == 0 && (rm->rm_Action & RXFF_RESULT) && res[0])
                 rm->rm_Result2 = (LONG)CreateArgstring(res,
                                                        (ULONG)strlen(res));
         }
         ReplyMsg((struct Message *)rm);
+    }
+    if (g_rxs) {
+        FreeMem(g_rxs, sizeof(*g_rxs));
+        g_rxs = NULL;
     }
 }
 
@@ -4891,7 +5003,7 @@ static void rexxport_pump(void)
  */
 #define SCREEN_ALIGN(w) (((w) + 15) & ~15)   /* ReadPixelArray8 wants this */
 
-static BOOL screen_send_deep(int fd, struct Screen *sc, ULONG w, ULONG h)
+HOT static BOOL screen_send_deep(int fd, struct Screen *sc, ULONG w, ULONG h)
 {
     UBYTE *buf;
     LONG rowbytes = (LONG)w * 3, band, y;
@@ -4951,15 +5063,11 @@ static struct BitMap *scratch_row(struct Screen *sc, LONG aligned)
     return bm;
 }
 
-static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
+HOT static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
                                LONG depth)
 {
     struct RastPort temprp;
-    /* 3 KB, and at -O2 every cmd_* is inlined into serve(), so an
-     * automatic here is charged to EVERY command the daemon serves -
-     * ping included - not just to a screen grab. Static costs 3 KB of
-     * BSS once and takes it off the stack budget for good. */
-    static ULONG pal[256 * 3];
+    ULONG *pal = pal_buf();
     UBYTE *pens, *rgb;
     LONG aligned = SCREEN_ALIGN(w), rowbytes = (LONG)w * 3;
     LONG band, y, ncol = 1L << depth;
@@ -4968,6 +5076,8 @@ static BOOL screen_send_planar(int fd, struct Screen *sc, ULONG w, ULONG h,
     if (ncol > 256) ncol = 256;
     band = MAX_PAYLOAD / rowbytes;
     if (band < 1) band = 1;
+    if (!pal)
+        return send_perr(fd, "out of memory for the palette");
 
     /* ReadPixelArray8 needs a scratch RastPort one row deep, and it must
      * not have a Layer or it would clip against the real window. */
@@ -5061,7 +5171,7 @@ struct LiveState {
 static struct LiveState *g_live[MAX_CLIENTS];
 
 /* A row of an RTG screen for the live view, 64 KB: taken the first time
- * a live view needs it, freed at exit. */
+ * a live view needs it, given back when the last live viewer leaves. */
 static ULONG *g_rowbuf;
 
 static ULONG *live_rowbuf(void)
@@ -5082,10 +5192,17 @@ static void live_free(int cl)
         FreeMem(ls->raw, ls->rawsize);
     FreeMem(ls, sizeof(*ls));
     g_live[cl] = NULL;
+    for (cl = 0; cl < MAX_CLIENTS; cl++)
+        if (g_live[cl])
+            return;
+    if (g_rowbuf) {
+        FreeMem(g_rowbuf, LIVE_RECT_MAX);
+        g_rowbuf = NULL;
+    }
 }
 
 /* One rectangle out of prev (which already holds the new pixels). */
-static BOOL live_send_rect(int fd, struct LiveState *ls, UBYTE *out,
+HOT static BOOL live_send_rect(int fd, struct LiveState *ls, UBYTE *out,
                            LONG x0, LONG x1, LONG y0, LONG y1)
 {
     LONG bpp = ls->fmt == LIVE_RGB565 ? 2 : 1;
@@ -5117,7 +5234,7 @@ struct LiveScan {                       /* the rectangle being built */
     LONG ry0, rx0, rx1, bpp, w;
 };
 
-static void live_close(struct LiveScan *sc, LONG yend)
+HOT static void live_close(struct LiveScan *sc, LONG yend)
 {
     if (sc->ry0 < 0)
         return;
@@ -5140,7 +5257,7 @@ static void live_close(struct LiveScan *sc, LONG yend)
 }
 
 /* Row yy changed between columns first..last (first < 0: unchanged). */
-static void live_row(struct LiveScan *sc, LONG yy, LONG first, LONG last)
+HOT static void live_row(struct LiveScan *sc, LONG yy, LONG first, LONG last)
 {
     if (first < 0) {
         live_close(sc, yy);
@@ -5189,7 +5306,7 @@ static void live_row(struct LiveScan *sc, LONG yy, LONG first, LONG last)
  * for the screen, the same loop over fast RAM 5 ms) - so each pixel is
  * ONE read of its full width, and the colour is taken apart in a
  * register. Reading it a byte at a time cost three trips and 213 ms. */
-static BOOL live_row565(ULONG pf, const UBYTE *row, UWORD *pv, ULONG w,
+HOT static BOOL live_row565(ULONG pf, const UBYTE *row, UWORD *pv, ULONG w,
                         BOOL full, LONG *pfirst, LONG *plast)
 {
     LONG x, first = -1, last = -1;
@@ -5265,7 +5382,7 @@ static BOOL live_row565(ULONG pf, const UBYTE *row, UWORD *pv, ULONG w,
     return TRUE;
 }
 
-static BOOL cmd_live(int cl, int fd, ULONG flags)
+HOT static BOOL cmd_live(int cl, int fd, ULONG flags)
 {
     struct LiveState *ls;
     struct Screen *sc;
@@ -5331,7 +5448,9 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
         return FALSE;
 
     out = AllocMem(LIVE_RECT_MAX + 16, MEMF_ANY);
-    if (!out) {
+    if (!out || (fmt == LIVE_PEN8 && !pal_buf())) {
+        if (out)
+            FreeMem(out, LIVE_RECT_MAX + 16);
         live_free(cl);
         return send_err(fd, "out of memory for the live view");
     }
@@ -5345,7 +5464,7 @@ static BOOL cmd_live(int cl, int fd, ULONG flags)
     if (fmt == LIVE_PEN8) {
         /* The palette first: a changed palette changes every pixel's
          * colour without changing a single pen number. */
-        static ULONG rgb32[256 * 3];
+        ULONG *rgb32 = pal_buf();
         LONG ncol = 1L << depth, changed = full;
         if (ncol > 256) ncol = 256;
         get_rgb32(sc->ViewPort.ColorMap, (ULONG)ncol, rgb32);
@@ -5608,7 +5727,7 @@ static BOOL cmd_screenctl(int fd, ULONG flags, const char *want)
  */
 #define FNV_PRIME 16777619UL
 
-static ULONG fnv(ULONG h, const UBYTE *p, LONG n)
+HOT static ULONG fnv(ULONG h, const UBYTE *p, LONG n)
 {
     while (n-- > 0)
         h = (h ^ *p++) * FNV_PRIME;
@@ -5623,7 +5742,7 @@ static ULONG fnv(ULONG h, const UBYTE *p, LONG n)
  * its first and last byte are masked off. A cheap rotate-and-xor, as a
  * 68000 has no 32-bit multiply.
  */
-static BOOL plane_sum(struct BitMap *bm, LONG depth, LONG x, LONG y,
+HOT static BOOL plane_sum(struct BitMap *bm, LONG depth, LONG x, LONG y,
                       LONG w, LONG h, ULONG *sum)
 {
     LONG p, row, b, bx0 = x >> 3, bx1 = (x + w - 1) >> 3;
@@ -5650,7 +5769,7 @@ static BOOL plane_sum(struct BitMap *bm, LONG depth, LONG x, LONG y,
     return TRUE;
 }
 
-static BOOL cmd_sum(int fd, LONG x, LONG y, LONG w, LONG h)
+HOT static BOOL cmd_sum(int fd, LONG x, LONG y, LONG w, LONG h)
 {
     struct Screen *sc;
     ULONG sum = 2166136261UL, ib;
@@ -5699,10 +5818,12 @@ static BOOL cmd_sum(int fd, LONG x, LONG y, LONG w, LONG h)
     } else {
         /* Pens, plus the palette they mean: a palette change is a
          * change on screen too. */
-        static ULONG pal[256 * 3];
+        ULONG *pal = pal_buf();
         struct RastPort temprp;
         LONG aligned = SCREEN_ALIGN(w), ncol = 1L << depth, r;
         UBYTE *pens;
+        if (!pal)
+            return send_perr(fd, "out of memory for the palette");
         if (ncol > 256) ncol = 256;
         get_rgb32(sc->ViewPort.ColorMap, (ULONG)ncol, pal);
         sum = fnv(sum, (UBYTE *)pal, ncol * 12);
@@ -6640,7 +6761,6 @@ static int daemon_main(int argc, char **argv)
     int listen_fd = -1, disco_fd = -1, port = DEF_PORT, i;
     int dbg_was = -1, snoop_was = -1;    /* stream clients at teardown */
     BOOL stuck;                          /* a patch outlived its removal */
-    UBYTE *payload;
 
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
         return selftest(argc > 2 ? argv[2] : "-");
@@ -6784,14 +6904,6 @@ static int daemon_main(int argc, char **argv)
         guru_release();
         return RETURN_FAIL;
     }
-    payload = AllocMem(MAX_PAYLOAD, MEMF_ANY);
-    if (!payload) {
-        CloseLibrary(SocketBase);
-        Printf("wasabid: out of memory\n");
-        guru_release();
-        return RETURN_FAIL;
-    }
-
     {
         int on = 1;
         struct sockaddr_in sa;
@@ -6901,6 +7013,8 @@ static int daemon_main(int argc, char **argv)
         }
 
         ps_release();                    /* the process list, until next asked */
+        pal_release();                   /* a screen's palette, the same */
+        big_release();                   /* the 64 KB buffer, till a transfer */
         n = WaitSelect(nfds + 1, &rd, NULL, NULL, &tv, &sigs);
         if (n < 0)
             FD_ZERO(&rd);
@@ -6938,7 +7052,7 @@ static int daemon_main(int argc, char **argv)
 
         pump_posted();
         rexxport_pump();
-        pump_gets(payload);              /* a chunk of each download */
+        pump_gets();                     /* a chunk of each download */
 
         {
             char line[200];
@@ -7028,7 +7142,7 @@ static int daemon_main(int argc, char **argv)
         }
 
         for (i = 0; i < MAX_CLIENTS; i++) {
-            UBYTE tag;
+            UBYTE tag, *p;
             LONG len;
             if (g_clients[i].fd < 0)
                 continue;
@@ -7090,11 +7204,11 @@ static int daemon_main(int argc, char **argv)
             if (!FD_ISSET(g_clients[i].fd, &rd) &&
                 tls_pending(g_clients[i].tls) <= 0)
                 continue;
-            if (!recv_frame(g_clients[i].fd, &tag, payload, &len)) {
+            if (!recv_client_frame(g_clients[i].fd, &tag, &p, &len)) {
                 drop(i);
                 continue;
             }
-            if (!serve(i, tag, payload, len))
+            if (!serve(i, tag, p, len))
                 drop(i);
         }
     }
@@ -7208,10 +7322,12 @@ out:
     tls_close();
     if (disco_fd >= 0) CloseSocket(disco_fd);
     if (listen_fd >= 0) CloseSocket(listen_fd);
-    FreeMem(payload, MAX_PAYLOAD);
+    if (g_inbig)
+        FreeMem(g_inbig, MAX_PAYLOAD);
     if (g_tlsframe)
-        FreeMem(g_tlsframe, 5 + MAX_PAYLOAD);
+        FreeMem(g_tlsframe, TLS_REC);
     ps_release();
+    pal_release();
     if (g_cgfx) CloseLibrary(g_cgfx);
     if (g_keymap) CloseLibrary(g_keymap);
     if (g_gadtools) CloseLibrary(g_gadtools);

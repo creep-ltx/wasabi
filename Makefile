@@ -11,7 +11,7 @@ CC      = $(if $(AMIGA),$(AMIGA)/bin/)m68k-amigaos-gcc
 # moved (Knowledge/amiga/toolchain-and-testing.md). In 0.5b1 it made
 # posted_forget() step 18 bytes through 14-byte entries and write -1 over
 # the rexxsyslib base; the first AREXX then crashed the machine.
-CFLAGS  = -O2 -fbbb=- -noixemul -fomit-frame-pointer -Wall -Wno-pointer-sign -Iinclude
+CFLAGS  = -Os -fbbb=- -noixemul -fomit-frame-pointer -Wall -Wno-pointer-sign -Iinclude
 # Where `make deploy` copies wasabid (a folder the Amiga or emulator sees,
 # e.g. an FS-UAE hard drive folder): make deploy DEPLOY=/path/to/folder
 DEPLOY  ?=

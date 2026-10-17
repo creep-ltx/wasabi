@@ -36,19 +36,30 @@ struct Library *AmiSSLBase, *AmiSSLExtBase, *AmiSSLMasterBase;
 static SSL_CTX *ctx;
 
 /* A whole small file, into a memory BIO - read by dos.library, so Amiga
- * paths work. The BIO is a view of buf: free it before the next read. */
+ * paths work. The BIO keeps its own copy: the 8 KB to read it into is
+ * only needed while it is read, once at start, so it is not kept. */
+#define FILE_BIO_MAX 8192
 static BIO *file_bio(const char *path)
 {
-    static char buf[8192];
+    char *buf;
+    BIO *b = NULL;
     BPTR fh = Open((STRPTR)path, MODE_OLDFILE);
     LONG n;
     if (!fh)
         return NULL;
-    n = Read(fh, buf, sizeof buf);
-    Close(fh);
-    if (n <= 0 || n == sizeof buf)      /* empty, or too big to be ours */
+    if (!(buf = AllocMem(FILE_BIO_MAX, MEMF_ANY))) {
+        Close(fh);
         return NULL;
-    return BIO_new_mem_buf(buf, n);
+    }
+    n = Read(fh, buf, FILE_BIO_MAX);
+    Close(fh);
+    if (n > 0 && n < FILE_BIO_MAX &&    /* not empty, not too big to be ours */
+        (b = BIO_new(BIO_s_mem())) && BIO_write(b, buf, (int)n) != (int)n) {
+        BIO_free(b);
+        b = NULL;
+    }
+    FreeMem(buf, FILE_BIO_MAX);
+    return b;
 }
 
 static X509 *load_cert(const char *path)

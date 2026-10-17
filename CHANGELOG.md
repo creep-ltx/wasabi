@@ -5,6 +5,25 @@ What changed in each version, newest first. Betas (`0.10b4`) are on the
 files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 `wasabi ping` shows which daemon an Amiga runs.
 
+## 0.11b2 - 17 October 2026
+
+- **Less memory again:** about 200 KB instead of about 307 KB (measured
+  on the A600 with Workbench 2.05 in FS-UAE, free memory with and
+  without wasabid, 0.11b1 and 0.11b2 the same way). The 64 KB buffer
+  for incoming messages is now only taken for a big one (an upload, a
+  long ARexx program) or a download, and given back when it is done;
+  small messages use 2 KB. Encrypted sending uses a 16 KB buffer
+  instead of 64 KB (one TLS record is 16 KB at most, so nothing is
+  sent differently). The live view's 64 KB buffer goes back when the
+  last viewer leaves, the ARexx port's 8 KB and the screen palette's
+  3 KB when their command is done, and TLS reads its key files into
+  memory it gives back. wasabid is built for size, 17 KB less code;
+  the screen grab, live view and SUM loops are still built for speed
+  (the same machine code as before). Tested on the A1200 over TLS
+  (3 MB and 16 KB-edge put/get, grab, live view at the same 23 ms a
+  frame, ps, ARexx) and in FS-UAE (put/get, grab, live, ARexx, memory
+  back to the same figure after each).
+
 ## 0.11b1 - 17 October 2026
 
 - **Less memory:** wasabid took about 520 KB, half of a stock A600; now
