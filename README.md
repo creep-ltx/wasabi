@@ -4,8 +4,9 @@
 [![release](https://img.shields.io/github/v/release/creep-ltx/wasabi)](https://github.com/creep-ltx/wasabi/releases)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Remote control for a real Amiga** - from a Linux, macOS or Windows PC, a phone,
-an Amiga script, or an AI assistant. Any Amiga with AmigaOS 2.04 or later
+**Build on your PC. Run on your Amiga.** Deploy, debug and drive a real
+Amiga over the network - from a Linux, macOS or Windows PC, a phone, an
+Amiga script, or an AI assistant. Any Amiga with AmigaOS 2.04 or later
 and a network: from a 68000 A600 on Workbench 2.05 to a PiStorm A1200 on
 OS 3.2.
 
