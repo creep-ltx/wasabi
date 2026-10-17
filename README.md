@@ -10,6 +10,11 @@ Amiga script, or an AI assistant. Any Amiga with AmigaOS 2.04 or later
 and a network: from a 68000 A600 on Workbench 2.05 to a PiStorm A1200 on
 OS 3.2.
 
+[![Watch the demo: Wasabi on a real A1200 (1 min 54 s)](docs/images/demo-video.jpg)](https://youtu.be/kPA6Y0nn6Y0)
+
+*The demo (1 min 54 s): deploy, live debugging, the DOS call trace and an
+AI agent, all on a real A1200.*
+
 Wasabi is two programs: **`wasabid`**, a small daemon on the Amiga, and
 **`wasabi`**, a client on the PC (one Python file, standard library
 only - or one ready-made file for Linux, macOS and Windows). Together they copy files, run programs, show and drive the
