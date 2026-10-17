@@ -65,8 +65,8 @@ $ wasabi ui menu "Project/Quit"
   their label or their GadgetID; fill a text field in one step.
 - **Menus** - pick an item by its path or name, without the mouse.
 - **List rows** - the entries of a list, clickable by their text.
-- **Where it works** - Intuition, GadTools, ReAction, MUI 4 and 5, and
-  system requesters.
+- **Where it works** - Intuition, GadTools, ReAction, MUI 3.8, 4 and 5,
+  and system requesters.
 
 [More: Gadgets and menus by name](docs/screen-and-gui.md#gadgets-and-menus-by-name-and-arexx)
 
@@ -199,7 +199,7 @@ wasabi update wasabid                replace the daemon, checked first
 | **Memory** | about 200 KB for the daemon (0.11b2; 0.10, the current release, about 520 KB); AmiSSL adds about 3.5 MB when encryption is on. A screenshot, the live view and the DOS call trace borrow more while they run. |
 | **PC** | Linux, macOS or Windows - the one-file downloads need nothing else; the script needs Python 3. OpenSSL 3 to make encryption keys. |
 | **Phone app** | any Docker host on the Amiga's network ([`tools/docker-compose.yml`](tools/docker-compose.yml)). |
-| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030, as a stock 68020 (OS 3.1 and 3.2), and as a stock A600 (68000, Workbench 2.05). 283 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
+| **Tested on** | an A1200 with PiStorm32-lite/CM4 on Emu68 (OS 3.2.3, rondoval's lwIP stack); FS-UAE as an A1200 with a 68030, as a stock 68020 (OS 3.1 and 3.2, with MUI 3.8 and MUI 5), and as a stock A600 (68000, Workbench 2.05). 283 client tests on Linux and macOS for every change; the one-file clients built and smoke-tested on Linux, macOS and Windows for every release. |
 
 ## Documentation
 

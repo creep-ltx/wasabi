@@ -338,6 +338,13 @@ Disabled items are refused.
   and is never what `ui click` clicks. Found by a search of memory the
   first time a window is looked at (0.4 s on a 68030/50 emulator), then
   remembered.
+- **MUI 3.8** windows (0.10b3): the same gadgets, and list rows. MUI
+  3.8 leaves no mark on its windows and its classes have no names, so
+  the daemon asks muimaster for its classes once and finds each new
+  window's object in one pass over the used memory, before Intuition
+  is locked: about a second on a stock A1200 the first time, then
+  remembered. Buttons and checkmarks are told apart from where MUI 3.8
+  keeps their input mode (it will not give it back).
 - **List rows (0.9):** the entries of GadTools and MUI lists, each a
   `row` with its text, whether it is selected, and where it is drawn -
   so a row is clicked by its text, like a button:
@@ -357,13 +364,6 @@ Disabled items are refused.
   refused for a click. Up to 100 rows per list. An MUI list with
   several columns shows its first column (the code that draws the
   others is the program's own and not reachable from outside).
-
-MUI 3.8 windows (0.10b3) leave no mark and their classes have no
-names, so the daemon asks muimaster for its classes once and finds each
-new window's object in one pass over the used memory, before Intuition
-is locked: about a second on a stock A1200 the first time, then
-remembered. Buttons and checkmarks are told apart from where MUI 3.8
-keeps their input mode (it will not give it back).
 
 Not seen: custom-drawn content (games, paint
 areas), and a GadTools checkbox whose label is a picture. For those,

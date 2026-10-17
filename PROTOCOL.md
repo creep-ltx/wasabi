@@ -817,6 +817,20 @@ area data (`_left`... at object +52), text with `GetAttr` of
 `cycle`, `slider`, `list`, and `label` for plain text. These are the
 only class calls the daemon makes into another program's objects.
 
+**MUI 3.x (0.10b3+):** MUI 3.x draws no title-bar gadgets of its own
+and its built-in classes have no `cl_ID`. When a `muimaster.library`
+older than version 20 is already in memory (nothing is opened
+otherwise), the daemon opens it and takes `Window.mui`, `Area.mui`,
+`Group.mui`, `Text.mui`, `String.mui`, `Cycle.mui`, `List.mui` and
+`Numeric.mui` with `MUI_GetClass()`, to know them by address. Each
+window not seen before is then looked for in one pass over memory
+(the same `MUI_RenderInfo` shape as above) before `LockIBase()`,
+skipping free chunks of 4 KB or more; the answer, yes or no, is kept
+per window and IDCMP port. MUI 3.x will not give `MUIA_InputMode` back,
+so it is read from the object: `IDCMP_MOUSEBUTTONS` in the IDCMP word
+after `MUI_AreaData` means clickable, and bit 16 of `mad_Flags` (+64)
+clear means a toggle (found in muimaster 19.31's own windows).
+
 **List rows (0.9+):** after a list's `G` line come its rows, also `G`
 lines: kind `row`, `addr` the list, `label` the row's text, `value` its
 index, flag `s` when selected, and a box of `0 0 0 0` when the row is
