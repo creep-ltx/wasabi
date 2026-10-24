@@ -2434,7 +2434,19 @@ def cmd_view(args):
     if here not in sys.path:
         sys.path.insert(0, here)
     import wasabi_view
-    target = resolve_target(args)
+    try:
+        target = resolve_target(args)
+    except WasabiError:
+        # The NAS server must outlive an Amiga that is switched off:
+        # exiting here made Docker restart it every minute (and the NAS
+        # mail about each restart). Serve the last address we knew;
+        # sessions connect when the Amiga is back.
+        hit = cached_host() if args.mode == "server" else None
+        if not hit:
+            raise
+        target = (hit[0], hit[1])
+        print("wasabi: no Amiga answered; serving anyway for %s:%d"
+              % target, file=sys.stderr)
     return wasabi_view.serve(sys.modules[__name__], args, target)
 
 
