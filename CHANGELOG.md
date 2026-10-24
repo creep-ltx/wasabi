@@ -5,13 +5,18 @@ What changed in each version, newest first. Betas (`0.10b4`) are on the
 files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 `wasabi ping` shows which daemon an Amiga runs.
 
-## Unreleased
+## 0.10.1 - 24 October 2026
 
-- **Wasabi phone on the NAS no longer restarts every minute while the
-  Amiga is off.** `wasabi serve` stopped when no Amiga answered at
-  start, so Docker restarted it once a minute (and the NAS sent an
-  e-mail each time). It now serves the last Amiga it knew and connects
-  when the Amiga is back. Tested on the NAS with the A1200 off.
+The PC side only (the `wasabi` command, the desktop app and the phone
+server); the Amiga's wasabid is unchanged.
+
+- **The phone server no longer restarts every minute while the Amiga is
+  off.** `wasabi serve` stopped when no Amiga answered at start, so a
+  Docker container with `restart: unless-stopped` came back once a
+  minute (and a Synology NAS e-mailed about each restart). Now it serves
+  the last Amiga it knew and connects when that Amiga is back; if it has
+  never found one, it tries again every 30 s instead of stopping. Tested
+  on a Synology NAS and on Linux with the Amiga switched off.
 
 ## 0.11b2 - 17 October 2026
 

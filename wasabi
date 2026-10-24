@@ -2441,12 +2441,24 @@ def cmd_view(args):
         # exiting here made Docker restart it every minute (and the NAS
         # mail about each restart). Serve the last address we knew;
         # sessions connect when the Amiga is back.
-        hit = cached_host() if args.mode == "server" else None
-        if not hit:
+        if args.mode != "server":
             raise
-        target = (hit[0], hit[1])
-        print("wasabi: no Amiga answered; serving anyway for %s:%d"
-              % target, file=sys.stderr)
+        hit = cached_host()
+        if hit:
+            target = (hit[0], hit[1])
+            print("wasabi: no Amiga answered; serving anyway for %s:%d"
+                  % target, file=sys.stderr)
+        else:
+            # Never found one: no address to serve for yet, so wait.
+            print("wasabi: no Amiga answered; trying again every 30 s",
+                  file=sys.stderr)
+            while True:
+                time.sleep(30)
+                try:
+                    target = resolve_target(args)
+                    break
+                except WasabiError:
+                    pass
     return wasabi_view.serve(sys.modules[__name__], args, target)
 
 
