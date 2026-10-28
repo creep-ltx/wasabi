@@ -3238,6 +3238,7 @@ static BOOL ui_reaction(struct Window *w, const void *lay, int depth,
 #define MUIA_Text_Contents     0x8042f8dc
 #define MUIA_String_Contents   0x80428ffd
 #define MUIA_InputMode         0x8042fb04
+#define MUIA_ShortHelp         0x80420b17
 #define MUIA_Selected          0x8042654b
 #define MUIA_Disabled          0x80423661
 #define MUIA_Cycle_Active      0x80421788
@@ -3627,6 +3628,33 @@ static ULONG mui3_input_mode(Object *o)
     return (ad[0] & 0x10000) ? 1 : 3;
 }
 
+/* The text of the first Text.mui inside a group (a button made of a
+ * group holds its label that way, often beside an image). */
+static BOOL ui_mui_group_text(Object *o, int depth, char *out, LONG sz)
+{
+    struct List *l = NULL;
+    struct Node *n;
+    ULONG v = 0;
+    int k = 0;
+
+    if (depth > 4 || !ui_obj_ok(o) || !ui_class_is(o, "Area.mui"))
+        return FALSE;
+    if (ui_class_is(o, "Text.mui")) {
+        if (GetAttr(MUIA_Text_Contents, o, &v))
+            ui_mui_text((const UBYTE *)v, out, sz);
+        return out[0] != '\0';
+    }
+    if (!ui_class_is(o, "Group.mui") ||
+        !GetAttr(MUIA_Group_ChildList, o, (ULONG *)&l) || !ui_readable(l))
+        return FALSE;
+    for (n = l->lh_Head; ui_readable(n) && n->ln_Succ && k < 20;
+         n = n->ln_Succ, k++)
+        if (ui_mui_group_text((Object *)((struct _Object *)n + 1),
+                              depth + 1, out, sz))
+            return TRUE;
+    return FALSE;
+}
+
 static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
 {
     struct UiItem it;
@@ -3670,11 +3698,29 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
     } else if (ui_class_is(o, "Group.mui")) {
         struct List *l = NULL;
         struct Node *n;
+        ULONG gmode = 0;
         int k = 0;
         if (it.w <= 0 || it.h <= 0)
             return TRUE;                 /* a page not shown: nor are its
                                           * children, and they would use
                                           * up the 400 */
+        if (g_muimaster)
+            gmode = mui3_input_mode(o);
+        else
+            GetAttr(MUIA_InputMode, o, &gmode);
+        if (gmode) {
+            /* A button made of a group (a frame, an image, a Text): the
+             * group is the thing that is clicked, so it is the item and
+             * its children are not. Its label is the Text's, else the
+             * tooltip (an icon-only button has just that). */
+            it.kind = gmode == 3 ? "toggle" : "button";
+            if (!ui_mui_group_text(o, 0, it.label, sizeof(it.label)) &&
+                GetAttr(MUIA_ShortHelp, o, &v) && v)
+                ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
+            if (GetAttr(MUIA_Selected, o, &v) && v)
+                it.selected = TRUE;
+            goto emit;
+        }
         if (!GetAttr(MUIA_Group_ChildList, o, (ULONG *)&l) ||
             !ui_readable(l))
             return TRUE;
@@ -3707,6 +3753,7 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
             return mw_emit(mw, &it);
         }
     }
+emit:
     if (it.w <= 0 || it.h <= 0)
         return TRUE;                     /* hidden: a page not shown */
     /* A control MUI lays out after its Label: string, cycle, slider,
