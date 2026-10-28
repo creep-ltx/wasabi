@@ -3466,6 +3466,8 @@ struct MuiWalk {
     UiSink sink;
     void *ctx;
     int count;
+    int in_btn;                      /* inside a group button: its Text is
+                                      * not a label of its own */
     char pending[120];               /* the last label, for the next
                                       * unlabelled control */
     LONG px, py, pw, ph;             /* where that label is */
@@ -3628,6 +3630,21 @@ static ULONG mui3_input_mode(Object *o)
     return (ad[0] & 0x10000) ? 1 : 3;
 }
 
+/*
+ * A Group.mui with an input mode: mui3_input_mode's bit 16 is set on every
+ * group alike (it marks the button frame, not the mode), so it cannot tell a
+ * toggle group from a button group. Found by comparing a RelVerify and a
+ * Toggle group of the same size and frame in muimaster 19.35: the word 120
+ * bytes into the object differs by bit 7 (0x80) and by nothing else that is
+ * not geometry or a pointer, and it does not change when the toggle is
+ * pressed. Answers 1 (button) or 3 (toggle), as MUIA_InputMode would.
+ */
+static ULONG mui3_group_mode(Object *o)
+{
+    const ULONG *w = (const ULONG *)((const UBYTE *)o + 120);
+    return ui_readable(w) && (*w & 0x80) ? 3 : 1;
+}
+
 /* The tooltip of a button that draws its own text: MUIA_ShortHelp read
  * through GetAttr, like every other attribute here. Answers the string
  * pointer, or FALSE when the object has none or it is not readable text. */
@@ -3695,6 +3712,34 @@ static BOOL ui_aalist_rows(Object *o, ULONG count, struct UiItem *list,
  */
 #define AAT_CONTENTS (0x80000000UL + 0x53410001UL)
 
+
+/* The text of the first Text.mui inside a group (a button made of a
+ * group holds its label that way, often beside an image). */
+static BOOL ui_mui_group_text(Object *o, int depth, char *out, LONG sz)
+{
+    struct List *l = NULL;
+    struct Node *n;
+    ULONG v = 0;
+    int k = 0;
+
+    if (depth > 4 || !ui_obj_ok(o) || !ui_class_is(o, "Area.mui"))
+        return FALSE;
+    if (ui_class_is(o, "Text.mui")) {
+        if (GetAttr(MUIA_Text_Contents, o, &v))
+            ui_mui_text((const UBYTE *)v, out, sz);
+        return out[0] != '\0';
+    }
+    if (!ui_class_is(o, "Group.mui") ||
+        !GetAttr(MUIA_Group_ChildList, o, (ULONG *)&l) || !ui_readable(l))
+        return FALSE;
+    for (n = l->lh_Head; ui_readable(n) && n->ln_Succ && k < 20;
+         n = n->ln_Succ, k++)
+        if (ui_mui_group_text((Object *)((struct _Object *)n + 1),
+                              depth + 1, out, sz))
+            return TRUE;
+    return FALSE;
+}
+
 static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
 {
     struct UiItem it;
@@ -3738,19 +3783,60 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
     } else if (ui_class_is(o, "Group.mui")) {
         struct List *l = NULL;
         struct Node *n;
+        ULONG gmode = 0;
+        BOOL inbtn = FALSE;
         int k = 0;
         if (it.w <= 0 || it.h <= 0)
             return TRUE;                 /* a page not shown: nor are its
                                           * children, and they would use
                                           * up the 400 */
+        /* The window's root group is never an item. */
+        if (depth > 0) {
+            if (g_muimaster) {
+                gmode = mui3_input_mode(o);
+                if (gmode)
+                    gmode = mui3_group_mode(o);
+            } else {
+                GetAttr(MUIA_InputMode, o, &gmode);
+            }
+        }
+        if (gmode) {
+            /* A button made of a group (a frame, an image, a Text): the
+             * group is the thing that is clicked, so it is an item, and
+             * its children are still walked (a group that merely holds
+             * other gadgets is not a button). Its label is its own
+             * Text's, else the tooltip (an icon-only button has just
+             * that); with neither it is only a container. */
+            it.kind = gmode == 3 ? "toggle" : "button";
+            if (!ui_mui_group_text(o, 0, it.label, sizeof(it.label)) &&
+                mui_short_help(o, &v))
+                ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
+            if (it.label[0]) {
+                if (GetAttr(MUIA_Selected, o, &v) && v)
+                    it.selected = TRUE;
+                mw->next_fallback[0] = '\0';
+                mw->pending[0] = '\0';
+                if (GetAttr(MUIA_ObjectID, o, &v))
+                    it.id = v;
+                if (!mw_emit(mw, &it))
+                    return FALSE;
+                inbtn = TRUE;
+                mw->in_btn++;
+            }
+        }
         if (!GetAttr(MUIA_Group_ChildList, o, (ULONG *)&l) ||
             !ui_readable(l))
             return TRUE;
         for (n = l->lh_Head; ui_readable(n) && n->ln_Succ && k < 200;
              n = n->ln_Succ, k++)
             if (!ui_mui_walk((Object *)((struct _Object *)n + 1), depth + 1,
-                             mw))
+                             mw)) {
+                if (inbtn)
+                    mw->in_btn--;
                 return FALSE;
+            }
+        if (inbtn)
+            mw->in_btn--;
         return TRUE;
     } else if (GetAttr(AAL_COUNT, o, &v)) {
         if (it.w <= 0 || it.h <= 0)
@@ -3778,6 +3864,9 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
         if (mode && GetAttr(MUIA_Selected, o, &v) && v)
             it.selected = TRUE;
         if (!mode) {                     /* a label: remember it */
+            if (mw->in_btn)          /* the text of a group button: it is the
+                                      * button's label already */
+                return TRUE;
             if (it.label[0]) {
                 copystr(mw->pending, sizeof(mw->pending), it.label);
                 mw->px = it.x; mw->py = it.y; mw->pw = it.w; mw->ph = it.h;
