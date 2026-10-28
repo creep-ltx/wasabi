@@ -56,6 +56,7 @@ MOUSE = 0x4A
 UI, UIACT, AREXX, PORTS = 0x53, 0x54, 0x55, 0x56
 SUM = 0x57
 INPUTS = 0x58
+TEXT = 0x59
 
 ROOT = "/tmp/fakeamiga"
 KEY = ""
@@ -70,6 +71,17 @@ CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,snoop,"
         "reboot,restart,ps,kill,speed,speedfile,quit,install,grab,screen,"
         "hb,guru,snoopentry,psfree,key,windows,health,live,clip,detach,"
         "slots,ui,arexx,mouse,sum,inputs")
+# --zenix: play Zenix's daemon (its caps, TEXT, pids in PS, Unix modes,
+# REBOOT's flags and its ERR after the OK, HEALTH without the largest
+# blocks, GRAB's note). The real one is net/wasabi/ in Zenix; this is
+# what the always-run suite checks the client against.
+ZENIX = False
+ZENIX_CAPS = ("ping,info,ls,put,get,run,del,mkdir,debug,reboot,rebootto,"
+              "restart,ps,kill,speed,speedfile,quit,grab,screen,windows,hb,"
+              "key,health,detach,slots,sum,inputs,zenix,text")
+# --require-tls: plain clients get the ERR an AmigaOS wasabid with TLS
+# ready sends them.
+REQUIRE_TLS = False
 # --drop-stream-after N: close the FIRST subscribed stream connection
 # after N emit ticks, once per mock lifetime - the client's reconnect
 # then finds a mock that behaves. This is how the suite proves the
@@ -199,6 +211,8 @@ class Handler(socketserver.BaseRequestHandler):
         # ClientHello, anything else a plain HELLO frame.
         first = self.request.recv(1, socket.MSG_PEEK)
         if first == b"\x16" and TLS_CTX is None:
+            with open(os.path.join(ROOT, "tls-tries-%d" % PORT), "a") as f:
+                f.write("try\n")       # the plain-hosts tests count these
             return                      # TLS asked for, none here: close
         if TLS_CTX is not None:
             if first == b"\x16":
@@ -215,6 +229,11 @@ class Handler(socketserver.BaseRequestHandler):
             key, _ = unpack_str(payload, 2)
             if ver != VERSION:
                 return self.err("protocol v%d not supported" % ver)
+            if REQUIRE_TLS and not isinstance(self.request, ssl.SSLSocket):
+                return self.err("this Amiga accepts only encrypted "
+                                "connections - the client needs its keys "
+                                "(wasabi keys), or start wasabid with "
+                                "'plain'")
             if key != KEY:
                 return self.err("bad key")
             welcome = struct.pack(">H", VERSION) + pack_str(
@@ -282,7 +301,9 @@ class Handler(socketserver.BaseRequestHandler):
         elif tag == SPEED:
             self.do_speed(payload)
         elif tag == GRAB:
-            self.do_grab()
+            self.do_grab(payload)
+        elif tag == TEXT and ZENIX:
+            self.do_text(payload)
         elif tag == SCREEN:
             self.do_screens(payload)
         elif tag == KEYIN:
@@ -318,6 +339,8 @@ class Handler(socketserver.BaseRequestHandler):
             self.do_kill(payload)
         elif tag in (DEBUG, SNOOP):
             self.do_stream(tag, payload)
+        elif tag == REBOOT and ZENIX:
+            self.do_reboot_zenix(payload)
         elif tag == REBOOT:
             self.send(OK)
             print("[mock] REBOOT requested (ignored)", file=sys.stderr)
@@ -337,6 +360,8 @@ class Handler(socketserver.BaseRequestHandler):
     # --- commands ---
     def do_ls(self, payload):
         path, _ = unpack_str(payload)
+        if ZENIX and not path.startswith("/"):
+            return self.err("a Zenix path starts with /")
         try:
             full = amiga_path(path)
             lines = []
@@ -379,8 +404,10 @@ class Handler(socketserver.BaseRequestHandler):
             self.err(str(exc), 213)
 
     def do_put(self, payload):
-        size, _prot = struct.unpack_from(">II", payload, 0)
+        size, prot = struct.unpack_from(">II", payload, 0)
         path, _ = unpack_str(payload, 8)
+        with open(os.path.join(ROOT, "put-prot.log"), "a") as f:
+            f.write("%08x %s\n" % (prot, path))
         # Refuse to overwrite the running daemon, as the C side does -
         # but drain the body first, or the DATA frames read back as
         # commands and desync the session.
@@ -689,6 +716,15 @@ class Handler(socketserver.BaseRequestHandler):
         self.send(END)
 
     def do_health(self):
+        if ZENIX:                       # Zenix's keys: no largest blocks
+            rows = ["mem.chip.free 1187840", "mem.fast.free 0", "emu68 no",
+                    "zenix.version 0.3.1-mock", "uptime 3723", "procs 9",
+                    "load.ready 1", "net.sl0.rx 100", "net.sl0.tx 200",
+                    "net.sl0.bad 1", "disk.root.free.kb 5120"]
+            return self.send_data(("\n".join(rows) + "\n").encode("latin-1"))
+        self.do_health_amiga()
+
+    def do_health_amiga(self):
         """An Emu68 A1200 at a steady 100 68k MIPS, 51.5 C, which had
         an under-voltage and a throttle once since boot but not now."""
         t = time.time()
@@ -757,14 +793,97 @@ class Handler(socketserver.BaseRequestHandler):
             return self.send_data(struct.pack(">iI", 0, 0) + b"47.42")
         self.send_data(struct.pack(">iI", 10, 209))
 
-    def do_grab(self):
-        """A tiny synthetic screen: header then raw RGB rows."""
+    def do_grab(self, payload=b""):
+        """A tiny synthetic screen: header then raw RGB rows. Zenix: with
+        GRAB's flags bit 0 and a file grab-moved in ROOT, the note that
+        the console moved while it was read comes before END."""
         w, h = 8, 4
         px = bytearray()
         for y in range(h):
             for x in range(w):
                 px += bytes(((x * 32) % 256, (y * 64) % 256, 128))
-        self.send_data(struct.pack(">III", w, h, 3) + bytes(px))
+        flags = 0
+        if len(payload) >= 2:
+            n = struct.unpack_from(">H", payload, 0)[0]
+            if len(payload) >= 2 + n + 4:
+                flags = struct.unpack_from(">I", payload, 2 + n)[0]
+        with open(os.path.join(ROOT, "grab-flags.log"), "a") as f:
+            f.write("%d\n" % flags)
+        self.send(DATA, struct.pack(">III", w, h, 3) + bytes(px))
+        if ZENIX and flags & 1 and \
+                os.path.exists(os.path.join(ROOT, "grab-moved")):
+            self.send(STDERR, b"the console changed while it was read "
+                      b"(each line is right; the picture may mix moments)")
+        self.send(END)
+
+    # Zenix's console, played from the file mock-console in ROOT (its
+    # lines); console 5 was never used.
+    CON_ROWS, CON_COLS = 6, 40
+
+    def console_grid(self, console):
+        try:
+            with open(os.path.join(ROOT, "mock-console"), "rb") as f:
+                lines = f.read().split(b"\n")
+        except OSError:
+            lines = []
+        rows = [ln[:self.CON_COLS].ljust(self.CON_COLS)
+                for ln in lines[:self.CON_ROWS]]
+        rows += [b" " * self.CON_COLS] * (self.CON_ROWS - len(rows))
+        return rows
+
+    def do_text(self, payload):
+        flags, console, timeout = struct.unpack_from(">III", payload, 0)
+        pattern, _ = unpack_str(payload, 12)
+        if console > 10:
+            return self.err("no such console (1-10, 0 the shown one)")
+        if console == 5:
+            return self.err("that console was never used: No such device "
+                            "or address")
+        console = console or 1
+        rx = re.compile(pattern) if pattern else None
+        end = time.time() + timeout
+        while True:
+            rows = self.console_grid(console)
+            hit = rx is None or any(
+                rx.search(r.decode("latin-1").rstrip()) for r in rows)
+            if hit or time.time() >= end:
+                break
+            time.sleep(0.1)
+        head = struct.pack(">HHHHIBBBB", self.CON_ROWS, self.CON_COLS, 2, 7,
+                           42, 1, 0, console, 0)
+        if flags & 1:
+            body = b"".join(bytes((c, 1 if i == 0 else 0, 0x07))
+                            for r in rows for i, c in enumerate(r))
+        else:
+            body = b"".join(rows)
+        self.send(DATA, head + body)
+        if hit:
+            self.send(END)
+        else:
+            self.err("timeout")
+
+    def do_reboot_zenix(self, payload):
+        """REBOOT as Zenix's daemon answers it: the guard first (a file
+        reboot-guard in ROOT names what runs), then OK; the flags go to
+        reboot-flags; a file reboot-fails makes /bin/reboot "come back"
+        with its words as an ERR after the OK. Then the machine "resets":
+        the connection closes."""
+        flags = struct.unpack_from(">I", payload, 0)[0] if payload else 0
+        with open(os.path.join(ROOT, "reboot-flags"), "w") as f:
+            f.write("%d\n" % flags)
+        guard = os.path.join(ROOT, "reboot-guard")
+        if os.path.exists(guard) and not flags & 8:
+            with open(guard) as f:
+                return self.err("%s is running (pid 77): a reboot now could "
+                                "leave its work half done - wait for it, or "
+                                "skip the guard" % f.read().strip())
+        self.send(OK)
+        fails = os.path.join(ROOT, "reboot-fails")
+        if os.path.exists(fails):
+            time.sleep(0.3)
+            with open(fails) as f:
+                self.err(f.read().strip())
+        raise EOFError                  # the machine went down
 
     def do_sum(self, payload):
         """SUM: logs the region it was asked for (the screen's own
@@ -782,7 +901,16 @@ class Handler(socketserver.BaseRequestHandler):
         total = zlib.crc32(struct.pack(">hhhh", x, y, w, h) + screen)
         self.send_data(struct.pack(">II", total, w * h))
 
+    # Zenix's processes: the address field is the pid.
+    ZENIX_PROCS = [(1, 0, "wait", "boot"), (2, 0, "wait", "init"),
+                   (3, 0, "wait", "netd"), (12, 0, "run", "wasabid"),
+                   (40, 0, "wait", "sh"), (41, 0, "wait", "sh")]
+
     def do_ps(self, payload):
+        if ZENIX:
+            lines = ["0x%08x p %d %s 0 -1 %s\t%s" % (pid, pri, st, n, n)
+                     for pid, pri, st, n in self.ZENIX_PROCS]
+            return self.send_data(("\n".join(lines) + "\n").encode())
         # Bit 0 of the flags word asks for the headroom column. An older
         # client sends no payload at all, and must still get exactly the
         # seven fields it has always parsed - that compatibility is the
@@ -801,6 +929,15 @@ class Handler(socketserver.BaseRequestHandler):
 
     def do_kill(self, payload):
         target, _ = unpack_str(payload, 4)
+        if ZENIX:
+            flags = struct.unpack_from(">I", payload, 0)[0]
+            self.log_ui("kill %s %d" % (target, flags))
+            hits = [p for p in self.ZENIX_PROCS if "0x%08x" % p[0] == target
+                    or p[3] == target]
+            if len(hits) != 1:
+                return self.err("no process by that name" if not hits else
+                                "several processes have that name")
+            return self.send(OK)
         tl = target.lower()
         hits = [r for r in self.MOCK_TASKS
                 if r.addr.lower() == tl or r.name.lower() == tl or
@@ -913,7 +1050,8 @@ def tls_server(d):
 
 
 def main():
-    global ROOT, KEY, PORT, BANNER, CAPS, REFUSED, DROP_AFTER, TLS_CTX
+    global ROOT, KEY, PORT, BANNER, CAPS, REFUSED, DROP_AFTER, TLS_CTX, \
+        ZENIX, REQUIRE_TLS
     p = argparse.ArgumentParser()
     p.add_argument("--root", default=ROOT)
     p.add_argument("--port", type=int, default=1234)
@@ -927,6 +1065,11 @@ def main():
     p.add_argument("--drop-stream-after", type=int, default=0, metavar="N",
                    help="close the first stream connection after N emit "
                         "ticks (once) - for the reconnect tests")
+    p.add_argument("--zenix", action="store_true",
+                   help="play Zenix's daemon (its caps, TEXT, pids, ...)")
+    p.add_argument("--require-tls", action="store_true",
+                   help="refuse plain clients, as an AmigaOS wasabid with "
+                        "TLS ready does")
     p.add_argument("--tls", metavar="DIR",
                    help="also speak TLS, with DIR's amiga.crt/.key and ca.crt "
                         "(what 'wasabi keys drive' writes)")
@@ -937,6 +1080,11 @@ def main():
     DROP_AFTER = args.drop_stream_after
     ROOT, KEY, PORT, BANNER = args.root, args.key, args.port, args.banner
     CAPS = args.caps
+    ZENIX, REQUIRE_TLS = args.zenix, args.require_tls
+    if ZENIX:
+        if CAPS == p.get_default("caps"):
+            CAPS = ZENIX_CAPS
+        BANNER = BANNER or "Zenix 0.3.1-mock"
     os.makedirs(ROOT, exist_ok=True)
     threading.Thread(
         target=discovery_responder,

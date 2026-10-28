@@ -41,7 +41,9 @@ SLOTS, FREE, SLOT = 0x50, 0x51, 0x52
 UI, UIACT, AREXX, PORTS = 0x53, 0x54, 0x55, 0x56   # daemon 0.5+
 SUM = 0x57                       # daemon 0.9 (updated 15.10.2026)+
 INPUTS = 0x58                    # daemon 0.10b4+
+TEXT = 0x59                      # Zenix's daemon (caps text)
 FREE_BREAK_ONLY = 1
+GRAB_NOTES = 1          # GRAB flags (caps zenix): STDERR notes welcome
 RUN_SLOT = 4            # RUN flag: tell me which slot (daemon 0.4+)
 
 # Amiga DateStamp epoch.
@@ -49,6 +51,8 @@ AMIGA_EPOCH = 252460800  # 1978-01-01 00:00:00 UTC as a Unix timestamp
 
 # Protection bits: the low nibble is ACTIVE LOW (set == denied).
 PROT_DEFAULT = 0xFFFFFFFF
+# Zenix (caps zenix): bit 31 set says the rest is a Unix mode.
+PROT_UNIX = 0x80000000
 
 
 class WasabiError(Exception):
@@ -104,7 +108,14 @@ def system_place(path, extra=()):
     return None
 
 
-def check_system_place(args, path, verb):
+def is_zenix(conn):
+    """A Zenix daemon (caps zenix): Unix paths, pids, Unix modes."""
+    return "zenix" in getattr(conn, "caps", ())
+
+
+def check_system_place(args, path, verb, conn=None):
+    if conn is not None and is_zenix(conn):
+        return                          # Unix paths: no SYS:, no C:
     place = system_place(path, getattr(args, "protect", ()))
     if place and not getattr(args, "force", False):
         raise WasabiError(
@@ -326,11 +337,17 @@ class Conn:
         self.host, self.port, self.key = host, port, key
         self.buf = b""
         auto = tls is None
+        known_plain = False             # went plain from the plain list
         self.sock = self._open(host, port, timeout)
         peer = self.sock.getpeername()[0]
         if auto:
             if PLAIN or not want_tls(peer):
                 tls = False
+            elif not tls_pinned(peer, port) and (
+                    plain_configured(host, port, peer) or
+                    "%s:%d" % (peer, port) in _plains()):
+                tls = False
+                known_plain = True
             elif not have_keys():
                 if tls_pinned(peer, port):
                     self.sock.close()
@@ -364,12 +381,23 @@ class Conn:
                         "or another Amiga now answers there): 'wasabi keys "
                         "forget %s' makes it plain again (or --plain for "
                         "one command)" % (peer, port, peer))
-                plain_warning(peer)
+                plain_warning(peer, port)
+                plain_remember(peer, port)
                 self.sock = self._open(host, port, timeout)
                 self.tls = False
         try:
             try:
                 self._hello(key, timeout)
+            except WasabiError as e:
+                # On the plain list, but it asks for encryption now (its
+                # AmiSSL is back): strike it off, try again encrypted.
+                if known_plain and "only encrypted" in str(e) and \
+                        not plain_configured(host, port, peer):
+                    self.sock.close()
+                    plain_forget(peer, port)
+                    self.__init__(host, port, key, timeout)
+                    return
+                raise
             except ssl.SSLError as e:
                 # TLS 1.3: the Amiga checks our certificate after we think
                 # the handshake is done, so its "no" arrives here.
@@ -563,14 +591,105 @@ def tls_forget(host):
     return gone
 
 
+# Amigas known to have no encryption: found so once (a TLS try closed,
+# then plain worked), or named in the config (plain@ADDRESS:PORT = yes).
+# To them the client goes plain at once - no TLS try per command, no
+# warning every time. It weakens nothing: the fallback was automatic
+# anyway. A pin (above) always wins over this list, and an Amiga that
+# now asks for encryption is tried encrypted and struck off.
+def _plain_path():
+    return os.path.join(_xdg("XDG_CONFIG_HOME", "~/.config"), "wasabi",
+                        "plain-hosts")
+
+
+def _plains():
+    try:
+        with open(_plain_path()) as f:
+            return {l.strip() for l in f if l.strip()}
+    except OSError:
+        return set()
+
+
+def plain_remember(peer, port):
+    entry = "%s:%d" % (peer, port)
+    if entry in _plains():
+        return
+    try:
+        os.makedirs(os.path.dirname(_plain_path()), exist_ok=True)
+        with open(_plain_path(), "a") as f:
+            f.write(entry + "\n")
+    except OSError:
+        pass                            # a read-only config: no memory
+
+
+def plain_forget(host, port=None):
+    """Strike HOST (every port, or HOST:PORT) off the plain list."""
+    have = _plains()
+    if port is not None:
+        keep = [p for p in have if p != "%s:%d" % (host, port)]
+    else:
+        keep = [p for p in have if p != host and
+                not p.startswith(host + ":")]
+    if len(keep) == len(have):
+        return 0
+    try:
+        with open(_plain_path(), "w") as f:
+            f.write("".join(p + "\n" for p in sorted(keep)))
+    except OSError:
+        pass
+    return len(have) - len(keep)
+
+
+def host_setting(name, host, port, peer=None):
+    """A per-machine line of the config, NAME@ADDRESS:PORT = VALUE:
+    the address as given (--host) or as connected to. None if none."""
+    cfg = load_config()
+    for h in (host, peer):
+        if h:
+            v = cfg.get("%s@%s:%d" % (name, h, port))
+            if v is not None:
+                return v
+    return None
+
+
+def plain_configured(host, port, peer=None):
+    v = host_setting("plain", host, port, peer)
+    return v is not None and v.lower() in ("yes", "true", "1", "on")
+
+
+def key_for(host, port, given=None):
+    """The key for one machine: --key, then the config's
+    key@ADDRESS:PORT, then WASABI_KEY, then the config's key. So Zenix
+    (its own key, port 1236) and AmigaOS's wasabid (1234) on the same
+    A1200 each get theirs."""
+    if given is not None:
+        return given
+    v = host_setting("key", host, port)
+    if v is None and host:
+        try:
+            v = host_setting("key", None, port,
+                             socket.gethostbyname(host))
+        except OSError:
+            pass
+    if v is not None:
+        return v
+    if "WASABI_KEY" in os.environ:
+        return os.environ["WASABI_KEY"]
+    return load_config().get("key", "")
+
+
 _WARNED = set()
 
 
-def plain_warning(peer):
+def plain_warning(peer, port=None):
     if peer not in _WARNED:
         _WARNED.add(peer)
         print("wasabi: %s has no encryption (no AmiSSL or keys there) - "
-              "this connection is plain" % peer, file=sys.stderr)
+              "this connection is plain%s" % (
+                  peer if port is None else "%s:%d" % (peer, port),
+                  "" if port is None else
+                  "; remembered, so not said again ('wasabi keys forget "
+                  "%s' to try encryption again)" % peer), file=sys.stderr)
 
 
 def tls_context():
@@ -746,13 +865,17 @@ def cmd_keys(args):
                 print("%-24s %s" % (n, " ".join(subj.decode().split())))
         for p in sorted(_pins()):
             print("%-24s reached encrypted: plain is refused" % p)
+        for p in sorted(_plains() - _pins()):
+            print("%-24s has no encryption: reached plain at once" % p)
         return 0
     if args.action == "forget":
         if not args.where:
             raise WasabiError("wasabi keys forget HOST - the address as "
                               "'keys show' lists it")
         n = tls_forget(args.where)
-        print("forgot %d encrypted Amiga(s) at %s" % (n, args.where))
+        m = plain_forget(args.where)
+        print("forgot %d encrypted Amiga(s) at %s" % (n, args.where) +
+              (", and %d known to have no encryption" % m if m else ""))
         return 0
     if args.action == "drive":
         if not args.where or not args.name:
@@ -892,6 +1015,8 @@ def ls_entries(conn, path):
 
 
 def cmd_ls(conn, args):
+    if not args.path and is_zenix(conn):
+        args.path = "/"                 # Zenix has no list of volumes
     entries = ls_entries(conn, args.path)
     if args.json:
         emit_json([{"name": name, "dir": kind == "d",
@@ -910,8 +1035,29 @@ def cmd_ls(conn, args):
 
 
 def cmd_put(conn, args):
-    check_system_place(args, args.remote, "write")
-    do_put(conn, args.local, args.remote, quiet=args.quiet)
+    check_system_place(args, args.remote, "write", conn)
+    prot = PROT_DEFAULT
+    if args.mode is not None:
+        prot = unix_mode(conn, args.mode)
+    do_put(conn, args.local, args.remote, quiet=args.quiet, prot=prot)
+
+
+def unix_mode(conn, text):
+    """PUT's protection word for a Unix mode (caps zenix): bit 31 set,
+    the mode below it."""
+    if not is_zenix(conn):
+        raise WasabiError(
+            "--mode is a Unix mode, for Zenix; this daemon (%s) takes "
+            "AmigaOS protection bits - set them with: wasabi run "
+            "'Protect FILE +e'" % conn.banner)
+    try:
+        mode = int(text, 8)
+    except ValueError:
+        mode = -1
+    if not 0 <= mode <= 0o7777:
+        raise WasabiError("--mode wants an octal mode such as 755 or 644, "
+                          "not %r" % text)
+    return PROT_UNIX | mode
 
 
 # The PUT header carries the size as a u32, and the daemon counts what
@@ -938,7 +1084,7 @@ def put_bytes(conn, data, remote, prot=PROT_DEFAULT):
     conn.expect_ok()
 
 
-def do_put(conn, local, remote, quiet=False):
+def do_put(conn, local, remote, quiet=False, prot=PROT_DEFAULT):
     """Upload a file, a chunk at a time.
 
     Read straight from disk into each frame rather than loading the file
@@ -947,7 +1093,7 @@ def do_put(conn, local, remote, quiet=False):
     RAM than the thing it is sending.
     """
     size = os.path.getsize(local)
-    _put_header(conn, size, remote)
+    _put_header(conn, size, remote, prot)
     sent = 0
     with open(local, "rb") as fh:
         while sent < size:
@@ -1285,7 +1431,7 @@ def cmd_update(conn, args):
     try:
         # The new build is proven the way this connection works:
         # encrypted if this one is.
-        probe = Conn(conn.host, testport, args.key, timeout=20.0,
+        probe = Conn(conn.host, testport, conn.key, timeout=20.0,
                      tls=conn.tls)
     except (OSError, WasabiError) as exc:
         abort("it did not come up as a daemon on port %d (%s)"
@@ -1333,7 +1479,7 @@ def cmd_quit(conn, args):
 
 
 def cmd_deploy(conn, args):
-    check_system_place(args, args.remote, "write")
+    check_system_place(args, args.remote, "write", conn)
     do_put(conn, args.local, args.remote, quiet=False)
     rc = 0
     if args.run:
@@ -1838,9 +1984,27 @@ def grab_pixels(conn, screen="", raw=False):
             "this daemon (%s) cannot grab the screen - update it with "
             "'wasabi update wasabid'" % conn.banner)
     t0 = time.time()
-    conn.send(GRAB, pack_str(screen or ""))
+    payload = pack_str(screen or "")
+    if is_zenix(conn):
+        payload += struct.pack(">I", GRAB_NOTES)
+    conn.send(GRAB, payload)
     blob = []
-    drain_to_end(conn, blob.append)
+    while True:
+        tag, part = conn.recv()
+        if tag == DATA:
+            blob.append(part)
+        elif tag == END:
+            break
+        elif tag == STDERR:
+            # A note about the picture (Zenix: the console scrolled or
+            # changed mode while it was read - every line is right, the
+            # whole may mix two moments). Said, not fatal.
+            print("wasabi: grab: %s" % part.decode("latin-1").strip(),
+                  file=sys.stderr)
+        elif tag == ERR:
+            raise WasabiError(conn._errtext(part))
+        else:
+            raise WasabiError("unexpected tag 0x%02x in data stream" % tag)
     data = b"".join(blob)
     if len(data) < 12:
         raise WasabiError("the daemon sent no image data")
@@ -2091,6 +2255,155 @@ def screen_now(conn, box, k=None):
     return zlib.crc32(pixels), len(pixels)
 
 
+# --- the console as text (Zenix's daemon, caps text) -------------------
+
+TEXT_CELLS = 1          # TEXT flags, bit 0: each cell's style and colour
+TEXT_HEADER = 16        # u16 rows, cols, cursor row, column; u32 changes;
+                        # u8 shown, pcfont, console, 0
+TEXT_MAX_WAIT = 3600    # the longest wait one TEXT may ask for, seconds
+TEXT_MAX_PATTERN = 255
+
+# What CP437 draws for 0x01-0x1F and 0x7F (Python's codec makes them
+# control characters, which a terminal would act on).
+_CP437_LOW = ("\u263a\u263b\u2665\u2666\u2663\u2660\u2022\u25d8\u25cb"
+              "\u25d9\u2642\u2640\u266a\u266b\u263c\u25ba\u25c4\u2195"
+              "\u203c\u00b6\u00a7\u25ac\u21a8\u2191\u2193\u2192\u2190"
+              "\u221f\u2194\u25b2\u25bc")
+_CP437_FIX = dict([(0, " "), (0x7F, "\u2302")] +
+                  [(i + 1, c) for i, c in enumerate(_CP437_LOW)])
+_LATIN1_FIX = {i: " " for i in list(range(0x20)) + list(range(0x7F, 0xA0))}
+
+
+def console_glyphs(raw, pcfont):
+    """A row of glyph bytes as text: CP437 when a PC font is loaded,
+    else Latin-1; control characters never reach the terminal."""
+    if pcfont:
+        return bytes(raw).decode("cp437").translate(_CP437_FIX)
+    return bytes(raw).decode("latin-1").translate(_LATIN1_FIX)
+
+
+def parse_text(blob, cells=False):
+    """TEXT's answer as a dict: the grid's lines (trailing spaces gone),
+    its size, the cursor, and with cells each row's style and colour
+    bytes as hex (colour: foreground low nibble, background high)."""
+    if len(blob) < TEXT_HEADER:
+        raise WasabiError("the daemon sent no console header")
+    rows, cols, crow, ccol, changes, shown, pcfont, console, _ = \
+        struct.unpack_from(">HHHHIBBBB", blob, 0)
+    per = 3 if cells else 1
+    body = blob[TEXT_HEADER:]
+    if len(body) != rows * cols * per:
+        raise WasabiError("short console text: %d of %d bytes for %dx%d"
+                          % (len(body), rows * cols * per, cols, rows))
+    info = {"console": console, "rows": rows, "cols": cols,
+            "cursor": [crow, ccol], "shown": bool(shown),
+            "pcfont": bool(pcfont), "changes": changes, "lines": []}
+    if cells:
+        info["styles"], info["colours"] = [], []
+    for r in range(rows):
+        row = body[r * cols * per:(r + 1) * cols * per]
+        info["lines"].append(console_glyphs(row[0::3] if cells else row,
+                                            pcfont).rstrip())
+        if cells:
+            info["styles"].append(row[1::3].hex())
+            info["colours"].append(row[2::3].hex())
+    return info
+
+
+def console_text(conn, console=0, cells=False, pattern="", timeout=0.0):
+    """The console's text (TEXT): (info, met). With a pattern (an
+    extended regular expression) the daemon waits until a row matches
+    or timeout seconds pass; met is False then, and info is the grid as
+    it was. console 0 is the one on the display."""
+    if conn.caps and "text" not in conn.caps:
+        raise WasabiError(
+            "this daemon (%s) cannot give its screen as text - that is "
+            "Zenix's console (caps text); here, use grab" % conn.banner)
+    pat = pattern.encode("latin-1", "replace")
+    if len(pat) > TEXT_MAX_PATTERN:
+        raise WasabiError("the pattern is %d bytes; the daemon takes at "
+                          "most %d" % (len(pat), TEXT_MAX_PATTERN))
+    deadline = time.time() + max(0.0, timeout)
+    while True:
+        left = deadline - time.time()
+        secs = 0 if not pattern or left <= 0 else \
+            min(TEXT_MAX_WAIT, int(left) + (left > int(left)))
+        conn.send(TEXT, struct.pack(">III", TEXT_CELLS if cells else 0,
+                                    console, secs) + pack_str(pat))
+        old = conn.sock.gettimeout()
+        conn.sock.settimeout(secs + SILENCE)    # the daemon waits first
+        blob, met = [], None
+        try:
+            while met is None:
+                tag, part = conn.recv()
+                if tag == DATA:
+                    blob.append(part)
+                elif tag == END:
+                    met = True
+                elif tag == ERR:
+                    code, msg = struct.unpack_from(">I", part, 0)[0], \
+                        unpack_str(part, 4)[0]
+                    if msg == "timeout" and not code and blob:
+                        met = False
+                    else:
+                        raise WasabiError(conn._errtext(part))
+                else:
+                    raise WasabiError("unexpected tag 0x%02x in the "
+                                      "console's text" % tag)
+        finally:
+            conn.sock.settimeout(old)
+        info = parse_text(b"".join(blob), cells)
+        if met or time.time() >= deadline:
+            return info, met
+
+
+def text_match(info, pattern):
+    """The first line the pattern matches, as Python's re reads it (the
+    daemon's is POSIX extended; close enough to name the line)."""
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return ""
+    return next((ln for ln in info["lines"] if rx.search(ln)), "")
+
+
+def cmd_text(conn, args):
+    info, _ = console_text(conn, args.console, cells=args.cells)
+    if args.json:
+        emit_json(info)
+        return
+    lines = list(info["lines"])
+    while lines and not lines[-1]:
+        lines.pop()
+    print("\n".join(lines))
+
+
+def wait_text(conn, args):
+    """wait text REGEX: the daemon watches the console, so the network
+    carries one request and one answer, not a picture twice a second."""
+    if not args.target:
+        raise WasabiError("wait text needs a pattern: wasabi wait text "
+                          "'login:'")
+    if args.gone:
+        raise WasabiError("wait text waits for text to appear; --gone is "
+                          "not for it")
+    t0 = time.time()
+    info, met = console_text(conn, args.console, pattern=args.target,
+                             timeout=args.timeout)
+    took = time.time() - t0
+    row = text_match(info, args.target) if met else ""
+    if args.json:
+        emit_json({"met": bool(met), "seconds": round(took, 2),
+                   "detail": row, "lines": info["lines"]})
+    elif met:
+        print("%s after %.1f s%s" % (wait_words(args), took,
+                                     (": " + row.strip()) if row else ""))
+    if met:
+        return 0
+    raise TimeLimit("%s within %g s" % (wait_words(args, done=False),
+                                        args.timeout))
+
+
 def cmd_wait(conn, args):
     """Wait for something to happen on the Amiga, instead of guessing
     with pauses. Exit 0 when it happens, 124 when --timeout runs out.
@@ -2100,6 +2413,8 @@ def cmd_wait(conn, args):
     file read) or, for the screen, one grab.
     """
     what, target = args.what, args.target
+    if what == "text":
+        return wait_text(conn, args)
     if what in ("window", "task", "file") and not target:
         raise WasabiError("wait %s needs a name: wasabi wait %s NAME"
                           % (what, what))
@@ -2187,6 +2502,8 @@ def wait_words(args, done=True):
         verb = ("vanished" if args.gone else
                 "contains '%s'" % args.contains if args.contains is not None
                 else "appeared")
+    elif args.what == "text":
+        thing, verb = 'text matching "%s"' % t, "appeared"
     elif args.what == "change":
         thing, verb = ('window "%s"' % t if t else "the screen"), "changed"
     else:
@@ -2204,30 +2521,88 @@ def wait_words(args, done=True):
     return "%s %s" % (thing, verb)
 
 
-def cmd_wait_up(args):
-    """Wait until the Amiga answers - after a reboot, or a power-on.
-    Needs no connection to start with, so it is not run through the
-    usual connect-first path."""
+# The two systems an A1200 may run, each with its own daemon and port:
+# AmigaOS's wasabid on Wasabi's port, Zenix's on its own (so a pin for
+# the encrypted one never meets the plain one).
+SYSTEM_PORTS = (1234, 1236)
+SYSTEM_NAMES = {"amigaos": "AmigaOS", "zenix": "Zenix"}
+
+
+def system_ports(port):
+    """The ports to try for a machine reached on PORT: both systems'
+    when it is one of them, else that port alone."""
+    if port in SYSTEM_PORTS:
+        return [port] + [p for p in SYSTEM_PORTS if p != port]
+    return [port]
+
+
+def cmd_wait_up(args, expect=None):
+    """Wait until the Amiga answers - after a reboot, or a power-on -
+    on its port or the other system's (AmigaOS 1234, Zenix 1236).
+    expect 'amigaos' or 'zenix': only that system counts. Needs no
+    connection to start with, so it is not run through the usual
+    connect-first path."""
     t0 = time.time()
     deadline = t0 + args.timeout
-    host, port = resolve_target(args)
+    explicit = bool(args.host) and not getattr(args, "host_found", False)
+    host, port = args.host, args.port
+    try:
+        host, port = resolve_target(args)
+    except WasabiError:
+        if explicit:
+            raise
+    hit = cached_host()
+    name = hit[2] if hit else ""
+    ports = system_ports(port)
+    last = ""
+    rounds = 0
     while True:
-        try:
-            c = Conn(host, port, args.key, timeout=min(5.0, SILENCE))
-            banner = c.banner
+        for p in ports if host else ():
+            try:
+                c = Conn(host, p, key_for(host, p, args.key),
+                         timeout=min(5.0, SILENCE))
+            except (OSError, WasabiError) as exc:
+                if isinstance(exc, WasabiError):
+                    last = "%s:%d said: %s" % (host, p, exc)
+                continue
+            banner, zenix = c.banner, is_zenix(c)
             c.close()
+            if expect and (expect == "zenix") != zenix:
+                last = "%s:%d is still %s" % (
+                    host, p, "Zenix" if zenix else "AmigaOS")
+                continue
             took = time.time() - t0
+            if not explicit:
+                cache_host(host, p, name)
             if args.json:
                 emit_json({"met": True, "seconds": round(took, 2),
-                           "detail": banner})
+                           "detail": banner, "port": p})
             else:
-                print("the Amiga answers after %.1f s: %s" % (took, banner))
+                print("the Amiga answers after %.1f s: %s%s"
+                      % (took, banner,
+                         " (port %d)" % p if p != port else ""))
             return 0
-        except (OSError, WasabiError):
-            pass
+        rounds += 1
+        # Not told where it is: look again now and then, as its address
+        # may change at a restart - by the same address, or by name.
+        if not explicit and (host is None or rounds % 3 == 0):
+            found = {}
+            for p in ports:
+                try:
+                    found.update(discover(port=p, timeout=0.5, sweep=False))
+                except OSError:
+                    pass
+            same = [k for k in found if k[0] == host] or \
+                [k for k, (n, _b) in found.items() if name and n == name]
+            if same:
+                host = same[0][0]
+                if same[0][1] not in ports:
+                    ports.append(same[0][1])
         if time.time() >= deadline:
-            raise TimeLimit("the Amiga did not answer within %g s"
-                            % args.timeout)
+            raise TimeLimit("the Amiga did not answer%s within %g s%s"
+                            % (" as %s" % SYSTEM_NAMES[expect] if expect
+                               else "", args.timeout,
+                               " (last: %s)" % last if last else ""))
         time.sleep(1.0)
 
 
@@ -2297,6 +2672,24 @@ def health_facts(cur, prev=None):
                                        (_num(prev, "emu68.arminsn") or 0))
                                       / secs / 1e6, 1)
     f["mailbox"] = cur.get("mailbox") == "yes"
+    if "zenix.version" in cur:          # Zenix's own keys (its HEALTH)
+        f["zenix_version"] = cur["zenix.version"]
+        for k, name in (("uptime", "zenix_uptime_s"), ("procs", "procs"),
+                        ("load.ready", "load_ready"),
+                        ("disk.root.free.kb", "disk_root_free_kb")):
+            v = _num(cur, k)
+            if v is not None:
+                f[name] = v
+        net = {}
+        for k in cur:
+            parts = k.split(".")
+            if len(parts) == 3 and parts[0] == "net" and \
+                    parts[2] in ("rx", "tx", "bad"):
+                v = _num(cur, k)
+                if v is not None:
+                    net.setdefault(parts[1], {})[parts[2]] = v
+        if net:
+            f["net"] = net
     t = _num(cur, "pi.temp")
     if t is not None:
         f["temp_c"] = round(t / 1000.0, 1)
@@ -2328,6 +2721,22 @@ def _kb(k):
 
 def health_text(f):
     out = []
+    if "zenix_version" in f:
+        z = "Zenix %s" % f["zenix_version"]
+        if "zenix_uptime_s" in f:
+            u = f["zenix_uptime_s"]
+            z += ": up %d h %02d min" % (u // 3600, u % 3600 // 60)
+        if "procs" in f:
+            z += ", %d processes" % f["procs"]
+            if "load_ready" in f:
+                z += " (%d ready)" % f["load_ready"]
+        if "disk_root_free_kb" in f:
+            z += ", root disk %s free" % _kb(f["disk_root_free_kb"])
+        out.append(z)
+        for name, n in sorted(f.get("net", {}).items()):
+            out.append("network %s: %d in, %d out, %d bad"
+                       % (name, n.get("rx", 0), n.get("tx", 0),
+                          n.get("bad", 0)))
     if "temp_c" in f:
         pi = "Pi%s: %.1f °C" % (" (%s)" % f["pi_model"]
                                 if f.get("pi_model") else "", f["temp_c"])
@@ -2350,11 +2759,14 @@ def health_text(f):
         if not now and not ever:
             out.append("power: OK - no under-voltage or throttling "
                        "since boot")
+    elif "zenix_version" in f:
+        pass                            # Zenix reads no Pi mailbox
     elif not f.get("mailbox"):
         out.append("Pi: not available (no mailbox.resource - not Emu68 "
                    "on a Pi)")
     if f.get("emu68"):
-        e = "Emu68 %s" % (f.get("emu68_version") or "")
+        e = "Emu68 %s" % (f.get("emu68_version") or "") \
+            if f.get("emu68_version") else "Emu68: yes"
         if "uptime_s" in f:
             u = f["uptime_s"]
             e += ": Pi up %d h %02d min" % (u // 3600, u % 3600 // 60)
@@ -2369,11 +2781,16 @@ def health_text(f):
     else:
         out.append("Emu68: no (counters not available)")
     if "chip_free_kb" in f:
-        out.append("memory: chip %s free (largest block %s), "
-                   "fast %s free (largest %s)"
-                   % (_kb(f["chip_free_kb"]), _kb(f["chip_largest_kb"]),
-                      _kb(f.get("fast_free_kb", 0)),
-                      _kb(f.get("fast_largest_kb", 0))))
+        # The largest blocks are absent where the system has no call for
+        # them (Zenix): free memory alone, then.
+        def mem(kind):
+            t = "%s %s free" % (kind, _kb(f.get("%s_free_kb" % kind, 0)))
+            big = f.get("%s_largest_kb" % kind)
+            if big is not None:
+                t += " (largest %s%s)" % ("block " if kind == "chip" else "",
+                                          _kb(big))
+            return t
+        out.append("memory: %s, %s" % (mem("chip"), mem("fast")))
     if f.get("last_guru"):
         out.append("last guru: %s" % f["last_guru"])
     return out
@@ -2407,7 +2824,7 @@ def cmd_health(conn, args):
             time.sleep(max(0.2, interval - (time.time() - prev["_t"])))
             cur = health_read(conn)
             f = health_facts(cur, prev)
-            f["last_guru"] = last_guru(conn)
+            f["last_guru"] = None if is_zenix(conn) else last_guru(conn)
             if args.raw:
                 print("\n".join("%s %s" % kv for kv in cur.items()
                                 if kv[0] != "_t"))
@@ -2459,6 +2876,7 @@ def cmd_view(args):
                     break
                 except WasabiError:
                     pass
+    args.key = key_for(target[0], target[1], args.key)
     return wasabi_view.serve(sys.modules[__name__], args, target)
 
 
@@ -3489,6 +3907,8 @@ def ps_rows(conn, pattern=None):
 
 def cmd_ps(conn, args):
     rows, want_free = ps_rows(conn, args.pattern)
+    if is_zenix(conn):
+        return ps_zenix(rows, args)
     if args.json:
         emit_json([{"addr": r[0], "kind": "process" if r[1] == "p"
                     else "task", "pri": r[2], "state": r[3],
@@ -3526,6 +3946,21 @@ def cmd_ps(conn, args):
             "%s has %d of %d left (%.0f%%)"
             % (r[7] or r[8], r[5], r[4], 100.0 * r[5] / r[4])
             for r in tight[:3]), file=sys.stderr)
+
+
+def ps_zenix(rows, args):
+    """Zenix's processes: the address field is the pid; no stacks, no
+    CLI numbers (its PS says 0 and -1 for them)."""
+    rows = sorted(rows, key=lambda r: int(r[0], 16))
+    if args.json:
+        emit_json([{"pid": int(r[0], 16), "addr": r[0], "kind": "process",
+                    "pri": r[2], "state": r[3], "name": r[7]}
+                   for r in rows])
+        return
+    print("%6s %4s %-6s  %s" % ("PID", "PRI", "STATE", "NAME"))
+    for r in rows:
+        print("%6d %4d %-6s  %s" % (int(r[0], 16), r[2], r[3], r[7]))
+    print("%d processes" % len(rows), file=sys.stderr)
 
 
 def slot_rows(conn):
@@ -3587,7 +4022,11 @@ def cmd_kill(conn, args):
     address, and re-checks that the task is still alive before it acts.
     """
     target = args.target
-    if not target.lower().startswith("0x"):
+    zenix = is_zenix(conn)
+    if zenix and target.isdigit():
+        target = "0x%08x" % int(target)  # a pid, as Zenix's PS gives it
+        label = "pid %s" % args.target
+    elif not target.lower().startswith("0x"):
         t = target.lower()
         rows, _ = ps_rows(conn)
         hits = [r for r in rows if t in (r[7].lower(), r[8].lower(),
@@ -3596,30 +4035,85 @@ def cmd_kill(conn, args):
             raise WasabiError("no task or process called %s - "
                               "'wasabi ps' lists them" % target)
         if len(hits) > 1:
+            if zenix:
+                raise WasabiError(
+                    "%d processes are called %s - name one by its pid: %s"
+                    % (len(hits), target, ", ".join(
+                        str(int(r[0], 16)) for r in hits)))
             raise WasabiError(
                 "%d tasks match %s - name one by its address: %s"
                 % (len(hits), target, ", ".join(
                     "%s (%s)" % (r[0], r[8] or r[7]) for r in hits)))
         target = hits[0][0]
-        label = "%s (%s)" % (args.target, target)
+        label = "%s (%s)" % (args.target, "pid %d" % int(target, 16)
+                             if zenix else target)
     else:
         label = target
     flags = 1 if args.force else 0
     conn.send(KILL, struct.pack(">I", flags) + pack_str(target))
     conn.expect_ok()
-    print("%s %s" % ("removed" if args.force else "sent Ctrl-C to",
+    print("%s %s" % (("sent SIGKILL to" if zenix else "removed")
+                     if args.force else
+                     ("sent SIGINT to" if zenix else "sent Ctrl-C to"),
                      label), file=sys.stderr)
 
 
-def do_reboot(conn, cold=False):
-    conn.send(REBOOT, struct.pack(">I", 1 if cold else 0))
+# REBOOT flags. Bits 1-3 need caps rebootto (Zenix's daemon): an
+# AmigaOS wasabid ignores them and does a plain reboot.
+REBOOT_COLD, REBOOT_AMIGAOS, REBOOT_ZENIX, REBOOT_NOGUARD = 1, 2, 4, 8
+# A daemon with rebootto keeps the connection open while its reboot
+# command runs and sends ERR after the OK if that command comes back
+# (no room for the boot note, say). A machine that resets sends nothing
+# more, so after this long without an ERR the reboot counts as done.
+REBOOT_ERR_WAIT = 8.0
+
+
+def do_reboot(conn, cold=False, to=None, force=False):
+    flags = REBOOT_COLD if cold else 0
+    if to or force:
+        if "rebootto" not in conn.caps:
+            raise WasabiError(
+                "this daemon (%s) cannot choose what boots next or skip a "
+                "guard (no 'rebootto') - it would do a plain reboot. "
+                "Leave out --to and --force for that" % conn.banner)
+        flags |= {"amigaos": REBOOT_AMIGAOS, "zenix": REBOOT_ZENIX,
+                  None: 0}[to]
+        if force:
+            flags |= REBOOT_NOGUARD
+    conn.send(REBOOT, struct.pack(">I", flags))
     try:
         conn.expect_ok()
     except WasabiError as exc:
         # The machine may go down before the reply lands; a real
         # refusal, though, deserves to be heard.
         if "connection closed" not in str(exc):
+            if "skip the guard" in str(exc):
+                raise WasabiError("%s (wasabi reboot --force)" % exc)
             raise
+        return
+    if "rebootto" not in conn.caps:
+        return
+    # The OK is not the last word here: wait for the close, or the ERR
+    # of a reboot that did not happen.
+    old = conn.sock.gettimeout()
+    conn.sock.settimeout(min(REBOOT_ERR_WAIT, SILENCE))
+    try:
+        while True:
+            tag, payload = conn.recv()
+            if tag == ERR:
+                raise WasabiError("the reboot did not happen: %s"
+                                  % conn._errtext(payload))
+            # anything else (a stream's farewell) - keep listening
+    except WasabiError as exc:
+        if "connection closed" not in str(exc):
+            raise
+    except (socket.timeout, OSError):
+        pass                            # reset: no FIN, or a refused peer
+    finally:
+        try:
+            conn.sock.settimeout(old)
+        except OSError:
+            pass
 
 
 def cmd_reboot(conn, args):
@@ -3627,17 +4121,22 @@ def cmd_reboot(conn, args):
         raise WasabiError(
             "this reboots the Amiga - whatever is open there is lost. "
             "Pass --yes if you mean it")
-    do_reboot(conn, cold=args.cold)
+    do_reboot(conn, cold=args.cold, to=args.to, force=args.force)
     if args.wait:
         conn.close()
-        print("rebooting - waiting for the Amiga to answer again...",
+        print("rebooting%s - waiting for the Amiga to answer again..."
+              % (" into %s" % SYSTEM_NAMES[args.to] if args.to else ""),
               file=sys.stderr)
         # Give it time to actually go down first, or the old daemon
         # answers the first probe and "it is back" means nothing.
         time.sleep(5.0)
         args.timeout = args.wait
-        return cmd_wait_up(args)
-    print("reboot sent", file=sys.stderr)
+        if not args.host:               # the address it had, not a probe
+            args.host, args.port = conn.host, conn.port
+            args.host_found = True
+        return cmd_wait_up(args, expect=args.to)
+    print("reboot sent%s" % (" - %s next" % SYSTEM_NAMES[args.to]
+                             if args.to else ""), file=sys.stderr)
 
 
 def do_restart(conn, force=False):
@@ -3656,7 +4155,7 @@ def cmd_restart(conn, args):
 
 
 def cmd_del(conn, args):
-    check_system_place(args, args.path, "delete")
+    check_system_place(args, args.path, "delete", conn)
     conn.send(DEL, pack_str(args.path))
     conn.expect_ok()
 
@@ -3998,7 +4497,8 @@ def load_config():
 
 
 JSON_COMMANDS = ("ls", "ps", "screen", "windows", "ping", "run", "wait",
-                 "grab", "health", "slots", "ui", "arexx", "mouse", "rexx")
+                 "grab", "health", "slots", "ui", "arexx", "mouse", "rexx",
+                 "text")
 
 
 def main(argv=None):
@@ -4018,8 +4518,12 @@ def main(argv=None):
         help="Amiga address; omitted means find it by broadcast")
     p.add_argument("--port", type=int, default=int(os.environ.get(
         "WASABI_PORT", cfg.get("port", 1234))))
-    p.add_argument("--key", default=os.environ.get(
-        "WASABI_KEY", cfg.get("key", "")))
+    # None: not given here - key_for() then picks the config's line for
+    # this machine (key@ADDRESS:PORT), WASABI_KEY or the config's key.
+    p.add_argument("--key", default=None,
+                   help="the daemon's key (default: the config's "
+                        "key@ADDRESS:PORT line for that machine, then "
+                        "WASABI_KEY, then the config's key)")
     p.add_argument("--silence", type=float, metavar="SECONDS",
                    default=float(os.environ.get(
                        "WASABI_SILENCE", cfg.get("silence", SILENCE))),
@@ -4073,6 +4577,10 @@ def main(argv=None):
                    help="allow it in a system place (SYS: C: L: LIBS: DEVS: "
                         "S: FONTS: LOCALE: ENVARC:, and any 'protect =' "
                         "volumes in the config)")
+    s.add_argument("--mode", metavar="OCTAL",
+                   help="Zenix: the file's Unix mode, e.g. 755 (default: "
+                        "a replaced file keeps its own, a new program "
+                        "gets 755, anything else 644)")
     s.set_defaults(fn=cmd_put)
 
     s = sub.add_parser("get", help="download a file ('-' for stdout)")
@@ -4250,12 +4758,14 @@ def main(argv=None):
     s = sub.add_parser("wait", help="wait for a window, task, file, "
                        "screen change - or for the Amiga to come back")
     s.add_argument("what", choices=["window", "task", "file", "change",
-                                    "still", "up"],
+                                    "still", "up", "text"],
                    help="window TITLE: a window whose title contains it; "
                         "task NAME: a task (AmigaDOS pattern); file PATH; "
                         "change [TITLE]: the screen (or a window) changes; "
                         "still [TITLE]: it stops changing; up: the Amiga "
-                        "answers again (after a reboot)")
+                        "answers again (after a reboot), on 1234 or 1236; "
+                        "text REGEX: a line of the console matches "
+                        "(Zenix)")
     s.add_argument("target", nargs="?", default=None)
     s.add_argument("--gone", action="store_true",
                    help="wait for the window, task or file to go away")
@@ -4270,7 +4780,17 @@ def main(argv=None):
                    help="still: how long nothing may change (default 1)")
     s.add_argument("--region", metavar="X,Y,W,H",
                    help="change/still: watch only this rectangle")
+    s.add_argument("--console", type=int, default=0, metavar="N",
+                   help="text: console N (1-10; default the one shown)")
     s.set_defaults(fn=cmd_wait)
+
+    s = sub.add_parser("text", help="the console's text (Zenix)")
+    s.add_argument("--console", type=int, default=0, metavar="N",
+                   help="console N (1-10; default the one shown)")
+    s.add_argument("--cells", action="store_true",
+                   help="with --json: each row's style and colour bytes "
+                        "too")
+    s.set_defaults(fn=cmd_text)
 
     s = sub.add_parser("sum", help="a checksum of the screen, a window or "
                        "a region, worked out on the Amiga")
@@ -4428,9 +4948,11 @@ def main(argv=None):
     s.set_defaults(fn=cmd_ps)
 
     s = sub.add_parser("kill", help="stop a task (polite Ctrl-C by default)")
-    s.add_argument("target", help="task/command name, or 0xADDRESS from ps")
+    s.add_argument("target", help="task/command name, or 0xADDRESS from "
+                   "ps (Zenix: a name or a pid)")
     s.add_argument("--force", action="store_true",
-                   help="RemTask() it - no cleanup, last resort")
+                   help="RemTask() it - no cleanup, last resort (Zenix: "
+                        "SIGKILL instead of SIGINT)")
     s.set_defaults(fn=cmd_kill)
 
     sub.add_parser("slots", help="what each run slot is running"
@@ -4452,7 +4974,14 @@ def main(argv=None):
     s.add_argument("--wait", type=float, nargs="?", const=120.0,
                    metavar="SECONDS",
                    help="then wait until the Amiga answers again "
-                        "(default up to 120 s)")
+                        "(default up to 120 s), on Wasabi's port or "
+                        "Zenix's (1234, 1236)")
+    s.add_argument("--to", choices=["amigaos", "zenix"],
+                   help="what boots next (a daemon with 'rebootto': "
+                        "Zenix's); with --wait, wait for that system")
+    s.add_argument("--force", action="store_true",
+                   help="skip the daemon's guard (Zenix: an update, fsck, "
+                        "mkfs, fdisk or dd running)")
     s.set_defaults(fn=cmd_reboot)
 
     s = sub.add_parser("restart", help="reload the daemon in place (self-update)")
@@ -4509,10 +5038,10 @@ def main(argv=None):
              "windows": "windows", "health": "health",
              "clip": "clip", "slots": "slots", "free": "slots",
              "ui": "ui", "arexx": "arexx", "sum": "sum",
-             "input": "inputs"}.get(args.cmd)
+             "input": "inputs", "text": "text"}.get(args.cmd)
     if args.cmd == "wait":
         needs = {"window": "windows", "change": "grab",
-                 "still": "grab"}.get(args.what)
+                 "still": "grab", "text": "text"}.get(args.what)
     if args.cmd == "mouse" and args.action == "wheel":
         needs = "key"                    # the wheel is raw keys
 
@@ -4522,7 +5051,7 @@ def main(argv=None):
         print("wasabi: %s" % exc, file=sys.stderr)
         return 2
     try:
-        conn = Conn(host, port, args.key)
+        conn = Conn(host, port, key_for(host, port, args.key))
     except AmigaSilent as exc:
         print("wasabi: %s" % exc, file=sys.stderr)
         return EXIT_SILENT
@@ -4535,9 +5064,18 @@ def main(argv=None):
     # Only refuse when the daemon actually told us what it can do; an
     # empty set means it predates the list, so try and report the result.
     if needs and conn.caps and needs not in conn.caps:
-        print("wasabi: this daemon (%s) has no '%s' - update it with "
-              "'wasabi update wasabid'" % (conn.banner, needs),
-              file=sys.stderr)
+        if is_zenix(conn):
+            print("wasabi: Zenix's daemon (%s) has no '%s' - it is "
+                  "AmigaOS's, or this Zenix has no console operations yet"
+                  % (conn.banner, needs), file=sys.stderr)
+        elif needs == "text":
+            print("wasabi: this daemon (%s) has no 'text' - the console "
+                  "as text is Zenix's; here, use grab" % conn.banner,
+                  file=sys.stderr)
+        else:
+            print("wasabi: this daemon (%s) has no '%s' - update it with "
+                  "'wasabi update wasabid'" % (conn.banner, needs),
+                  file=sys.stderr)
         conn.close()
         return 2
     try:

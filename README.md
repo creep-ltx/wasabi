@@ -111,7 +111,7 @@ $ wasabi ui menu "Project/Quit"
 - **Python API** (`wasabi_client.py`) - `import wasabi_client`: connect,
   run, files, keys, mouse, timed input, grab, windows, gadgets and menus,
   ARexx, as a documented, versioned API.
-- **MCP server** (`wasabi mcp`) - 28 tools for Claude Code, Claude
+- **MCP server** (`wasabi mcp`) - 30 tools for Claude Code, Claude
   Desktop, Codex, Gemini CLI, Cursor and other MCP clients: run, files,
   screenshots, "has this changed?" checksums, mouse, keyboard, gadgets
   and menus by name, ARexx, waiting, running commands and stopping them.
@@ -123,6 +123,16 @@ $ wasabi ui menu "Project/Quit"
 The Pi's temperature, voltage and clocks, every power dip or overheat
 since it started, Emu68's live 68k CPU meter and JIT cache, free memory,
 the last guru. [More: Health](docs/apps.md#health)
+
+### Zenix too
+
+The same `wasabi`, Python API and MCP server drive
+Zenix, the Unix-like system for the same Amigas, through its own daemon
+on port 1236: run, files, the kernel log, a picture of the console, the
+console **as text** (`wasabi text`, `wasabi wait text 'login:'`),
+`reboot --to amigaos` (or `--to zenix`) and a `wait up` that follows
+the machine from one system to the other. A key per machine, and a
+port known to be plain, live in the config. [More: Zenix](docs/commands.md#zenix)
 
 ### Security
 

@@ -89,6 +89,18 @@ wasabi --plain ping                 just this one command
 
 The remembered addresses are `~/.config/wasabi/tls-hosts`, one
 `ADDRESS:PORT` per line; deleting a line is the same as `keys forget`.
+
+**The other way round, too:** an `ADDRESS:PORT` that turned out to have
+no encryption (the TLS try was closed, plain worked) is remembered in
+`~/.config/wasabi/plain-hosts`. The next command goes plain at once:
+no TLS try that the Amiga closes, and the warning once, not on every
+command (or in every MCP tool's output). It weakens nothing - the
+fallback was automatic before - and a pin always wins over it. If that
+Amiga asks for encryption later (its AmiSSL is back), the client tries
+encrypted at once and strikes it off. `plain@ADDRESS:PORT = yes` in the
+config says the same from the start; `wasabi keys forget ADDRESS`
+clears both lists. Zenix's daemon (port 1236) is plain in its first
+version, which is why this exists.
 From Python: `wasabi_client.connect(..., tls=False)` (see
 [the Python API](api.md)).
 

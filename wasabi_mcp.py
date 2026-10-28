@@ -334,6 +334,20 @@ def t_health(a):
     return text(ok("health"))
 
 
+def t_text(a):
+    args = ["text"]
+    if a.get("console"):
+        args += ["--console", int(a["console"])]
+    return text(ok(*args))
+
+
+def t_wait_text(a):
+    args = ["wait", "text", a["pattern"], "--timeout", a.get("timeout", 30)]
+    if a.get("console"):
+        args += ["--console", int(a["console"])]
+    return text(ok(*args, timeout=float(a.get("timeout", 30)) + 30))
+
+
 REGION = {"type": "object", "description": "only this rectangle",
           "properties": {"x": {"type": "number"},
                          "y": {"type": "number"},
@@ -476,6 +490,15 @@ TOOLS = [
        force=BOOL("RemTask - last resort"))),
     ("amiga_health", t_health, "Temperatures, clocks, CPU load and memory "
      "(on a PiStorm), and the last guru.", S()),
+    ("amiga_text", t_text, "Zenix: the console's text, as lines - read the "
+     "screen without a picture.",
+     S(console=NUM("console 1-10 (default: the one shown)"))),
+    ("amiga_wait_text", t_wait_text, "Zenix: wait until a line of the "
+     "console matches a pattern (an extended regular expression), e.g. "
+     "'login:'. The Amiga watches; nothing crosses the network meanwhile.",
+     S(pattern=STR("the pattern", True),
+       timeout=NUM("seconds (default 30)"),
+       console=NUM("console 1-10 (default: the one shown)"))),
 ]
 BY_NAME = {n: (fn, desc, schema) for n, fn, desc, schema in TOOLS}
 

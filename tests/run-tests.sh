@@ -25,6 +25,8 @@ cleanup() {
     [ -n "${MOCK4_PID:-}" ] && kill "$MOCK4_PID" 2>/dev/null
     [ -n "${MOCKE_PID:-}" ] && kill "$MOCKE_PID" 2>/dev/null
     [ -n "${MOCKP_PID:-}" ] && kill "$MOCKP_PID" 2>/dev/null
+    [ -n "${MOCKR_PID:-}" ] && kill "$MOCKR_PID" 2>/dev/null
+    [ -n "${MOCKZ_PID:-}" ] && kill "$MOCKZ_PID" 2>/dev/null
     [ -n "${VIEW_PID:-}" ] && kill "$VIEW_PID" 2>/dev/null
     rm -rf "$ROOT"
 }
@@ -778,13 +780,61 @@ wait_up $PLAINP
 out=$(WASABI_TLS=always ./wasabi --host 127.0.0.1 --port $PLAINP --key $KEY ping 2>&1)
 check "an Amiga without encryption is reached plain" "1" "$(echo "$out" | grep -c '^mock-wasabid')"
 check "and the plain connection is said out loud" "1" "$(echo "$out" | grep -c 'has no encryption')"
+# ...and remembered: the next command goes plain at once - no TLS try
+# that the Amiga closes, no warning on every command (or in every MCP
+# tool's output).
+tries() { cat "$ROOT/tls-tries-$1" 2>/dev/null | wc -l | tr -d ' \t'; }
+check "the Amiga saw one TLS try" "1" "$(tries $PLAINP)"
+check "it is remembered as plain" "1" "$(grep -c "^127.0.0.1:$PLAINP\$" "$XDG_CONFIG_HOME/wasabi/plain-hosts" 2>/dev/null)"
+out=$(WASABI_TLS=always ./wasabi --host 127.0.0.1 --port $PLAINP --key $KEY ping 2>&1)
+check "a remembered plain Amiga is reached" "1" "$(echo "$out" | grep -c '^mock-wasabid')"
+check "without the warning again" "0" "$(echo "$out" | grep -c 'has no encryption')"
+check "and without a TLS try" "1" "$(tries $PLAINP)"
+out=$(./wasabi keys show 2>&1 | grep -c "127.0.0.1:$PLAINP *has no encryption")
+check "keys show lists it" "1" "$out"
 echo "127.0.0.1:$PLAINP" >> "$XDG_CONFIG_HOME/wasabi/tls-hosts"
 out=$(WASABI_TLS=always ./wasabi --host 127.0.0.1 --port $PLAINP --key $KEY ping 2>&1 | grep -c "Refusing plain")
 check "one reached encrypted before that now offers none is refused" "1" "$out"
 ./wasabi keys forget 127.0.0.1 >/dev/null 2>&1
 out=$(WASABI_TLS=always ./wasabi --host 127.0.0.1 --port $PLAINP --key $KEY ping 2>&1 | grep -c '^mock-wasabid')
 check "keys forget allows plain to it again" "1" "$out"
+./wasabi keys forget 127.0.0.1 >/dev/null 2>&1
+check "keys forget strikes it off the plain list too" "0" "$(grep -c "127.0.0.1:" "$XDG_CONFIG_HOME/wasabi/plain-hosts" 2>/dev/null)"
+# plain@ADDRESS:PORT in the config: plain from the first command, silently
+printf 'plain@127.0.0.1:%d = yes\n' "$PLAINP" > "$XDG_CONFIG_HOME/wasabi/config"
+before=$(tries $PLAINP)
+out=$(WASABI_TLS=always ./wasabi --host 127.0.0.1 --port $PLAINP --key $KEY ping 2>&1)
+check "plain@ in the config: reached plain" "1" "$(echo "$out" | grep -c '^mock-wasabid')"
+check "plain@ in the config: no TLS try, no warning" "$before 0" "$(tries $PLAINP) $(echo "$out" | grep -c 'has no encryption')"
+rm -f "$XDG_CONFIG_HOME/wasabi/config"
 kill $MOCKP_PID 2>/dev/null
+# On the plain list, but it asks for encryption now (its AmiSSL is back):
+# tried encrypted at once, and struck off.
+RTLSP=$((PORT+12))
+wait_free $RTLSP
+./tests/mock-wasabid.py --root "$ROOT" --port $RTLSP --key "$KEY" --require-tls \
+    --tls "$ROOT/drive/Prefs/Env-Archive/wasabi" >"$ROOT/mockr.log" 2>&1 &
+MOCKR_PID=$!
+wait_up $RTLSP
+echo "127.0.0.1:$RTLSP" >> "$XDG_CONFIG_HOME/wasabi/plain-hosts"
+out=$(WASABI_TLS=always ./wasabi --host 127.0.0.1 --port $RTLSP --key $KEY ping 2>&1 | grep -c '^mock-wasabid')
+check "a plain-listed Amiga that now wants encryption gets it" "1" "$out"
+check "and leaves the plain list for the pins" "0 1" "$(grep -c "127.0.0.1:$RTLSP" "$XDG_CONFIG_HOME/wasabi/plain-hosts") $(grep -c "127.0.0.1:$RTLSP" "$XDG_CONFIG_HOME/wasabi/tls-hosts")"
+kill $MOCKR_PID 2>/dev/null; MOCKR_PID=
+./wasabi keys forget 127.0.0.1 >/dev/null 2>&1
+
+# --- a key per machine: key@ADDRESS:PORT in the config ---
+printf 'key = wrong-key\nkey@127.0.0.1:%d = %s\n' "$PORT" "$KEY" > "$XDG_CONFIG_HOME/wasabi/config"
+out=$(./wasabi --host 127.0.0.1 --port "$PORT" ping 2>&1 | grep -c "^mock-wasabid")
+check "key@ADDRESS:PORT is that machine's key" "1" "$out"
+out=$(WASABI_KEY=wrong-key ./wasabi --host 127.0.0.1 --port "$PORT" ping 2>&1 | grep -c "^mock-wasabid")
+check "and wins over WASABI_KEY" "1" "$out"
+out=$(./wasabi --host 127.0.0.1 --port "$PORT" --key wrong-key ping 2>&1 | grep -c "bad key")
+check "--key wins over it" "1" "$out"
+printf 'key = %s\nkey@127.0.0.1:%d = wrong-key\n' "$KEY" $((PORT+50)) > "$XDG_CONFIG_HOME/wasabi/config"
+out=$(./wasabi --host 127.0.0.1 --port "$PORT" ping 2>&1 | grep -c "^mock-wasabid")
+check "another machine's key@ line is not used" "1" "$out"
+rm -f "$XDG_CONFIG_HOME/wasabi/config"
 
 # --- ps / kill ---
 out=$($W ps 2>/dev/null | grep -c "input.device")
@@ -1446,7 +1496,7 @@ with wc.connect() as a:
 PYAPI
 out=$(WASABI_HOST=127.0.0.1 WASABI_PORT=$PORT WASABI_KEY=$KEY python3 "$ROOT/api.py" 2>&1)
 check "the Python API: run, rexx, input, ui, grab, files, errors" \
-"1.0 True True
+"1.1 True True
 3 'hi\n' 'oops\n'
 RunResult(rc=2, stdout='x\n', stderr='')
 No Question
@@ -1455,6 +1505,173 @@ True (320, 200)
 b'abc'
 ['api.txt']
 error ok" "$out"
+
+# --- Zenix's daemon (the mock playing it; tests/zenix-tests.sh runs the
+# real one when WASABI_ZENIX names a Zenix checkout) ---
+ZP=$((PORT+13))
+ZR="$ROOT/zx"
+mkdir -p "$ZR/bin" "$ZR/data"
+printf 'Zenix 0.3.1 tty1\n\nlogin:\n' > "$ZR/mock-console"
+wait_free $ZP
+./tests/mock-wasabid.py --root "$ZR" --port $ZP --key "$KEY" --zenix \
+    >"$ROOT/mockz.log" 2>&1 &
+MOCKZ_PID=$!
+wait_up $ZP
+Z="./wasabi --host 127.0.0.1 --port $ZP --key $KEY"
+out=$($Z ping 2>&1 | grep -c "^Zenix 0.3.1-mock")
+check "zenix: the handshake" "1" "$out"
+
+# TEXT: the console as text, at once or when a pattern appears
+out=$($Z text 2>&1 | tr '\n' '|')
+check "zenix: text gives the console's lines" "Zenix 0.3.1 tty1||login:|" "$out"
+out=$($Z text --json 2>&1 | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["rows"], d["cols"], d["cursor"], d["console"], d["shown"], d["lines"][2], "styles" in d)')
+check "zenix: text --json" "6 40 [2, 7] 1 True login: False" "$out"
+out=$($Z text --json --cells 2>&1 | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["styles"][0][:4], d["colours"][0][:4], len(d["styles"]))')
+check "zenix: text --cells gives each row's style and colour" "0100 0707 6" "$out"
+out=$($Z text --console 5 2>&1); rc=$?
+check "zenix: a console never used is an error" "1 1" "$rc $(echo "$out" | grep -c 'never used')"
+out=$($Z wait text 'log.n:$' --timeout 3 2>&1); rc=$?
+check "zenix: wait text finds a line" "0 1" "$rc $(echo "$out" | grep -c 'appeared after .*: login:')"
+out=$($Z wait text 'no-such-text' --timeout 1 2>&1); rc=$?
+check "zenix: wait text times out with 124" "124 1" "$rc $(echo "$out" | grep -c 'did not appear within 1 s')"
+( sleep 1; printf 'Zenix 0.3.1 tty1\n\nlogin: root\n# ready\n' > "$ZR/mock-console" ) &
+out=$($Z --json wait text '^# ready' --timeout 6 2>&1 | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["met"], d["detail"], d["seconds"] >= 0.5)')
+check "zenix: wait text waits on the Amiga until it appears" "True # ready True" "$out"
+out=$($W text 2>&1); rc=$?
+check "AmigaOS: text is refused, pointing at grab" "2 1" "$rc $(echo "$out" | grep -c "Zenix's; here, use grab")"
+
+# caps zenix: pids, Unix modes, Unix paths
+out=$($Z ps 2>/dev/null | head -2 | tr -s ' ' | tr '\n' '|')
+check "zenix: ps shows pids" " PID PRI STATE NAME| 1 0 wait boot|" "$out"
+out=$($Z ps --json 2>/dev/null | python3 -c 'import json,sys; print([p["pid"] for p in json.load(sys.stdin) if p["name"]=="wasabid"])')
+check "zenix: ps --json has the pid" "[12]" "$out"
+$Z kill 40 >/dev/null 2>&1
+$Z kill --force netd >/dev/null 2>&1
+check "zenix: kill by pid and by name, as 0x pids" "kill 0x00000028 0|kill 0x00000003 1|" "$(tr '\n' '|' < "$ZR/ui.log")"
+out=$($Z kill sh 2>&1 | grep -c "name one by its pid: 40, 41")
+check "zenix: two of a name ask for the pid" "1" "$out"
+echo x > "$ROOT/zx-put"
+$Z put --mode 755 "$ROOT/zx-put" /bin/x >/dev/null 2>&1; rc1=$?
+$Z put "$ROOT/zx-put" /data/y >/dev/null 2>&1
+check "zenix: put --mode sends a Unix mode (bit 31), else the default" "0 800001ed /bin/x|ffffffff /data/y|" "$rc1 $(tr '\n' '|' < "$ZR/put-prot.log")"
+out=$($Z put --mode 9z9 "$ROOT/zx-put" /bin/x 2>&1 | grep -c "octal")
+check "zenix: a mode that is not octal is refused" "1" "$out"
+out=$($W put --mode 755 "$ROOT/zx-put" T:x 2>&1 | grep -c "Unix mode, for Zenix")
+check "AmigaOS: put --mode is refused" "1" "$out"
+out=$($Z ls 2>&1 | grep -c "data")
+check "zenix: ls with no path lists /" "1" "$out"
+
+# HEALTH without the largest blocks, with Zenix's own keys
+out=$($Z health 2>&1); rc=$?
+check "zenix: health works without mem.*.largest" "0" "$rc"
+check "zenix: health shows Zenix's line" "1" "$(echo "$out" | grep -c '^Zenix 0.3.1-mock: up 1 h 02 min, 9 processes (1 ready), root disk 5120 KB free$')"
+check "zenix: health's memory line" "1" "$(echo "$out" | grep -c '^memory: chip 1160 KB free, fast 0 KB free$')"
+out=$($W health 2>&1 | grep -c "largest block 512 KB")
+check "AmigaOS: health still names the largest blocks" "1" "$out"
+
+# GRAB: the "moved" note is said, not fatal; asked for only from Zenix
+touch "$ZR/grab-moved"
+out=$($Z grab "$ROOT/zx.png" 2>&1); rc=$?
+check "zenix: grab takes the console-moved note" "0 1" "$rc $(echo "$out" | grep -c 'grab: the console changed while it was read')"
+check "zenix: grab asks for notes (flags bit 0)" "1" "$(tail -1 "$ZR/grab-flags.log")"
+$W grab "$ROOT/am.png" >/dev/null 2>&1
+check "AmigaOS: grab sends no flags word" "0" "$(tail -1 "$ROOT/grab-flags.log")"
+
+# REBOOT: what boots next, the guard, the ERR after the OK
+out=$($Z reboot --yes --to amigaos 2>&1); rc=$?
+check "zenix: reboot --to amigaos" "0 2 1" "$rc $(cat "$ZR/reboot-flags") $(echo "$out" | grep -c 'AmigaOS next')"
+$Z reboot --yes --to zenix --force >/dev/null 2>&1
+check "zenix: reboot --to zenix --force" "12" "$(cat "$ZR/reboot-flags")"
+echo "reboot: no room for the boot note" > "$ZR/reboot-fails"
+out=$($Z reboot --yes --to amigaos 2>&1); rc=$?
+check "zenix: an ERR after the OK is a failed reboot" "1 1" "$rc $(echo "$out" | grep -c 'the reboot did not happen: reboot: no room for the boot note')"
+rm -f "$ZR/reboot-fails"
+echo "fsck.zfs" > "$ZR/reboot-guard"
+out=$($Z reboot --yes 2>&1); rc=$?
+check "zenix: the guard stops a reboot, naming --force" "1 1" "$rc $(echo "$out" | grep -c 'fsck.zfs is running.*(wasabi reboot --force)')"
+out=$($Z reboot --yes --force 2>&1); rc=$?
+check "zenix: --force skips the guard" "0 8" "$rc $(cat "$ZR/reboot-flags")"
+rm -f "$ZR/reboot-guard"
+out=$($W reboot --yes --to zenix 2>&1); rc=$?
+check "AmigaOS: reboot --to is refused (it would be a plain reboot)" "1 1" "$rc $(echo "$out" | grep -c "no 'rebootto'")"
+out=$($Z reboot --yes --to zenix --wait 10 2>&1); rc=$?
+check "zenix: reboot --to zenix --wait waits for Zenix" "0 1" "$rc $(echo "$out" | grep -c 'answers after .*Zenix 0.3.1-mock')"
+
+# wait up across the two systems' ports (here: the mocks' ports)
+out=$(python3 - "$PORT" "$ZP" "$KEY" <<'PY'
+import importlib.machinery, importlib.util, sys, io, contextlib
+l = importlib.machinery.SourceFileLoader("w", "wasabi")
+s = importlib.util.spec_from_loader("w", l)
+w = importlib.util.module_from_spec(s); l.exec_module(w)
+amiga, zenix, key = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+dead = zenix + 1
+class A:
+    host, json, key, timeout = "127.0.0.1", False, key, 4
+def up(port, expect=None, ports=None):
+    w.SYSTEM_PORTS = ports
+    a = A(); a.port = port
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            w.cmd_wait_up(a, expect)
+        return out.getvalue().strip().split(": ")[-1]
+    except w.TimeLimit as e:
+        return "TimeLimit: " + str(e).split("(last: ")[-1]
+print(up(dead, None, (dead, zenix)))
+print(up(zenix, "amigaos", (amiga, zenix)).startswith("mock-wasabid"))
+print(up(zenix, "amigaos", (dead, zenix)))
+print(up(amiga, "zenix", (amiga, zenix)))
+PY
+)
+check "zenix: wait up finds the other system's port, and the asked-for system" \
+"Zenix 0.3.1-mock (port $ZP)
+True
+TimeLimit: 127.0.0.1:$ZP is still Zenix)
+Zenix 0.3.1-mock (port $ZP)" "$out"
+
+# The MCP server: the two text tools, against Zenix
+out=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"amiga_text","arguments":{}}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"amiga_wait_text","arguments":{"pattern":"ready","timeout":2}}}' | \
+    WASABI_HOST=127.0.0.1 WASABI_PORT=$ZP WASABI_KEY=$KEY python3 wasabi_mcp.py | python3 -c '
+import json, sys
+r = [json.loads(l) for l in sys.stdin]
+names = [t["name"] for t in r[0]["result"]["tools"]]
+print("amiga_text" in names, "amiga_wait_text" in names)
+print(r[1]["result"]["isError"], r[1]["result"]["content"][0]["text"].splitlines()[3])
+print(r[2]["result"]["isError"], "appeared" in r[2]["result"]["content"][0]["text"])')
+check "zenix: the MCP server's text tools" "True True
+False # ready
+False True" "$out"
+
+# The Python API: text() and wait_text()
+out=$(python3 - "$ZP" "$KEY" <<'PY'
+import sys
+import wasabi_client as wc
+with wc.connect("127.0.0.1", int(sys.argv[1]), sys.argv[2]) as a:
+    t = a.text()
+    print(t.lines[3], t.rows, t.cols, t.cursor, t.styles)
+    print(a.text(cells=True).colours[0][:2])
+    print(a.wait_text("ready", 2).console)
+    try:
+        a.wait_text("nothing", 1)
+    except wc.TimeLimit:
+        print("TimeLimit")
+PY
+)
+check "zenix: the Python API's text and wait_text" "# ready 6 40 (2, 7) None
+07
+1
+TimeLimit" "$out"
+kill $MOCKZ_PID 2>/dev/null; MOCKZ_PID=
+
+# The real Zenix daemon (its core built for the PC), when a checkout is named
+if [ -n "${WASABI_ZENIX:-}" ]; then
+    out=$(./tests/zenix-tests.sh 2>&1); rc=$?
+    echo "$out" | grep -v '^  ok '
+    if [ $rc = 0 ]; then ok "the real Zenix daemon: tests/zenix-tests.sh ($(echo "$out" | tail -1))"
+    else no "the real Zenix daemon: tests/zenix-tests.sh"; fi
+fi
 
 # --- error paths ---
 out=$($W get L:nosuchfile /dev/null 2>&1 | grep -ci "error\|no such")

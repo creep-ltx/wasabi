@@ -5,6 +5,49 @@ What changed in each version, newest first. Betas (`0.10b4`) are on the
 files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 `wasabi ping` shows which daemon an Amiga runs.
 
+## 0.11b3 - 28 October 2026
+
+The PC side only (the `wasabi` command, its Python API and MCP server);
+the Amiga's wasabid is unchanged (0.11b2). For Zenix's own daemon,
+which speaks Wasabi's protocol on port 1236 - every addition is behind
+its caps, so AmigaOS's wasabid and older clients work as before.
+
+- **The console as text:** `wasabi text` prints Zenix's console (no
+  picture; `--console N`, `--json`, `--cells` for each cell's style
+  and colour), and `wasabi wait text REGEX` waits until a line
+  matches - the Amiga watches, so nothing crosses the network
+  meanwhile. New protocol command `TEXT` (0x59, caps `text`); MCP tools
+  `amiga_text` and `amiga_wait_text`; Python API 1.1: `text()`,
+  `wait_text()`.
+- **`reboot --to amigaos|zenix`** picks what boots next, `--force`
+  skips Zenix's guard (an update, fsck, mkfs, fdisk or dd running);
+  refused where the daemon has no `rebootto`, which would do a plain
+  reboot. A reboot that comes back (no room for the boot note) is now
+  reported: the client reads Zenix's `ERR` after the `OK`.
+- **Across the two systems:** `wait up` and `reboot --wait` try
+  Wasabi's port and Zenix's (1234, 1236), look the machine up again
+  when its address may have changed, and with `--to` wait for that
+  system. AmigaOS -> Zenix -> AmigaOS is one command each way.
+- **A key per machine:** `key@ADDRESS:PORT = KEY` in the config, so
+  Zenix's key is not AmigaOS's; it wins over `WASABI_KEY`, `--key`
+  wins over it. Also for the Python API, the MCP server and the apps'
+  first machine.
+- **A port known to be plain** is remembered (`plain-hosts`, beside
+  the TLS pins) or named in the config (`plain@ADDRESS:PORT = yes`):
+  no failed TLS try per command, and the "no encryption" warning once,
+  not on every command and in every MCP tool's output. A pin still
+  wins; an Amiga that asks for encryption again gets it at once.
+  `keys show` lists them, `keys forget` clears both.
+- **Zenix's ways (caps `zenix`):** `ps` shows pids and `kill 123`
+  takes one; `put --mode 755` sends a Unix mode; paths are Unix paths
+  (no system-place check, `ls` lists `/`); `health` shows Zenix's
+  uptime, processes, network and root disk, and no longer needs the
+  largest-block keys; `grab` accepts Zenix's note that the console
+  moved while it was read (asked for with GRAB's new flags word).
+- Tested with `tests/run-tests.sh` (the mock plays Zenix's daemon with
+  `--zenix`) and `tests/zenix-tests.sh` against Zenix's real daemon
+  core built for the PC (run when `WASABI_ZENIX` names a checkout).
+
 ## 0.10.1 - 24 October 2026
 
 The PC side only (the `wasabi` command, the desktop app and the phone

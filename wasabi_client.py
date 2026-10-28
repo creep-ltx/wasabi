@@ -25,7 +25,7 @@ import os
 import sys
 from collections import namedtuple
 
-API_VERSION = "1.0"
+API_VERSION = "1.1"
 
 
 def _load_cli():
@@ -51,6 +51,11 @@ AmigaSilent = _w.AmigaSilent        # the Amiga stopped answering
 
 RunResult = namedtuple("RunResult", "rc stdout stderr")
 RexxResult = namedtuple("RexxResult", "rc rc2 result")
+# The console's text (Zenix): lines without trailing spaces, the grid's
+# size, cursor (row, column), whether it is the one shown; styles and
+# colours (each row's bytes as hex) only when asked for, else None.
+ConsoleText = namedtuple("ConsoleText", "lines rows cols cursor console "
+                         "shown changes styles colours")
 Entry = namedtuple("Entry", "name dir size protection date")
 
 
@@ -97,8 +102,6 @@ class Amiga:
         host = host or os.environ.get("WASABI_HOST") or cfg.get("host")
         port = int(port or os.environ.get("WASABI_PORT") or
                    cfg.get("port", 1234))
-        key = key if key is not None else \
-            os.environ.get("WASABI_KEY", cfg.get("key", ""))
         if timeout is not None:          # for this whole process
             _w.SILENCE = max(1.0, float(timeout))
         if not host:
@@ -107,6 +110,8 @@ class Amiga:
             a = _A()
             a.host, a.port = None, port
             host, port = _w.resolve_target(a)
+        # key@ADDRESS:PORT in the config, then WASABI_KEY, then key
+        key = _w.key_for(host, port, key)
         self.native = native
         self._c = _w.Conn(host, port, key, tls=tls)
 
@@ -356,6 +361,26 @@ class Amiga:
         self._c.send(_w.SCREEN, struct.pack(">I", 0) + _w.pack_str(title))
         _w.drain_to_end(self._c, lambda b: None)
 
+    # --- the console as text (Zenix, caps 'text') ----------------------
+
+    def text(self, console=0, cells=False):
+        """The console's text as a ConsoleText; console 0 is the one on
+        the display, 1-10 a given one. cells=True adds each cell's style
+        and colour."""
+        info, _ = _w.console_text(self._c, console, cells=cells)
+        return _console_text(info)
+
+    def wait_text(self, pattern, timeout=30, console=0):
+        """Wait until a line of the console matches pattern (a POSIX
+        extended regular expression); the Amiga does the watching.
+        Returns the ConsoleText; TimeLimit when timeout seconds pass."""
+        info, met = _w.console_text(self._c, console, pattern=pattern,
+                                    timeout=timeout)
+        if not met:
+            raise TimeLimit("text matching %r did not appear within %g s"
+                            % (pattern, timeout))
+        return _console_text(info)
+
     # --- gadgets and menus ---------------------------------------------
 
     def ui(self, window=None, all_screens=False):
@@ -399,3 +424,10 @@ class Amiga:
 
     def set_clip(self, text):
         _w.clip_set(self._c, text)
+
+
+def _console_text(info):
+    return ConsoleText(info["lines"], info["rows"], info["cols"],
+                       tuple(info["cursor"]), info["console"], info["shown"],
+                       info["changes"], info.get("styles"),
+                       info.get("colours"))

@@ -9,7 +9,8 @@ wasabi discover              find Amigas on this network
 wasabi ping                  round-trip time and daemon banner
 wasabi info                  version, RAM, volumes, and what it can do
 wasabi ls [PATH]             list a drawer; no path lists the volumes
-wasabi put LOCAL REMOTE      upload a file (--force in a system place)
+wasabi put LOCAL REMOTE      upload a file (--force in a system place;
+                             Zenix: --mode 755 sets its Unix mode)
 wasabi get REMOTE LOCAL      download a file ('-' for stdout)
 wasabi run "CMD" [--max-time S] [--detach]
                              execute, stream output, return its exit code;
@@ -19,7 +20,10 @@ wasabi clip get | set [TEXT|-]
                              read or set the Amiga's clipboard
 wasabi deploy L R [--run C] [--reboot | --restart] [--force]
 wasabi del PATH [--force] / mkdir PATH
-wasabi reboot --yes [--wait [S]]  reboot; --wait until it answers again
+wasabi reboot --yes [--wait [S]] [--to amigaos|zenix] [--force]
+                             reboot; --wait until it answers again (on
+                             1234 or 1236); Zenix: --to picks what boots
+                             next, --force skips its guard
 wasabi restart [--force]     reload the daemon in place (a debug tool -
                              'update' is the verified path)
 wasabi update LOCAL          replace the daemon itself, verifying first
@@ -29,8 +33,8 @@ wasabi debug [--with-snoop] [--log F] [--for S] [--until TEXT]
 wasabi snoop [--task PAT] [--log F] [--for S] [--until TEXT]
                              live DOS call trace
 wasabi ps [PATTERN]          list every task, with stack headroom;
-                             AmigaDOS wildcards filter
-wasabi kill NAME|0xADDR      Ctrl-C a task; --force for RemTask. NAME
+                             AmigaDOS wildcards filter (Zenix: pids)
+wasabi kill NAME|0xADDR|PID  Ctrl-C a task; --force for RemTask. NAME
                              may be the bare program name: Clock finds
                              one started as SYS:Utilities/Clock
 wasabi speedtest [SIZE] [--target PATH]  latency and throughput both ways
@@ -48,9 +52,13 @@ wasabi view [--kiosk] [--no-browser]
 wasabi health [--watch [S]]  the Pi's temperature, voltage and power
                              history, Emu68's CPU meter, free memory
 wasabi windows [--raw]       every screen and window: place, size, task
-wasabi wait window|task|file|change|still|up [NAME] [--gone]
+wasabi wait window|task|file|change|still|up|text [NAME] [--gone]
             [--contains TEXT] [--region X,Y,W,H] [--timeout S]
-                             wait for something instead of sleeping
+                             wait for something instead of sleeping;
+                             text REGEX [--console N]: a line of Zenix's
+                             console matches (the Amiga watches)
+wasabi text [--console N] [--json [--cells]]
+                             Zenix: the console's text, no picture
 wasabi sum [--window TITLE | --region X,Y,W,H] [--since SUM]
                              a checksum of the screen (or part of it),
                              worked out on the Amiga; --since exits 1
@@ -117,7 +125,8 @@ see [coordinates](screen-and-gui.md#coordinates).
 Every command also takes `--json` (where it lists something),
 `--plain` (no encryption this time) and `--silence S` — see [Made for scripts](scripting-and-ai.md#made-for-scripts-and-for-claude).
 `--host` overrides discovery, and `WASABI_HOST`/`WASABI_PORT`/`WASABI_KEY`/
-`WASABI_SILENCE` override the config file. The daemon takes `wasabid [port] [name ID] [allow
+`WASABI_SILENCE` override the config file (a `key@ADDRESS:PORT` line
+there wins over `WASABI_KEY` for that machine; `--key` wins over all). The daemon takes `wasabid [port] [name ID] [allow
 CIDR|any] [plain]`, and is LAN-only unless told otherwise; `plain` lets
 unencrypted clients in even when it has TLS. `name` is what
 discovery replies call the machine — two Amigas on one LAN stop being
@@ -128,3 +137,33 @@ self-update, like the allow-list:
 ```
 Run >NIL: C:wasabid name a1200
 ```
+
+### Zenix
+
+[Zenix](../PROTOCOL.md#zenixs-daemon) has a daemon of its own that
+speaks Wasabi's protocol on **port 1236** (AmigaOS's wasabid keeps
+1234), plain, with its own key. The commands work as they do on
+AmigaOS where Zenix has the thing (`ping`, `info`, `ls`, `put`, `get`,
+`run`, `ps`, `kill`, `debug`, `grab`, `key`, `health`, `speedtest`,
+`reboot`, ...); what Zenix has no use for says so. Different there:
+Unix paths (`/bin/sh`, no system-place check), `ps` shows pids and
+`kill 123` takes one, `put --mode 755`, and two of its own:
+
+```
+wasabi --port 1236 text                     the console, as text
+wasabi --port 1236 wait text 'login:'       until a line matches
+wasabi --port 1236 reboot --to amigaos --yes --wait
+                                            back to AmigaOS, and wait
+                                            until its wasabid answers
+```
+
+A key and plain per machine, in the config (`~/.config/wasabi/config`),
+so `--key` and the "no encryption" warning are not needed every time:
+
+```
+key@192.168.1.20:1236 = the-zenix-key
+plain@192.168.1.20:1236 = yes
+```
+
+`plain@` is optional: the client remembers a port that turned out to
+have no encryption by itself (see [Security](security.md)).

@@ -26,7 +26,7 @@ in every release; the module loads the script). Python 3.8 or later,
 standard library only. `WASABI_SCRIPT=/path/to/wasabi` points it at a
 script somewhere else.
 
-**API version 1.0** (wasabi 0.10). `wasabi_client.API_VERSION` says
+**API version 1.1** (wasabi 0.11b3; 1.0 was wasabi 0.10). `wasabi_client.API_VERSION` says
 which one you have. A minor version (1.1) only adds; a major one (2.0)
 may change or remove something, and the change log says what.
 
@@ -38,7 +38,7 @@ timeout=None)` returns an `Amiga`. Use it in a `with` block, or call
 
 | Argument | Meaning |
 |---|---|
-| `host`, `port`, `key` | as `--host`/`--port`/`--key`. Not given: `WASABI_HOST`/`WASABI_PORT`/`WASABI_KEY`, then `~/.config/wasabi/config`, then discovery on the network - exactly as the command finds it |
+| `host`, `port`, `key` | as `--host`/`--port`/`--key`. Not given: `WASABI_HOST`/`WASABI_PORT`, then `~/.config/wasabi/config`, then discovery on the network; the key: the config's `key@ADDRESS:PORT` line for that machine, then `WASABI_KEY`, then the config's `key` - exactly as the command finds them |
 | `tls` | `None`: as the command decides (encrypted when this computer has keys; never a silent downgrade). `True`: insist. `False`: never encrypt (`--plain`) |
 | `native` | coordinates in the screen's own pixels instead of the picture's ([coordinates](screen-and-gui.md#coordinates)) - in and out |
 | `timeout` | seconds of silence before `AmigaSilent` (default 15; for the whole process) |
@@ -141,6 +141,23 @@ A screen is a dict: `title`, `addr`, `left`, `top`, `width`, `height`,
 `title`, `addr`, `task`, `left`, `top`, `width`, `height`, `border`
 (`[left, top, right, bottom]`), `active`, `backdrop`.
 
+### The console as text (Zenix)
+
+Zenix's daemon (caps `text`) gives its console as text, so a script
+reads the screen without a picture; an AmigaOS wasabid has no such
+thing (`WasabiError`).
+
+| Call | Returns |
+|---|---|
+| `text(console=0, cells=False)` | a `ConsoleText`: console 0 is the one on the display, 1-10 a given one |
+| `wait_text(pattern, timeout=30, console=0)` | waits until a line matches `pattern` (a POSIX extended regular expression) - the Amiga does the watching - and returns the `ConsoleText`; `TimeLimit` when `timeout` seconds pass |
+
+`ConsoleText` has `lines` (trailing spaces gone), `rows`, `cols`,
+`cursor` (`(row, column)`), `console`, `shown`, `changes` (a counter
+raised on every draw), and with `cells=True` `styles` and `colours`:
+each row's bytes as hex (colour: foreground in the low nibble,
+background in the high one); else `None`.
+
 ### Gadgets and menus
 
 | Call | Returns |
@@ -168,4 +185,7 @@ same id (border gadgets are usually 0) need `nth`.
 
 ## Change log
 
+- **1.1** (wasabi 0.11b3) - `text()` and `wait_text()` (Zenix's
+  console); the key for a machine comes from its `key@ADDRESS:PORT`
+  config line when one is there.
 - **1.0** (wasabi 0.10) - the first stable API.

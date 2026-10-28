@@ -125,7 +125,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x45 | SPEED    | C→S | `u32 flags`, `u32 size`, `str target` |
 | 0x46 | QUIT     | C→S | `[u32 flags]` (may be absent) |
 | 0x47 | INSTALL  | C→S | `str sidecar` |
-| 0x48 | GRAB     | C→S | `str screenname` |
+| 0x48 | GRAB     | C→S | `str screenname`, `[u32 flags]` (sent to Zenix's daemon only) |
 | 0x49 | SCREEN   | C→S | `u32 flags`, `str title` |
 | 0x4A | MOUSE    | C→S | `u16 action`, `u16 button`, `u16 count`, `i16 x`, `i16 y` |
 | 0x4B | KEY      | C→S | `u16 mode`, then events or text (below) |
@@ -142,6 +142,7 @@ charset). The C side always terminates them itself after bounds-checking.
 | 0x56 | PORTS    | C→S | (empty) |
 | 0x57 | SUM      | C→S | `i16 x`, `i16 y`, `i16 w`, `i16 h` (0x0: the whole screen) |
 | 0x58 | INPUTS   | C→S | 12-byte records: `u8 kind`, `u8 button`, `u16 wait`, `u16 a`, `u16 b`, `i16 x`, `i16 y` |
+| 0x59 | TEXT     | C→S | `u32 flags`, `u32 console`, `u32 timeout`, `str pattern` (Zenix's daemon, caps `text`) |
 
 `str` = `u16 len` + bytes, as above.
 
@@ -176,7 +177,10 @@ assuming silence means yes.
 (0.6, the daemon has TLS ready), `rexxport` (0.7, its own ARexx port
 `WASABI`), `plainopt` (0.8, encryption is optional), `pointer` (0.9b3,
 the `S` line of `WINDOWS` and `UI` carries the pointer position), `sum`
-(0.9), `inputs` (0.10b4, `INPUTS`). Self-update makes version skew
+(0.9), `inputs` (0.10b4, `INPUTS`). Zenix's daemon (below) sends
+its own list, with three names of its own: `rebootto` (`REBOOT`'s
+flags bits 1-3), `zenix` (it is Zenix: pids, Unix modes and paths) and
+`text` (`TEXT`). Self-update makes version skew
 an everyday event: the client is usually a `git pull` ahead of the daemon
 until the next `wasabi update`, and "unknown command" is a poor way to
 find that out. With the list, the client can name the build that is too
@@ -487,7 +491,19 @@ when the caller is low on stack. Covered LVOs, verified against the NDK
 
 ### REBOOT
 
-The daemon replies `OK`, says goodbye on any open stream (see *Farewell*
+`flags` bits 1-3 only with caps `rebootto` (Zenix's daemon; an AmigaOS
+wasabid ignores them and does a plain reboot, so the client refuses to
+send them there): bit 1 AmigaOS boots next, bit 2 Zenix boots next
+(never both), bit 3 skip the guard. The guard is an `ERR` instead of
+the `OK` while something runs that a reboot would leave half done
+(Zenix: an update, `fsck.*`, `mkfs.*`, `fdisk`, `dd`). **A daemon with
+`rebootto` keeps the connection open after its `OK`** while its reboot
+command runs, and sends `ERR` if that command comes back (no room for
+the boot note, say); a machine that resets sends nothing more. The
+client waits for that `ERR` up to 8 s (at most `--silence`), and
+counts a close, a reset or the silence as done.
+
+AmigaOS's wasabid replies `OK`, says goodbye on any open stream (see *Farewell*
 under DEBUG), closes **every** client socket — a reset machine sends no
 FIN, so a connection left open here would wait forever on a peer that no
 longer exists — asks every mounted volume's handler to write out its
@@ -645,6 +661,14 @@ the rest is `width * height * 3` bytes of pixels, top row first.
 this system by a wide margin, so shipping 3.7 MB raw costs about thirty
 milliseconds of wire while compressing it on the Amiga would cost
 seconds. The client makes the PNG.
+
+`flags` (optional, after `screenname`; sent only to a daemon with caps
+`zenix`) bit 0: notes welcome. A daemon that reads it may then send
+`STDERR` frames among the `DATA`, each one line about the picture -
+Zenix's: the console scrolled or changed mode while it was read (every
+line is right; the picture may mix two moments). The client prints the
+note and keeps the picture. Without the bit no such frame is sent: an
+older client fails on any frame but `DATA` inside `GRAB`.
 
 `screenname` empty means the **frontmost** screen, private ones
 included; a name locks that public screen instead. How the pixels are
@@ -1006,6 +1030,63 @@ the mailbox's semaphore for the round trip; there is no raw-MMIO
 fallback, so the daemon can never collide with Emu68 or VideoCore.card
 on the mailbox. Rates (MIPS) are the client's work: two readings, and
 the time between them taken from `emu68.cnt`, not the network.
+
+Zenix's daemon sends `mem.chip.free`, `mem.fast.free`, `emu68`
+(yes/no) and its own keys: `zenix.version`, `uptime` (seconds),
+`procs`, `load.ready` (processes ready to run), `net.IFACE.rx`/`.tx`/
+`.bad`, `disk.root.free.kb` (KB). No `mem.*.largest` (Zenix has no call
+for it) and no `pi.*` (no mailbox driver): the client shows what is
+there.
+
+### TEXT — the console as text (Zenix's daemon, caps `text`)
+
+`u32 flags` (bit 0: each cell's style and colour too), `u32 console`
+(1-10; 0 the one on the display), `u32 timeout` (seconds, at most 3600;
+0: at once), `str pattern` (a POSIX extended regular expression; empty:
+none, answer at once). With a pattern the daemon watches the console
+(every 100 ms while it changes) until a row matches or the timeout
+passes, so the network carries one request and one answer. The answer
+is one `DATA` then `END` (a row matched, or no pattern); on a timeout
+the same `DATA` (the grid as it was) then `ERR` code 0 `timeout`. A
+console never used is an `ERR`. The client raises its socket timeout
+above the wait.
+
+The `DATA`: a 16-byte header, `u16 rows`, `u16 cols`, `u16 cursor row`,
+`u16 cursor column`, `u32 changes` (raised on every draw), `u8 shown`,
+`u8 pcfont` (1: the glyphs are CP437, else Latin-1), `u8 console`,
+`u8 0`; then `rows * cols` cells, row by row: one glyph byte each, or
+with bit 0 three bytes each (glyph, style bits, colour: foreground low
+nibble, background high). The grid, not the scrollback.
+
+## Zenix's daemon
+
+Zenix (an MMU-less Unix-like system for the same Amigas) has a daemon
+of its own that speaks this protocol, version 1, and says what it can
+do in `caps` (`zenix` among them). It listens on **TCP port 1236**, not
+1234, so an A1200 that boots both systems is "another Amiga at the same
+address" while Zenix runs and the client's pin for the encrypted
+AmigaOS daemon on 1234 never meets the plain Zenix one. It answers
+discovery on UDP 1234 and 1236 with that port; its banner is `Zenix
+VERSION`. Its first version is plain (no TLS): it closes a connection
+whose first byte is `0x16`, the client's sign to go plain. What `zenix`
+in caps changes:
+
+- **`PS`:** the address field is the pid (`0x%08x`), kind `p`, priority
+  `-nice`, stack `0`, CLI `-1`. `KILL 0x...` names a pid; flag clear is
+  SIGINT, set SIGKILL. The client shows pids and takes `kill PID`.
+- **`PUT`:** `protbits` with bit 31 set is a Unix mode (the low 12
+  bits); `0xFFFFFFFF` still means "the daemon decides" (a replaced
+  file keeps its mode, a new Zenix program gets 0755, anything else
+  0644). The client sends it for `put --mode`.
+- **Paths** are Unix paths (`/bin/sh`): the client's system-place
+  checks (SYS:, C:, ...) do not apply, and `ls` with no path lists `/`.
+- **`ERR` codes** are the nearest AmigaDOS ones (205 not found, 203
+  exists, 223/224 protected, 221 disk full, 216 not empty, 212 wrong
+  type, 202 in use, 214 write-protected), 0 for the daemon's own
+  refusals.
+- Commands Zenix has no use for (`SNOOP`, `INSTALL`, `MOUSE`, `LIVE`,
+  `CLIP`, `UI`, `UIACT`, `AREXX`, `PORTS`) are not in its caps and
+  answer `ERR` "not on Zenix".
 
 ## Teardown and the SetFunction rule
 
