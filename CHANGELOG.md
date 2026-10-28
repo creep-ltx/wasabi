@@ -5,6 +5,14 @@ What changed in each version, newest first. Betas (`0.10b4`) are on the
 files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 `wasabi ping` shows which daemon an Amiga runs.
 
+## Unreleased
+
+- **MUI buttons made of a group:** a Group.mui that is clicked (a
+  framed group holding an image and a Text, as some programs make their
+  buttons) is now listed as one `button` or `toggle`, labelled with its
+  Text, or its tooltip when it has no Text, instead of only its Text
+  child as a `label`.
+
 ## 0.11b2 - 17 October 2026
 
 - **Less memory again:** about 200 KB instead of about 307 KB (measured
