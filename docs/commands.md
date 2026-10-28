@@ -161,8 +161,8 @@ A key and plain per machine, in the config (`~/.config/wasabi/config`),
 so `--key` and the "no encryption" warning are not needed every time:
 
 ```
-key@192.168.1.20:1236 = the-zenix-key
-plain@192.168.1.20:1236 = yes
+key@192.0.2.20:1236 = the-zenix-key
+plain@192.0.2.20:1236 = yes
 ```
 
 `plain@` is optional: the client remembers a port that turned out to
