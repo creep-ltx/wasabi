@@ -3628,31 +3628,28 @@ static ULONG mui3_input_mode(Object *o)
     return (ad[0] & 0x10000) ? 1 : 3;
 }
 
-/* The text of the first Text.mui inside a group (a button made of a
- * group holds its label that way, often beside an image). */
-static BOOL ui_mui_group_text(Object *o, int depth, char *out, LONG sz)
+/* MUI 3.x will not give MUIA_ShortHelp back either (GetAttr answers
+ * FALSE, even for a class that took it at NewObject): the Area keeps the
+ * tooltip string pointer 24 bytes after mad_Flags (+88 from the object),
+ * found by dumping the words of Selecta's buttons in muimaster 19.31,
+ * where it read "Home", "Browse", "Queue", ... Answers the pointer, or
+ * FALSE when the word is not readable text. */
+static BOOL mui3_short_help(Object *o, ULONG *out)
 {
-    struct List *l = NULL;
-    struct Node *n;
+    const ULONG *ad = (const ULONG *)((const UBYTE *)o + 64);
     ULONG v = 0;
-    int k = 0;
-
-    if (depth > 4 || !ui_obj_ok(o) || !ui_class_is(o, "Area.mui"))
-        return FALSE;
-    if (ui_class_is(o, "Text.mui")) {
-        if (GetAttr(MUIA_Text_Contents, o, &v))
-            ui_mui_text((const UBYTE *)v, out, sz);
-        return out[0] != '\0';
+    if (!g_muimaster) {
+        if (!GetAttr(MUIA_ShortHelp, o, &v))
+            return FALSE;
+    } else {
+        if (!ui_readable(ad + 6))
+            return FALSE;
+        v = ad[6];
     }
-    if (!ui_class_is(o, "Group.mui") ||
-        !GetAttr(MUIA_Group_ChildList, o, (ULONG *)&l) || !ui_readable(l))
+    if (!v || !ui_readable_text((const void *)v))
         return FALSE;
-    for (n = l->lh_Head; ui_readable(n) && n->ln_Succ && k < 20;
-         n = n->ln_Succ, k++)
-        if (ui_mui_group_text((Object *)((struct _Object *)n + 1),
-                              depth + 1, out, sz))
-            return TRUE;
-    return FALSE;
+    *out = v;
+    return TRUE;
 }
 
 static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
@@ -3698,29 +3695,11 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
     } else if (ui_class_is(o, "Group.mui")) {
         struct List *l = NULL;
         struct Node *n;
-        ULONG gmode = 0;
         int k = 0;
         if (it.w <= 0 || it.h <= 0)
             return TRUE;                 /* a page not shown: nor are its
                                           * children, and they would use
                                           * up the 400 */
-        if (g_muimaster)
-            gmode = mui3_input_mode(o);
-        else
-            GetAttr(MUIA_InputMode, o, &gmode);
-        if (gmode) {
-            /* A button made of a group (a frame, an image, a Text): the
-             * group is the thing that is clicked, so it is the item and
-             * its children are not. Its label is the Text's, else the
-             * tooltip (an icon-only button has just that). */
-            it.kind = gmode == 3 ? "toggle" : "button";
-            if (!ui_mui_group_text(o, 0, it.label, sizeof(it.label)) &&
-                GetAttr(MUIA_ShortHelp, o, &v) && v)
-                ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
-            if (GetAttr(MUIA_Selected, o, &v) && v)
-                it.selected = TRUE;
-            goto emit;
-        }
         if (!GetAttr(MUIA_Group_ChildList, o, (ULONG *)&l) ||
             !ui_readable(l))
             return TRUE;
@@ -3738,6 +3717,11 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
             GetAttr(MUIA_InputMode, o, &mode);
         if (ui_class_is(o, "Text.mui") &&
             GetAttr(MUIA_Text_Contents, o, &v))
+            ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
+        /* A button that draws its own text (a custom Area subclass, as
+         * Selecta's buttons are) has no Text.mui to read: its tooltip is
+         * the one name it carries. */
+        if (mode && !it.label[0] && mui3_short_help(o, &v))
             ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
         it.kind = mode == 1 ? "button" : mode == 3 ? "toggle" :
                   mode == 2 ? "button" : "label";

@@ -7,11 +7,12 @@ files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 
 ## Unreleased
 
-- **MUI buttons made of a group:** a Group.mui that is clicked (a
-  framed group holding an image and a Text, as some programs make their
-  buttons) is now listed as one `button` or `toggle`, labelled with its
-  Text, or its tooltip when it has no Text, instead of only its Text
-  child as a `label`.
+- **MUI buttons that draw their own text:** a clickable MUI Area that
+  has no Text.mui inside (a custom class that paints its caption itself)
+  is now labelled from its tooltip, so `uitree` lists it as a named
+  `button` or `toggle` instead of an empty one. MUI 3 does not answer
+  `MUIA_ShortHelp` through `GetAttr`, so the string is read from the
+  Area instance data.
 
 ## 0.11b3 - 28 October 2026
 
