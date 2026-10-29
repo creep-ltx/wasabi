@@ -3698,6 +3698,14 @@ static BOOL ui_aalist_rows(Object *o, ULONG count, struct UiItem *list,
     return TRUE;
 }
 
+/*
+ * Selecta's AAText (plugins/ui/mui/mui_aatext_class.h) draws its own text
+ * and has no MUIA_Text_Contents. It answers GetAttr(AAT_Contents,
+ * TAG_USER+0x53410001) with a pointer to the string it shows; any other
+ * Area answers FALSE.
+ */
+#define AAT_CONTENTS (0x80000000UL + 0x53410001UL)
+
 static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
 {
     struct UiItem it;
@@ -3767,6 +3775,9 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
             GetAttr(MUIA_InputMode, o, &mode);
         if (ui_class_is(o, "Text.mui") &&
             GetAttr(MUIA_Text_Contents, o, &v))
+            ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
+        if (!mode && !it.label[0] && GetAttr(AAT_CONTENTS, o, &v) &&
+            ui_readable((void *)v))
             ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
         /* A button that draws its own text (a custom Area subclass, as
          * Selecta's buttons are) has no Text.mui to read: its tooltip is
