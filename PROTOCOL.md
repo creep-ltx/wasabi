@@ -879,7 +879,9 @@ against Intuition's lists before use.
   delivers a pick. Refused when the window has no port, does not listen
   for `IDCMP_MENUPICK`, or the item is missing or disabled. A
   `CHECKIT` item is toggled (or set, without `MENUTOGGLE`) and its
-  `MutualExclude` partners cleared first, as Intuition would. `OK` is
+  `MutualExclude` partners cleared first, as Intuition would: the other
+  items of the menu for an item, the other sub-items of the same parent
+  item for a sub-item (bit n = n-th entry of that list). `OK` is
   sent at once; the message is freed when the program replies.
 - op 2 — `ScreenToFront`, `WindowToFront` and `ActivateWindow`, so a
   click lands on it. `OK`; Intuition does it a moment later.

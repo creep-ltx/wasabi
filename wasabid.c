@@ -4070,6 +4070,17 @@ static BOOL window_alive(struct Window *want)
     return FALSE;
 }
 
+/* Clear CHECKED on the siblings of `it` that its MutualExclude names
+ * (bit n = n-th entry of the list starting at `first`). */
+static void menu_clear_exclude(struct MenuItem *first, struct MenuItem *it)
+{
+    struct MenuItem *o;
+    ULONG k;
+    for (o = first, k = 0; o && k < 32; o = o->NextItem, k++)
+        if (o != it && (it->MutualExclude & (1UL << k)))
+            o->Flags &= ~CHECKED;
+}
+
 /* Pick menu item `code` (FULLMENUNUM) in w: NULL, or why not. */
 static const char *menu_pick(struct Window *w, ULONG code)
 {
@@ -4107,17 +4118,21 @@ static const char *menu_pick(struct Window *w, ULONG code)
                  * next refresh; Intuition does it on release, which
                  * this message stands in for. */
                 if (it->MutualExclude && (it->Flags & CHECKED)) {
-                    struct Menu *mm = w->MenuStrip;
-                    struct MenuItem *o;
-                    ULONG mnum = code & 31, k;
-                    for (k = 0; mm && k < mnum; k++)
-                        mm = mm->NextMenu;
-                    o = mm ? mm->FirstItem : NULL;
-                    if (((code >> 11) & 31) != 31)
-                        o = NULL;        /* sub-items: leave it alone */
-                    for (k = 0; o && k < 32; o = o->NextItem, k++)
-                        if (o != it && (it->MutualExclude & (1UL << k)))
-                            o->Flags &= ~CHECKED;
+                    struct MenuItem *first;
+                    if (((code >> 11) & 31) == 31) {
+                        /* a top-level item: its siblings are the menu's items */
+                        struct Menu *mm = w->MenuStrip;
+                        ULONG k, mnum = code & 31;
+                        for (k = 0; mm && k < mnum; k++)
+                            mm = mm->NextMenu;
+                        first = mm ? mm->FirstItem : NULL;
+                    } else {
+                        /* a sub-item: its siblings are the parent item's SubItem list */
+                        struct MenuItem *parent = ItemAddress(w->MenuStrip,
+                                (UWORD)(code | (31UL << 11)));
+                        first = parent ? parent->SubItem : NULL;
+                    }
+                    menu_clear_exclude(first, it);
                 }
             }
             it->NextSelect = MENUNULL;
