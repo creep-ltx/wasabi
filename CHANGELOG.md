@@ -5,6 +5,15 @@ What changed in each version, newest first. Betas (`0.10b4`) are on the
 files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 `wasabi ping` shows which daemon an Amiga runs.
 
+## Unreleased
+
+- **MUI buttons that draw their own text:** a clickable MUI Area that
+  has no Text.mui inside (a custom class that paints its caption itself)
+  is now labelled from its tooltip, so `uitree` lists it as a named
+  `button` or `toggle` instead of an empty one. MUI 3 does not answer
+  `MUIA_ShortHelp` through `GetAttr`, so the string is read from the
+  Area instance data.
+
 ## 0.11b3 - 28 October 2026
 
 The PC side only (the `wasabi` command, its Python API and MCP server);
