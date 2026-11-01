@@ -3238,7 +3238,7 @@ static BOOL ui_reaction(struct Window *w, const void *lay, int depth,
 #define MUIA_Text_Contents     0x8042f8dc
 #define MUIA_String_Contents   0x80428ffd
 #define MUIA_InputMode         0x8042fb04
-#define MUIA_ShortHelp         0x80420b17
+#define MUIA_ShortHelp         0x80428fe3
 #define MUIA_Selected          0x8042654b
 #define MUIA_Disabled          0x80423661
 #define MUIA_Cycle_Active      0x80421788
@@ -3628,25 +3628,14 @@ static ULONG mui3_input_mode(Object *o)
     return (ad[0] & 0x10000) ? 1 : 3;
 }
 
-/* MUI 3.x will not give MUIA_ShortHelp back either (GetAttr answers
- * FALSE, even for a class that took it at NewObject): the Area keeps the
- * tooltip string pointer 24 bytes after mad_Flags (+88 from the object),
- * found by dumping the words of Selecta's buttons in muimaster 19.31,
- * where it read "Home", "Browse", "Queue", ... Answers the pointer, or
- * FALSE when the word is not readable text. */
-static BOOL mui3_short_help(Object *o, ULONG *out)
+/* The tooltip of a button that draws its own text: MUIA_ShortHelp read
+ * through GetAttr, like every other attribute here. Answers the string
+ * pointer, or FALSE when the object has none or it is not readable text. */
+static BOOL mui_short_help(Object *o, ULONG *out)
 {
-    const ULONG *ad = (const ULONG *)((const UBYTE *)o + 64);
     ULONG v = 0;
-    if (!g_muimaster) {
-        if (!GetAttr(MUIA_ShortHelp, o, &v))
-            return FALSE;
-    } else {
-        if (!ui_readable(ad + 6))
-            return FALSE;
-        v = ad[6];
-    }
-    if (!v || !ui_readable_text((const void *)v))
+    if (!GetAttr(MUIA_ShortHelp, o, &v) || !v ||
+        !ui_readable_text((const void *)v))
         return FALSE;
     *out = v;
     return TRUE;
@@ -3721,7 +3710,7 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
         /* A button that draws its own text (a custom Area subclass, as
          * Selecta's buttons are) has no Text.mui to read: its tooltip is
          * the one name it carries. */
-        if (mode && !it.label[0] && mui3_short_help(o, &v))
+        if (mode && !it.label[0] && mui_short_help(o, &v))
             ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
         it.kind = mode == 1 ? "button" : mode == 3 ? "toggle" :
                   mode == 2 ? "button" : "label";

@@ -10,9 +10,8 @@ files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 - **MUI buttons that draw their own text:** a clickable MUI Area that
   has no Text.mui inside (a custom class that paints its caption itself)
   is now labelled from its tooltip, so `uitree` lists it as a named
-  `button` or `toggle` instead of an empty one. MUI 3 does not answer
-  `MUIA_ShortHelp` through `GetAttr`, so the string is read from the
-  Area instance data.
+  `button` or `toggle` instead of an empty one. The tooltip is read
+  with `GetAttr(MUIA_ShortHelp)`, which muimaster 19.31 and 19.35 answer.
 
 ## 0.11b3 - 28 October 2026
 
