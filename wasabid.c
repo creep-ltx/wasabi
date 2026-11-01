@@ -3238,6 +3238,7 @@ static BOOL ui_reaction(struct Window *w, const void *lay, int depth,
 #define MUIA_Text_Contents     0x8042f8dc
 #define MUIA_String_Contents   0x80428ffd
 #define MUIA_InputMode         0x8042fb04
+#define MUIA_ShortHelp         0x80428fe3
 #define MUIA_Selected          0x8042654b
 #define MUIA_Disabled          0x80423661
 #define MUIA_Cycle_Active      0x80421788
@@ -3627,6 +3628,19 @@ static ULONG mui3_input_mode(Object *o)
     return (ad[0] & 0x10000) ? 1 : 3;
 }
 
+/* The tooltip of a button that draws its own text: MUIA_ShortHelp read
+ * through GetAttr, like every other attribute here. Answers the string
+ * pointer, or FALSE when the object has none or it is not readable text. */
+static BOOL mui_short_help(Object *o, ULONG *out)
+{
+    ULONG v = 0;
+    if (!GetAttr(MUIA_ShortHelp, o, &v) || !v ||
+        !ui_readable_text((const void *)v))
+        return FALSE;
+    *out = v;
+    return TRUE;
+}
+
 static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
 {
     struct UiItem it;
@@ -3692,6 +3706,11 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
             GetAttr(MUIA_InputMode, o, &mode);
         if (ui_class_is(o, "Text.mui") &&
             GetAttr(MUIA_Text_Contents, o, &v))
+            ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
+        /* A button that draws its own text (a custom Area subclass, as
+         * Selecta's buttons are) has no Text.mui to read: its tooltip is
+         * the one name it carries. */
+        if (mode && !it.label[0] && mui_short_help(o, &v))
             ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
         it.kind = mode == 1 ? "button" : mode == 3 ? "toggle" :
                   mode == 2 ? "button" : "label";
