@@ -3641,6 +3641,60 @@ static BOOL mui_short_help(Object *o, ULONG *out)
     return TRUE;
 }
 
+/*
+ * Selecta's AAList (plugins/ui/mui/mui_aalist_class.h) is an Area
+ * subclass with its own row model, not a MUI List: no MUIA_List_* to
+ * read. It answers AAL_Count (TAG_USER+0x53410501) and the method
+ * AAM_GetRow (TAG_USER+0x53410510), which fills a row's text (cells
+ * joined by two spaces), its box in window coordinates (0x0 when
+ * scrolled out) and whether it is the active row. Any other Area
+ * answers GetAttr(AAL_Count) with FALSE.
+ */
+#define AAL_COUNT (0x80000000UL + 0x53410501UL)
+#define AAM_GETROW (0x80000000UL + 0x53410510UL)
+struct AaGetRow {
+    ULONG method;
+    LONG row;
+    char *text;
+    LONG cap;
+    LONG x, y, w, h;
+    LONG selected;
+};
+
+static BOOL ui_aalist_rows(Object *o, ULONG count, struct UiItem *list,
+                           struct MuiWalk *mw)
+{
+    static char text[120];
+    LONG i;
+
+    list->kind = "list";
+    sprintf(list->value, "%lu", (unsigned long)count);
+    if (!mw_emit(mw, list))
+        return FALSE;
+    for (i = 0; i < (LONG)count && i < ROWS_MAX; i++) {
+        struct AaGetRow m;
+        memset(&m, 0, sizeof(m));
+        text[0] = '\0';
+        m.method = AAM_GETROW;
+        m.row = i;
+        m.text = text;
+        m.cap = sizeof(text);
+        DoMethodA(o, (Msg)&m);
+        if (!ui_row(mw->sink, mw->ctx, (ULONG)o, i, m.selected != 0, text,
+                    m.x, m.y, m.w, m.h))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/*
+ * Selecta's AAText (plugins/ui/mui/mui_aatext_class.h) draws its own text
+ * and has no MUIA_Text_Contents. It answers GetAttr(AAT_Contents,
+ * TAG_USER+0x53410001) with a pointer to the string it shows; any other
+ * Area answers FALSE.
+ */
+#define AAT_CONTENTS (0x80000000UL + 0x53410001UL)
+
 static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
 {
     struct UiItem it;
@@ -3698,6 +3752,10 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
                              mw))
                 return FALSE;
         return TRUE;
+    } else if (GetAttr(AAL_COUNT, o, &v)) {
+        if (it.w <= 0 || it.h <= 0)
+            return TRUE;
+        return ui_aalist_rows(o, v, &it, mw);
     } else {
         ULONG mode = 0;
         if (g_muimaster)
@@ -3706,6 +3764,9 @@ static BOOL ui_mui_walk(Object *o, int depth, struct MuiWalk *mw)
             GetAttr(MUIA_InputMode, o, &mode);
         if (ui_class_is(o, "Text.mui") &&
             GetAttr(MUIA_Text_Contents, o, &v))
+            ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
+        if (!mode && !it.label[0] && GetAttr(AAT_CONTENTS, o, &v) &&
+            ui_readable((void *)v))
             ui_mui_text((const UBYTE *)v, it.label, sizeof(it.label));
         /* A button that draws its own text (a custom Area subclass, as
          * Selecta's buttons are) has no Text.mui to read: its tooltip is
