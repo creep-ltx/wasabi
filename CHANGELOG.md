@@ -12,6 +12,12 @@ files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
   is now labelled from its tooltip, so `uitree` lists it as a named
   `button` or `toggle` instead of an empty one. The tooltip is read
   with `GetAttr(MUIA_ShortHelp)`, which muimaster 19.31 and 19.35 answer.
+- **MUI buttons made of a group:** a Group.mui that is clicked (a
+  framed group holding an image and a Text, as some programs make their
+  buttons) is now listed as one `button` or `toggle`, labelled with its
+  Text, or its tooltip when it has no Text. The window's root group and
+  groups that only hold other gadgets are not listed, and the gadgets
+  inside a group button are still listed.
 
 ## 0.11b3 - 28 October 2026
 
