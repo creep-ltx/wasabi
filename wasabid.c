@@ -5770,15 +5770,22 @@ done:
  * input.device to flip screens from another machine, and naming one
  * beats flipping blindly through them.
  *
- * The whole walk runs under LockIBase() because the screen list is
- * Intuition's own and may change under a reader.
+ * The walk runs under LockIBase() because the screen list is Intuition's
+ * own and may change under a reader. The lines go into a buffer there and
+ * are sent only after UnlockIBase(), as WINDOWS does: a send that blocks
+ * on the network must never hold Intuition's lock.
  */
 static BOOL cmd_screenctl(int fd, ULONG flags, const char *want)
 {
     struct Screen *sc, *bring = NULL, *front = NULL;
-    char line[220];
+    char *buf;
+    LONG used = 0, i, n;
+    BOOL ok = TRUE, full = FALSE;
     ULONG ib;
-    LONG n;
+
+    buf = AllocMem(WIN_BUF, MEMF_ANY);
+    if (!buf)
+        return send_err(fd, "out of memory");
 
     ib = LockIBase(0);
     for (sc = IntuitionBase->FirstScreen; sc; sc = sc->NextScreen) {
@@ -5788,18 +5795,28 @@ static BOOL cmd_screenctl(int fd, ULONG flags, const char *want)
             front = sc;
         if (want[0] && !bring && str_ieq(title, want))
             bring = sc;
+        if (used + 220 > WIN_BUF) { full = TRUE; continue; }
         /* The title belongs to whichever program opened the screen -
          * some put a full path in it - so it is bounded here rather
          * than trusted into a 220-byte line. */
-        n = sprintf(line, "0x%08lx %ld %ld %ld %.150s\n",
-                    (unsigned long)sc, (long)sc->Width, (long)sc->Height,
-                    (long)depth, title);
-        if (!send_frame(fd, T_DATA, line, n)) {
-            UnlockIBase(ib);
-            return FALSE;
-        }
+        used += sprintf(buf + used, "0x%08lx %ld %ld %ld %.150s\n",
+                        (unsigned long)sc, (long)sc->Width,
+                        (long)sc->Height, (long)depth, title);
     }
     UnlockIBase(ib);
+
+    /* One frame per line, as before. */
+    for (i = 0; ok && i < used; i += n) {
+        for (n = 0; buf[i + n] != '\n'; n++)
+            ;
+        n++;
+        ok = send_frame(fd, T_DATA, buf + i, n);
+    }
+    FreeMem(buf, WIN_BUF);
+    if (!ok)
+        return FALSE;
+    if (full)
+        return send_err(fd, "too many screens; the list is cut short");
 
     if (bring)
         ScreenToFront(bring);
