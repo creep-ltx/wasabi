@@ -7,6 +7,13 @@ files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 
 ## Unreleased
 
+- **One daemon per Amiga:** a second non-trial `wasabid` now prints
+  `wasabid: already running` and exits with RETURN_WARN (5) instead of
+  patching the same exec vectors as the first. The guard is a public
+  message port, `WASABI.daemon`, made under Forbid before any patch or
+  shared memory is touched, and removed before a restart relaunches the
+  daemon. A `trial` instance neither makes nor checks it. A daemon that
+  dies without cleaning up (a guru) leaves the port behind until reboot.
 - **MUI buttons that draw their own text:** a clickable MUI Area that
   has no Text.mui inside (a custom class that paints its caption itself)
   is now labelled from its tooltip, so `uitree` lists it as a named

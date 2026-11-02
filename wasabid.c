@@ -6957,6 +6957,52 @@ static int selftest(const char *nonce)
     return RETURN_OK;
 }
 
+/*
+ * One non-trial daemon per Amiga. Two of them would both patch the same
+ * exec vectors and take the same shared memory (see g_trial above), which
+ * ends in a guru some minutes later. The guard is a public message port,
+ * made under Forbid before anything else is touched, so two daemons
+ * starting at the same instant cannot both pass. The name is distinct
+ * from the ARexx port: that one is optional (rexxsyslib may be missing),
+ * this one is always made. Trial instances neither make nor look at it.
+ */
+#define SINGLETON_PORT_NAME "WASABI.daemon"
+
+static struct MsgPort *g_single_port;
+
+/* TRUE when this process now owns the singleton; FALSE when another
+ * daemon already does. */
+static BOOL singleton_claim(void)
+{
+    struct MsgPort *mp = CreateMsgPort();
+
+    if (!mp)
+        return TRUE;                     /* out of memory: not a duplicate */
+    mp->mp_Node.ln_Name = SINGLETON_PORT_NAME;
+    mp->mp_Node.ln_Pri = 0;
+    Forbid();
+    if (FindPort(SINGLETON_PORT_NAME)) {
+        Permit();
+        DeleteMsgPort(mp);
+        return FALSE;
+    }
+    AddPort(mp);
+    Permit();
+    g_single_port = mp;
+    return TRUE;
+}
+
+/* Idempotent. Called before the restart relaunch so the new process finds
+ * the name free, and again on the way out of main(). */
+static void singleton_release(void)
+{
+    if (!g_single_port)
+        return;
+    RemPort(g_single_port);
+    DeleteMsgPort(g_single_port);
+    g_single_port = NULL;
+}
+
 static int daemon_main(int argc, char **argv)
 {
     int listen_fd = -1, disco_fd = -1, port = DEF_PORT, i;
@@ -7002,6 +7048,10 @@ static int daemon_main(int argc, char **argv)
             if (p > 0 && p < 65536)
                 port = (int)p;
         }
+    }
+    if (!g_trial && !singleton_claim()) {
+        Printf("wasabid: already running\n");
+        return RETURN_WARN;
     }
     g_port = port;                       /* remembered for restart */
     /* Replayed on restart, so a self-update does not silently drop the
@@ -7103,6 +7153,7 @@ static int daemon_main(int argc, char **argv)
     if (!SocketBase) {
         Printf("wasabid: no bsdsocket.library - is the TCP/IP stack up?\n");
         guru_release();
+        singleton_release();
         return RETURN_FAIL;
     }
     {
@@ -7545,6 +7596,7 @@ out:
      * we were invoked by (C:wasabid, RAM:wasabid.b6, ...), so the fresh
      * daemon keeps our identity and port. Run detaches it; we then exit.
      */
+    singleton_release();                 /* the relaunch must find it free */
     if (g_restart) {
         /* 13 fixed + a 127-char program path + a 5-digit port + 127
          * chars of replayed arguments + NUL = 273 worst case. */
