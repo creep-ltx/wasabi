@@ -7568,7 +7568,7 @@ out:
 }
 
 /*
- * The daemon's code is budgeted for an 8 KB stack, but it gets whatever
+ * The daemon wants a 256 KB stack, but it gets whatever
  * the Shell that ran it had: 4 KB from OS 3.1's startup-sequence. On
  * that, listing a GadTools window (Input prefs, 3.1) went over the edge
  * and took the machine with it. So when the stack we were given is
@@ -7576,7 +7576,14 @@ out:
  * across StackSwap() is static: locals on the old stack are not
  * reachable from the new one.
  */
-#define STACK_MIN 16384
+#define STACK_MIN 262144
+/* The same figure as the version-style cookie vtcon's launchers read, and
+ * as __stack for startups that honour it. The swap below is what makes it
+ * hold for every start: libnix ignores __stack when a Shell or Run gave
+ * us a stack, and 16 KB was too little: wasabid started by C:Run from a
+ * 4 KB boot shell stopped answering after an AGA reboot. */
+long __stack = STACK_MIN;
+const char wasabid_stack_cookie[] __attribute__((used)) = "$STACK: 262144";
 static struct StackSwapStruct g_sss;
 static int g_argc, g_rc;
 static char **g_argv;
