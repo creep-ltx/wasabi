@@ -291,3 +291,26 @@ of 131072 is about to take the machine down.
 The field is requested rather than always sent — see `PROTOCOL.md`. The
 `PS` line had no room to grow, so adding a column unconditionally would
 have shifted `<name>` for every client already deployed.
+
+### The daemon's own stack
+
+`ps` shows how much is free *now*; `wasabi info` shows the daemon's
+deepest point *ever*, from a stack painted at start:
+
+```
+stack 32 KB (its own), deepest 9.2 KB so far
+```
+
+wasabid runs on 32 KB of its own unless the Shell that started it
+already gave more (then it says `the Shell's`). Measured in FS-UAE, the
+deepest any command goes is 9.5 KB, listing a deeply nested MUI window;
+the worst case by the compiler's frame sizes is near 15 KB. To give it
+another size, start it with `stack BYTES` (16384 at least):
+
+```
+Run >NIL: C:wasabid stack 65536
+```
+
+The size survives `restart` and self-update. If `deepest` ever comes
+near the size, give it more and say so in an issue: it means a window
+or a network stack deeper than any measured.

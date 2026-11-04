@@ -127,8 +127,10 @@ Every command also takes `--json` (where it lists something),
 `--host` overrides discovery, and `WASABI_HOST`/`WASABI_PORT`/`WASABI_KEY`/
 `WASABI_SILENCE` override the config file (a `key@ADDRESS:PORT` line
 there wins over `WASABI_KEY` for that machine; `--key` wins over all). The daemon takes `wasabid [port] [name ID] [allow
-CIDR|any] [plain]`, and is LAN-only unless told otherwise; `plain` lets
-unencrypted clients in even when it has TLS. `name` is what
+CIDR|any] [plain] [stack BYTES]`, and is LAN-only unless told otherwise; `plain` lets
+unencrypted clients in even when it has TLS. `stack` sets the size of
+the daemon's own stack (default 32768, 16384 at least; see
+[Stack headroom](debugging.md#stack-headroom)). `name` is what
 discovery replies call the machine — two Amigas on one LAN stop being
 interchangeable "amiga"s — and it overrides `ENV:HOSTNAME`, which is
 the fallback (then plain `amiga`). It survives `restart` and

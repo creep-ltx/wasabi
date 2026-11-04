@@ -61,10 +61,10 @@
 #include "health.h"                  /* the machine's vital signs */
 #include "tls.h"                     /* every connection is TLS */
 
-#define VERSION_STR "wasabid 0.11b2"
+#define VERSION_STR "wasabid 0.11b4"
 /* 'used' so the optimizer cannot drop it - C:Version reads this string. */
 static const char *verstag __attribute__((used)) =
-    "$VER: wasabid 0.11b2 (17.10.2026)";
+    "$VER: wasabid 0.11b4 (4.11.2026)";
 
 #define PROTO_VERSION   1
 
@@ -307,6 +307,12 @@ static int  g_port = DEF_PORT;        /* the port we listen on */
 static char g_extra_args[128];       /* replayed on restart, so a running
                                       * allow-list and name survive a
                                       * self-update */
+static ULONG g_stack_size;           /* 'stack N' from the command line,
+                                      * else 0: replayed on restart */
+static const ULONG *g_stack_lo;      /* the stack we run on, painted with */
+static ULONG g_stack_len;            /* STACK_PAINT: 'info' tells how deep */
+static BOOL g_stack_own;             /* it went. Own block, or the Shell's */
+#define STACK_PAINT 0xDEADBEEFUL
 
 /* --- who is allowed to talk to us ---------------------------------- */
 
@@ -1642,6 +1648,30 @@ static BOOL cmd_info(int fd)
         (long)(AvailMem(MEMF_CHIP) >> 10), (long)(AvailMem(MEMF_FAST) >> 10));
     if (!send_frame(fd, T_DATA, text, n))
         return FALSE;
+    if (g_stack_lo) {
+        /* The lowest few longs are written as soon as the stack is ours
+         * (StackSwap's bookkeeping): skip to the first run of 16 painted
+         * longs, then up through the paint to the first long ever used. */
+        ULONG k = 0, words = g_stack_len / 4, used;
+        while (k + 16 <= words) {
+            ULONG j = 0;
+            while (j < 16 && g_stack_lo[k + j] == STACK_PAINT)
+                j++;
+            if (j == 16)
+                break;
+            k += j + 1;
+        }
+        while (k < words && g_stack_lo[k] == STACK_PAINT)
+            k++;
+        used = g_stack_len - k * 4;
+        n = sprintf(text, "stack %lu KB (%s), deepest %lu.%lu KB so far\n",
+                    (unsigned long)(g_stack_len >> 10),
+                    g_stack_own ? "its own" : "the Shell's",
+                    (unsigned long)(used >> 10),
+                    (unsigned long)((used & 1023) * 10 >> 10));
+        if (!send_frame(fd, T_DATA, text, n))
+            return FALSE;
+    }
     n = patches_report(text, sizeof(text), g_dbg_client >= 0);
     n += sprintf(text + n, "volumes:\n");
     if (!send_frame(fd, T_DATA, text, n))
@@ -7021,6 +7051,8 @@ static int daemon_main(int argc, char **argv)
      *                   ENV:HOSTNAME
      *   allow <cidr>    also answer this range, e.g. a Tailscale 100.64/10
      *   allow any       answer anybody at all; see the warning below
+     *   stack <bytes>   the stack to run on (main() reads it, before the
+     *                   daemon starts; skipped here)
      */
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "name") == 0 && i + 1 < argc) {
@@ -7030,6 +7062,8 @@ static int daemon_main(int argc, char **argv)
             for (p = g_name; *p; p++)
                 if (*p == ' ') *p = '-'; /* the reply is space-delimited */
             g_name_set = TRUE;
+        } else if (strcmp(argv[i], "stack") == 0 && i + 1 < argc) {
+            i++;                         /* main() has used it */
         } else if (strcmp(argv[i], "trial") == 0) {
             g_trial = TRUE;
         } else if (strcmp(argv[i], "plain") == 0) {
@@ -7078,6 +7112,9 @@ static int daemon_main(int argc, char **argv)
             n += sprintf(g_extra_args + n, " allow any");
         if (g_allow_plain && n < (LONG)sizeof(g_extra_args) - 7)
             n += sprintf(g_extra_args + n, " plain");
+        if (g_stack_size && n < (LONG)sizeof(g_extra_args) - 15)
+            n += sprintf(g_extra_args + n, " stack %lu",
+                         (unsigned long)g_stack_size);
     }
 
     /* The daemon has no console either: a requester raised by ls, get or
@@ -7620,22 +7657,30 @@ out:
 }
 
 /*
- * The daemon wants a 256 KB stack, but it gets whatever
- * the Shell that ran it had: 4 KB from OS 3.1's startup-sequence. On
- * that, listing a GadTools window (Input prefs, 3.1) went over the edge
- * and took the machine with it. So when the stack we were given is
- * smaller than STACK_MIN, run on one of our own. Everything that lives
+ * The daemon gets whatever stack the Shell that ran it had: 4 KB from
+ * OS 3.1's startup-sequence. On that, listing a GadTools window (Input
+ * prefs, 3.1) went over the edge and took the machine with it, and 16 KB
+ * was too little too (Spot: started by C:Run from a 4 KB boot shell, it
+ * stopped answering after an AGA reboot). So when the stack we were given
+ * is smaller than we want, run on one of our own. Everything that lives
  * across StackSwap() is static: locals on the old stack are not
  * reachable from the new one.
+ *
+ * How much: measured with a painted stack (Knowledge/amiga/
+ * stack-measuring.md), the deepest is 9.5 KB, listing a deeply nested
+ * MUI window; the compiler's frame sizes put the worst case (16 levels of
+ * MUI groups) near 15 KB. 32 KB is twice that. 'stack N' asks for more or
+ * less, never below STACK_FLOOR, and 'info' shows how deep it has gone.
  */
-#define STACK_MIN 262144
-/* The same figure as the version-style cookie vtcon's launchers read, and
- * as __stack for startups that honour it. The swap below is what makes it
- * hold for every start: libnix ignores __stack when a Shell or Run gave
- * us a stack, and 16 KB was too little: wasabid started by C:Run from a
- * 4 KB boot shell stopped answering after an AGA reboot. */
-long __stack = STACK_MIN;
-const char wasabid_stack_cookie[] __attribute__((used)) = "$STACK: 262144";
+#define STACK_DEF   32768
+#define STACK_FLOOR 16384
+#define STACK_CEIL  (4UL << 20)          /* a typo, not a wish */
+/* The same figure as the version-style cookie vtcon's launchers and
+ * OS 3.2's Shell read, and as __stack for startups that honour it. libnix
+ * ignores __stack when a Shell or Run gave us a stack: the swap below is
+ * what makes it hold for every start. */
+long __stack = STACK_DEF;
+const char wasabid_stack_cookie[] __attribute__((used)) = "$STACK: 32768";
 static struct StackSwapStruct g_sss;
 static int g_argc, g_rc;
 static char **g_argv;
@@ -7657,22 +7702,66 @@ static void __attribute__((noinline)) daemon_on_own_stack(void)
 unsigned __BUFSIZ__data = 1024;
 unsigned *__BUFSIZE = &__BUFSIZ__data;
 
+/* Paint the Shell's stack from its bottom to a little below where this
+ * function runs, so 'info' can tell how deep it goes. The loop calls
+ * nothing; only a task switch saves registers below us meanwhile, and
+ * that is put back before we go on. */
+static void __attribute__((noinline)) stack_paint_shells(struct Task *me)
+{
+    ULONG here, *q = (ULONG *)(((ULONG)me->tc_SPLower + 3) & ~3UL);
+    ULONG *top = &here - 64;             /* 256 bytes of room */
+
+    g_stack_lo = q;
+    g_stack_len = (ULONG)me->tc_SPUpper - (ULONG)q;
+    while (q < top)
+        *q++ = STACK_PAINT;
+}
+
 int main(int argc, char **argv)
 {
     struct Task *me = FindTask(NULL);
+    ULONG want = STACK_DEF, k;
+    int i;
 
-    if ((ULONG)((UBYTE *)me->tc_SPUpper - (UBYTE *)me->tc_SPLower) >= STACK_MIN)
+    /* 'stack N' is read here, before the daemon proper runs: it decides
+     * which stack that is. daemon_main skips it. */
+    for (i = 1; i + 1 < argc; i++)
+        if (strcmp(argv[i], "stack") == 0) {
+            LONG n = atol(argv[i + 1]);
+            if (n < STACK_FLOOR || (ULONG)n > STACK_CEIL) {
+                Printf("wasabid: stack %s is out of range, using %ld\n",
+                       (LONG)argv[i + 1],
+                       n < STACK_FLOOR ? (LONG)STACK_FLOOR : (LONG)STACK_CEIL);
+                n = n < STACK_FLOOR ? STACK_FLOOR : (LONG)STACK_CEIL;
+            }
+            want = g_stack_size = ((ULONG)n + 7) & ~7UL;
+        }
+
+    if ((ULONG)((UBYTE *)me->tc_SPUpper - (UBYTE *)me->tc_SPLower) >= want) {
+        stack_paint_shells(me);
         return daemon_main(argc, argv);
-    g_sss.stk_Lower = AllocMem(STACK_MIN, MEMF_ANY);
-    if (!g_sss.stk_Lower)
+    }
+    /* Too big to get (a typo in 'stack'): the default, then the floor,
+     * rather than the Shell's 4 KB the machine would die on. */
+    while (!(g_sss.stk_Lower = AllocMem(want, MEMF_ANY)) && want > STACK_FLOOR)
+        want = want > STACK_DEF ? STACK_DEF : STACK_FLOOR;
+    if (!g_sss.stk_Lower) {
+        stack_paint_shells(me);
         return daemon_main(argc, argv);  /* as before, on the small one */
-    g_sss.stk_Upper = (ULONG)g_sss.stk_Lower + STACK_MIN;
+    }
+    for (k = 0; k < want / 4; k++)
+        ((ULONG *)g_sss.stk_Lower)[k] = STACK_PAINT;
+    g_stack_lo = g_sss.stk_Lower;        /* kept: after the swap g_sss
+                                          * holds the Shell's stack */
+    g_stack_len = want;
+    g_stack_own = TRUE;
+    g_sss.stk_Upper = (ULONG)g_sss.stk_Lower + want;
     g_sss.stk_Pointer = (APTR)g_sss.stk_Upper;
     g_argc = argc;
     g_argv = argv;
     StackSwap(&g_sss);
     daemon_on_own_stack();
     StackSwap(&g_sss);
-    FreeMem(g_sss.stk_Lower, STACK_MIN);
+    FreeMem(g_sss.stk_Lower, g_stack_len);
     return g_rc;
 }

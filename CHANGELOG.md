@@ -5,8 +5,32 @@ What changed in each version, newest first. Betas (`0.10b4`) are on the
 files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 `wasabi ping` shows which daemon an Amiga runs.
 
-## Unreleased
+## 0.11b4 - 4 November 2026
 
+The Amiga's wasabid only. Most of it is from Spot's pull requests
+(#2, #3, #4, #8, #9, #10, #11).
+
+- **The daemon's stack, measured and settable:** wasabid runs on a
+  32 KB stack of its own (0.11b2 had 16 KB, which the deepest command
+  could outgrow; #10 had raised it to 256 KB). Measured with a painted
+  stack in FS-UAE on OS 3.1 + MUI 3.8 and OS 3.2.1 + MUI 5, the deepest
+  any command goes is 9.5 KB (`ui list` on a deeply nested MUI window);
+  the compiler's frame sizes put the worst case near 15 KB. The new
+  argument `stack N` asks for another size (16 KB at least, 4 MB at
+  most; too big to get falls back to 32 KB, then 16 KB), and survives
+  `restart` and self-update. A Shell that already gives a bigger stack
+  (`Stack 100000` before `wasabid`) is used as it is; OS 3.2's Shell
+  reads the `$STACK:` cookie, so there the daemon starts on 32 KB and
+  needs no block of its own. `wasabi info`
+  shows the size and how deep the daemon has gone, e.g.
+  `stack 32 KB (its own), deepest 9.2 KB so far`. A `$STACK: 32768`
+  cookie and `__stack` say the same to launchers that read them.
+- **The screen list no longer holds Intuition's lock while sending:**
+  `wasabi screen` walked the screens under `LockIBase()` and sent each
+  line from inside it, so a slow network froze the mouse, the keyboard
+  and every other program meanwhile. The lines are now collected under
+  the lock and sent after it, as `windows` does; a list that does not fit
+  ends with `too many screens; the list is cut short`.
 - **One daemon per Amiga:** a second non-trial `wasabid` now prints
   `wasabid: already running` and exits with RETURN_WARN (5) instead of
   patching the same exec vectors as the first. The guard is a public
@@ -24,7 +48,15 @@ files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
   buttons) is now listed as one `button` or `toggle`, labelled with its
   Text, or its tooltip when it has no Text. The window's root group and
   groups that only hold other gadgets are not listed, and the gadgets
-  inside a group button are still listed.
+  inside a group button are still listed. The toggle-or-button test
+  reads a private MUI field, checked on MUI 3.8 (muimaster 19.35) only.
+- **Selecta's lists and text:** its own list class (AAList) is listed
+  by `ui list` as a list with one row item per row (text, place,
+  selected), and its text class (AAText) as a label with the text shown.
+- **Menu sub-items that exclude each other:** picking a `CHECKIT`
+  sub-item with `ui menu` now unticks its `MutualExclude` partners among
+  the other sub-items of the same item, as Intuition does; before, only
+  top-level items were handled.
 
 ## 0.11b3 - 28 October 2026
 
