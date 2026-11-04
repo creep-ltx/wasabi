@@ -1888,10 +1888,27 @@ static BOOL put_frame(int cl, UBYTE tag, UBYTE *p, LONG len)
         DeleteFile(c->xfer_tmp);
         return send_perr(fd, "size mismatch");
     }
-    DeleteFile(c->xfer_path);            /* Rename won't clobber */
-    if (!Rename(c->xfer_tmp, (STRPTR)c->xfer_path)) {
-        DeleteFile(c->xfer_tmp);
-        return send_err(fd, "rename into place failed");
+    /* Rename won't clobber, so the old file is moved aside, not deleted:
+     * if the final Rename fails the target must still be there. */
+    {
+        char bak[300];
+        BPTR l = Lock((STRPTR)c->xfer_path, ACCESS_READ);
+        BOOL had = l != 0;
+        if (l) UnLock(l);
+        sprintf(bak, "%.290s.wasabi-bak", c->xfer_path);
+        if (had) {
+            DeleteFile(bak);             /* stale leftover, if any */
+            if (!Rename((STRPTR)c->xfer_path, bak)) {
+                DeleteFile(c->xfer_tmp);
+                return send_err(fd, "cannot move the old file aside");
+            }
+        }
+        if (!Rename(c->xfer_tmp, (STRPTR)c->xfer_path)) {
+            if (had) Rename(bak, (STRPTR)c->xfer_path);  /* undo */
+            DeleteFile(c->xfer_tmp);
+            return send_err(fd, "rename into place failed");
+        }
+        if (had) DeleteFile(bak);
     }
     if (c->xfer_prot != 0xFFFFFFFFUL)
         SetProtection((STRPTR)c->xfer_path, (LONG)c->xfer_prot);
