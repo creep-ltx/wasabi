@@ -3,6 +3,7 @@
 [![test](https://github.com/creep-ltx/wasabi/actions/workflows/test.yml/badge.svg)](https://github.com/creep-ltx/wasabi/actions/workflows/test.yml)
 [![release](https://img.shields.io/github/v/release/creep-ltx/wasabi)](https://github.com/creep-ltx/wasabi/releases)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![wasabi MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/creep-ltx/wasabi/badges/score.svg)](https://glama.ai/mcp/servers/creep-ltx/wasabi)
 
 **Build on your PC. Run on your Amiga.** Deploy, debug and drive a real
 Amiga over the network - from a Linux, macOS or Windows PC, a phone, an
