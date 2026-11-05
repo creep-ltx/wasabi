@@ -5,6 +5,26 @@ What changed in each version, newest first. Betas (`0.10b4`) are on the
 files on the [releases page](https://github.com/creep-ltx/wasabi/releases).
 `wasabi ping` shows which daemon an Amiga runs.
 
+## MCP server 0.2 - 5 November 2026
+
+The MCP server only; the `wasabi` command and wasabid are unchanged.
+
+- **Every tool says what it returns and when to use it:** the 30 tool
+  descriptions now give the output's shape (`amiga_ls`'s columns,
+  `amiga_ps`'s header, `amiga_run`'s `[return code N]`), defaults
+  (what an empty path or a missing timeout means), which neighbouring
+  tool to use instead (`amiga_windows` vs `amiga_ui_list`,
+  `amiga_break` vs `amiga_kill`), and what can lose work. Glama's
+  scores had marked them down for this (`amiga_ls` 2.5/5).
+- **Tool annotations:** each tool has a title and the MCP hints
+  `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+  `openWorldHint`, so a client can let the looking tools run without
+  asking and ask before `amiga_run`, `amiga_write_file` or `amiga_kill`.
+- **`amiga_write_file` answers `wrote N bytes to PATH`;** it answered
+  `(no output)` before, because `wasabi put` says it on stderr.
+- `enum`s on `amiga_mouse`'s `action` and `button` and `amiga_drag`'s
+  `button`.
+
 ## 0.11b4 - 4 November 2026
 
 The Amiga's wasabid only. Most of it is from Spot's pull requests
